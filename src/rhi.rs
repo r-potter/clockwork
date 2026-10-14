@@ -53,3 +53,26 @@ pub fn create(api: GraphicsApi) -> Result<Box<dyn RenderHardwareInterface>> {
         GraphicsApi::Vulkan => Box::new(VulkanRenderHardwareInterface::new()?),
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Every supported graphics API.
+    const ALL_GRAPHICS_APIS: &[GraphicsApi] = &[GraphicsApi::Vulkan];
+
+    // Fails to compile when a variant is added to `GraphicsApi`, as a reminder
+    // to add it to `ALL_GRAPHICS_APIS`.
+    const _: () = match GraphicsApi::Vulkan {
+        GraphicsApi::Vulkan => (),
+    };
+
+    #[test]
+    fn create_succeeds_for_every_graphics_api() {
+        for &api in ALL_GRAPHICS_APIS {
+            let rhi = create(api)
+                .unwrap_or_else(|err| panic!("failed to create {api:?} backend: {err:?}"));
+            assert_eq!(rhi.api(), api);
+        }
+    }
+}
