@@ -14,12 +14,13 @@
 
 mod device;
 mod device_selection;
+mod frames;
 mod physical_device;
 mod surface;
 mod swapchain;
 
 use std::ffi::{CStr, c_void};
-use std::fmt;
+use std::{fmt, slice};
 
 use anyhow::{Context, Result, bail};
 use ash::{Entry, Instance, ext::debug_utils, vk};
@@ -29,6 +30,7 @@ use tracing::{Level, debug, error, info, trace, warn};
 use super::{GraphicsApi, RenderHardwareInterface, WindowSize, WindowTarget};
 use device::LogicalDevice;
 use device_selection::{Candidate, Selection};
+use frames::Frames;
 use physical_device::PhysicalDevice;
 use surface::Surface;
 use swapchain::Swapchain;
@@ -54,18 +56,30 @@ const ENABLE_VALIDATION: bool = cfg!(debug_assertions);
 /// Khronos validation layer, shipped with the Vulkan SDK.
 const VALIDATION_LAYER: &CStr = c"VK_LAYER_KHRONOS_validation";
 
+/// The colour each frame is cleared to, as linear RGBA. Swapchain images use
+/// an sRGB format, so this appears brighter on screen than the values suggest.
+const CLEAR_COLOUR: [f32; 4] = [0.02, 0.05, 0.1, 1.0];
+
 /// Vulkan render hardware interface.
 ///
-/// Owns the Vulkan instance, the selected physical device, the logical device
-/// and, unless headless or suspended, the window surface and swapchain.
+/// Owns the Vulkan instance, the selected physical device, the logical device,
+/// the resources for frames in flight and, unless headless or suspended, the
+/// window surface and swapchain.
 ///
 /// Fields are dropped in declaration order, so each is declared before the
 /// objects it was created from.
 pub struct VulkanRenderHardwareInterface {
-    /// The window size from the latest [`resize`](RenderHardwareInterface::resize),
-    /// if the swapchain has not been recreated for it yet. Applied at the
-    /// start of the next frame.
-    pending_window_size: Option<WindowSize>,
+    /// The window's latest size, from creation, [`resume`] or [`resize`].
+    /// `None` when headless or suspended.
+    ///
+    /// [`resume`]: RenderHardwareInterface::resume
+    /// [`resize`]: RenderHardwareInterface::resize
+    window_size: Option<WindowSize>,
+    /// Set when acquiring or presenting reports that the swapchain no longer
+    /// matches the surface, so that it is recreated at the start of the next
+    /// frame.
+    swapchain_out_of_date: bool,
+    frames: Frames,
     /// `None` when headless, while suspended, or while the window has no area.
     swapchain: Option<Swapchain>,
     device: LogicalDevice,
@@ -150,9 +164,12 @@ impl VulkanRenderHardwareInterface {
         } = device_selection::select(candidates)?;
 
         let device = LogicalDevice::new(&instance.instance, &physical_device, queue_families)?;
+        let frames = Frames::new(&device)?;
 
         let mut rhi = Self {
-            pending_window_size: None,
+            window_size,
+            swapchain_out_of_date: false,
+            frames,
             swapchain: None,
             device,
             surface,
@@ -186,7 +203,188 @@ impl VulkanRenderHardwareInterface {
             window_size,
             self.swapchain.as_ref(),
         )?;
+        self.swapchain_out_of_date = false;
         Ok(())
+    }
+
+    /// Acquires a swapchain image, clears it to [`CLEAR_COLOUR`] and presents
+    /// it, using the current frame's resources.
+    ///
+    /// Returns whether the swapchain should be recreated before the next
+    /// frame. If it is out of date, nothing is rendered or presented.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if any Vulkan call fails, other than with
+    /// `ERROR_OUT_OF_DATE_KHR`.
+    fn draw_frame(&self, swapchain: &Swapchain) -> Result<bool> {
+        let device = self.device.handle();
+        let frame = self.frames.current();
+        let present_queue = self
+            .device
+            .present_queue()
+            .context("a windowed Vulkan backend has no present queue")?;
+
+        // SAFETY (all `unsafe` blocks in this function): every handle used
+        // was created on `device`, or by `swapchain` on `device`, and each
+        // info structure is valid for the duration of its call.
+
+        // Wait until the GPU has finished the last frame that used these
+        // resources.
+        unsafe { device.wait_for_fences(&[frame.in_flight], true, u64::MAX) }
+            .context("failed to wait for Vulkan frame fence")?;
+
+        // `image_acquired` is unsignalled: the submit that waited on it last
+        // time has finished, as its fence has signalled.
+        let (image_index, mut out_of_date) =
+            match unsafe { swapchain.acquire(frame.image_acquired) } {
+                Ok(result) => result,
+                // Leave the fence signalled, as nothing will be submitted to
+                // signal it again.
+                Err(vk::Result::ERROR_OUT_OF_DATE_KHR) => return Ok(true),
+                Err(err) => return Err(err).context("failed to acquire Vulkan swapchain image"),
+            };
+        let (image, image_view) = swapchain.image(image_index);
+
+        unsafe { device.reset_fences(&[frame.in_flight]) }
+            .context("failed to reset Vulkan frame fence")?;
+        // The fence wait above guarantees that the GPU has finished with the
+        // command buffer.
+        unsafe { frame.reset_commands(device) }?;
+
+        let command_buffer = frame.command_buffer;
+        let begin_info = vk::CommandBufferBeginInfo::default()
+            .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
+        unsafe { device.begin_command_buffer(command_buffer, &begin_info) }
+            .context("failed to begin Vulkan command buffer")?;
+        unsafe {
+            record_clear(
+                device,
+                command_buffer,
+                image,
+                image_view,
+                swapchain.extent(),
+            )
+        };
+        unsafe { device.end_command_buffer(command_buffer) }
+            .context("failed to end Vulkan command buffer")?;
+
+        // Wait for the image to be acquired before writing to it, and signal
+        // when every command, including the final layout transition, is done.
+        let wait = vk::SemaphoreSubmitInfo::default()
+            .semaphore(frame.image_acquired)
+            .stage_mask(vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT);
+        let signal = vk::SemaphoreSubmitInfo::default()
+            .semaphore(swapchain.render_finished(image_index))
+            .stage_mask(vk::PipelineStageFlags2::ALL_COMMANDS);
+        let command_buffer_info =
+            vk::CommandBufferSubmitInfo::default().command_buffer(command_buffer);
+        let submit_info = vk::SubmitInfo2::default()
+            .wait_semaphore_infos(slice::from_ref(&wait))
+            .command_buffer_infos(slice::from_ref(&command_buffer_info))
+            .signal_semaphore_infos(slice::from_ref(&signal));
+        unsafe {
+            device.queue_submit2(
+                self.device.graphics_queue(),
+                slice::from_ref(&submit_info),
+                frame.in_flight,
+            )
+        }
+        .context("failed to submit Vulkan frame")?;
+
+        // The present queue's family can present to the surface, checked by
+        // device selection and on resume.
+        match unsafe { swapchain.present(present_queue, image_index) } {
+            Ok(suboptimal) => out_of_date |= suboptimal,
+            Err(vk::Result::ERROR_OUT_OF_DATE_KHR) => out_of_date = true,
+            Err(err) => return Err(err).context("failed to present Vulkan swapchain image"),
+        }
+        Ok(out_of_date)
+    }
+}
+
+/// Records commands into `command_buffer` that clear `image` to
+/// [`CLEAR_COLOUR`] and leave it ready to present.
+///
+/// # Safety
+///
+/// `command_buffer` must be recording, and `image` and `image_view` must be a
+/// swapchain image of size `extent` and a view of it, all created on `device`.
+unsafe fn record_clear(
+    device: &ash::Device,
+    command_buffer: vk::CommandBuffer,
+    image: vk::Image,
+    image_view: vk::ImageView,
+    extent: vk::Extent2D,
+) {
+    let subresource_range = vk::ImageSubresourceRange {
+        aspect_mask: vk::ImageAspectFlags::COLOR,
+        base_mip_level: 0,
+        level_count: 1,
+        base_array_layer: 0,
+        layer_count: 1,
+    };
+
+    // Transition the image for rendering. Its previous contents are not
+    // needed, so the old layout is `UNDEFINED`. The source stage matches the
+    // stage the submit waits for the acquire semaphore at, so that the
+    // transition happens after the image has been acquired.
+    let to_attachment = vk::ImageMemoryBarrier2::default()
+        .src_stage_mask(vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT)
+        .src_access_mask(vk::AccessFlags2::NONE)
+        .dst_stage_mask(vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT)
+        .dst_access_mask(vk::AccessFlags2::COLOR_ATTACHMENT_WRITE)
+        .old_layout(vk::ImageLayout::UNDEFINED)
+        .new_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
+        .image(image)
+        .subresource_range(subresource_range);
+
+    // Clearing happens when rendering begins, as the attachment's load
+    // operation.
+    let colour_attachment = vk::RenderingAttachmentInfo::default()
+        .image_view(image_view)
+        .image_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
+        .load_op(vk::AttachmentLoadOp::CLEAR)
+        .store_op(vk::AttachmentStoreOp::STORE)
+        .clear_value(vk::ClearValue {
+            color: vk::ClearColorValue {
+                float32: CLEAR_COLOUR,
+            },
+        });
+    let rendering_info = vk::RenderingInfo::default()
+        .render_area(vk::Rect2D {
+            offset: vk::Offset2D::default(),
+            extent,
+        })
+        .layer_count(1)
+        .color_attachments(slice::from_ref(&colour_attachment));
+
+    // Transition the image for presenting, after rendering has written to it.
+    // Presenting is ordered by the render-finished semaphore, so there is no
+    // destination stage.
+    let to_present = vk::ImageMemoryBarrier2::default()
+        .src_stage_mask(vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT)
+        .src_access_mask(vk::AccessFlags2::COLOR_ATTACHMENT_WRITE)
+        .dst_stage_mask(vk::PipelineStageFlags2::NONE)
+        .dst_access_mask(vk::AccessFlags2::NONE)
+        .old_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
+        .new_layout(vk::ImageLayout::PRESENT_SRC_KHR)
+        .image(image)
+        .subresource_range(subresource_range);
+
+    // SAFETY: Guaranteed by the caller, and each info structure is valid for
+    // the duration of its call.
+    unsafe {
+        device.cmd_pipeline_barrier2(
+            command_buffer,
+            &vk::DependencyInfo::default().image_memory_barriers(slice::from_ref(&to_attachment)),
+        );
+        device.cmd_begin_rendering(command_buffer, &rendering_info);
+        device.cmd_end_rendering(command_buffer);
+        device.cmd_pipeline_barrier2(
+            command_buffer,
+            &vk::DependencyInfo::default().image_memory_barriers(slice::from_ref(&to_present)),
+        );
     }
 }
 
@@ -441,7 +639,8 @@ impl RenderHardwareInterface for VulkanRenderHardwareInterface {
 
     fn suspend(&mut self) {
         // `resume` provides the window's size at that point.
-        self.pending_window_size = None;
+        self.window_size = None;
+        self.swapchain_out_of_date = false;
         // The swapchain must be destroyed before its surface.
         self.swapchain = None;
         self.surface = None;
@@ -470,31 +669,42 @@ impl RenderHardwareInterface for VulkanRenderHardwareInterface {
             );
         }
         self.surface = Some(surface);
+        self.window_size = Some(target.size);
 
         self.recreate_swapchain(target.size)
     }
 
     fn resize(&mut self, size: WindowSize) {
-        if self.surface.is_some() {
-            self.pending_window_size = Some(size);
+        if self.window_size.is_some() {
+            self.window_size = Some(size);
         }
     }
 
     fn render_frame(&mut self) -> Result<()> {
-        // Recreate the swapchain once for all resizes since the last frame.
-        // Window systems may also report a resize without a change in size.
-        if let Some(size) = self.pending_window_size.take() {
-            let unchanged = self
-                .swapchain
-                .as_ref()
-                .is_some_and(|swapchain| swapchain.window_size() == size);
-            if !unchanged {
-                self.recreate_swapchain(size)?;
-            }
+        let Some(window_size) = self.window_size else {
+            // Headless or suspended.
+            return Ok(());
+        };
+
+        // Recreate the swapchain once for everything since the last frame: any
+        // number of resizes, or an out-of-date result from acquiring or
+        // presenting. Window systems may report a resize without a change in
+        // size, so compare with the size the swapchain was created for.
+        let size_changed = self
+            .swapchain
+            .as_ref()
+            .is_none_or(|swapchain| swapchain.window_size() != window_size);
+        if size_changed || self.swapchain_out_of_date {
+            self.recreate_swapchain(window_size)?;
         }
 
-        // TODO: acquire a swapchain image, record and submit rendering work,
-        // and present.
+        let Some(swapchain) = &self.swapchain else {
+            // The window has no area, so there is nothing to render to.
+            return Ok(());
+        };
+        let out_of_date = self.draw_frame(swapchain)?;
+        self.swapchain_out_of_date = out_of_date;
+        self.frames.advance();
         Ok(())
     }
 }

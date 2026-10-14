@@ -1,6 +1,7 @@
 //! Swapchains, which hold the images presented to a window.
 
 use anyhow::{Context, Result, bail};
+use ash::prelude::VkResult;
 use ash::{Instance, khr, vk};
 use tracing::info;
 
@@ -41,17 +42,23 @@ const PREFERRED_COMPOSITE_ALPHA: &[vk::CompositeAlphaFlagsKHR] = &[
     vk::CompositeAlphaFlagsKHR::POST_MULTIPLIED,
 ];
 
-/// A swapchain for a surface, and a view of each of its images.
+/// A swapchain for a surface, a view of each of its images, and a semaphore
+/// for presenting each image.
 ///
 /// Destroyed when dropped, so the owner must drop it before the surface and
 /// the logical device it was created from.
 pub struct Swapchain {
-    /// Kept to destroy the image views.
+    /// Kept to destroy the image views and semaphores.
     device: ash::Device,
     swapchain_fn: khr::swapchain::Device,
     swapchain: vk::SwapchainKHR,
     images: Vec<vk::Image>,
     image_views: Vec<vk::ImageView>,
+    /// Signalled when rendering to each image has finished, and waited on to
+    /// present it. Indexed by image rather than by frame in flight: a present
+    /// may still be waiting on its semaphore after the frame's fence has
+    /// signalled, but not once the same image has been acquired again.
+    render_finished: Vec<vk::Semaphore>,
     format: vk::SurfaceFormatKHR,
     extent: vk::Extent2D,
     /// The window size the swapchain was created for. May differ from
@@ -172,6 +179,7 @@ impl Swapchain {
             swapchain,
             images: Vec::new(),
             image_views: Vec::new(),
+            render_finished: Vec::new(),
             format,
             extent,
             window_size,
@@ -197,6 +205,14 @@ impl Swapchain {
             let view = unsafe { this.device.create_image_view(&view_info, None) }
                 .context("failed to create Vulkan swapchain image view")?;
             this.image_views.push(view);
+
+            // SAFETY: The create info is valid for the duration of the call.
+            let semaphore = unsafe {
+                this.device
+                    .create_semaphore(&vk::SemaphoreCreateInfo::default(), None)
+            }
+            .context("failed to create Vulkan semaphore")?;
+            this.render_finished.push(semaphore);
         }
 
         info!(
@@ -230,16 +246,78 @@ impl Swapchain {
     pub fn window_size(&self) -> WindowSize {
         self.window_size
     }
+
+    /// Image `index` and a view of it.
+    pub fn image(&self, index: u32) -> (vk::Image, vk::ImageView) {
+        let index = index as usize;
+        (self.images[index], self.image_views[index])
+    }
+
+    /// The semaphore to signal when rendering to image `index` has finished,
+    /// which [`present`](Self::present) waits on.
+    pub fn render_finished(&self, index: u32) -> vk::Semaphore {
+        self.render_finished[index as usize]
+    }
+
+    /// Acquires the next image to render to, signalling `image_acquired` when
+    /// it is ready. Waits for as long as it takes for an image to become
+    /// available.
+    ///
+    /// Returns the image's index, and whether the swapchain no longer matches
+    /// the surface exactly (`SUBOPTIMAL_KHR`) and should be recreated. Returns
+    /// `Err(ERROR_OUT_OF_DATE_KHR)` if it can no longer be used at all.
+    ///
+    /// # Safety
+    ///
+    /// `image_acquired` must be unsignalled, with no pending signal or wait.
+    pub unsafe fn acquire(&self, image_acquired: vk::Semaphore) -> VkResult<(u32, bool)> {
+        // SAFETY: Guaranteed by the caller, and the swapchain is valid.
+        unsafe {
+            self.swapchain_fn.acquire_next_image(
+                self.swapchain,
+                u64::MAX,
+                image_acquired,
+                vk::Fence::null(),
+            )
+        }
+    }
+
+    /// Queues image `index` for presentation on `queue`, once its
+    /// [`render_finished`](Self::render_finished) semaphore is signalled.
+    ///
+    /// Returns whether the swapchain should be recreated (`SUBOPTIMAL_KHR`),
+    /// or `Err(ERROR_OUT_OF_DATE_KHR)` if it can no longer be used at all.
+    ///
+    /// # Safety
+    ///
+    /// Image `index` must have been acquired and not yet presented, work
+    /// that signals its semaphore must have been submitted, and `queue` must
+    /// support presenting to the swapchain's surface.
+    pub unsafe fn present(&self, queue: vk::Queue, index: u32) -> VkResult<bool> {
+        let wait_semaphores = [self.render_finished(index)];
+        let swapchains = [self.swapchain];
+        let indices = [index];
+        let present_info = vk::PresentInfoKHR::default()
+            .wait_semaphores(&wait_semaphores)
+            .swapchains(&swapchains)
+            .image_indices(&indices);
+        // SAFETY: Guaranteed by the caller, and `present_info` is valid for
+        // the duration of the call.
+        unsafe { self.swapchain_fn.queue_present(queue, &present_info) }
+    }
 }
 
 impl Drop for Swapchain {
     fn drop(&mut self) {
-        // SAFETY: The views and swapchain were created by `new` and are
-        // destroyed exactly once here. Waiting for the device to be idle
-        // ensures that no submitted work still uses them.
+        // SAFETY: The semaphores, views and swapchain were created by `new`
+        // and are destroyed exactly once here. Waiting for the device to be
+        // idle ensures that no submitted work still uses them.
         unsafe {
             // Nothing useful can be done if this fails while dropping.
             let _ = self.device.device_wait_idle();
+            for &semaphore in &self.render_finished {
+                self.device.destroy_semaphore(semaphore, None);
+            }
             for &view in &self.image_views {
                 self.device.destroy_image_view(view, None);
             }

@@ -18,7 +18,6 @@ use ash::{Instance, vk};
 /// `ash` 0.38 has no Vulkan 1.4 structures, so 1.4 features and properties are
 /// not included.
 #[derive(Debug)]
-#[expect(dead_code, reason = "fields will be read by device selection")]
 pub struct PhysicalDevice {
     pub handle: vk::PhysicalDevice,
     pub properties: Properties,

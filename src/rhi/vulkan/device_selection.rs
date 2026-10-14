@@ -62,6 +62,13 @@ const REQUIREMENTS: &[Requirement] = &[
         is_met: |candidate| candidate.device.api_version() >= API_VERSION,
     },
     Requirement {
+        description: "supports dynamic rendering and synchronization2",
+        is_met: |candidate| {
+            let features = &candidate.device.features.vulkan13;
+            features.dynamic_rendering == vk::TRUE && features.synchronization2 == vk::TRUE
+        },
+    },
+    Requirement {
         description: "has a queue family that supports graphics",
         is_met: |candidate| graphics_families(&candidate.device).next().is_some(),
     },
@@ -245,10 +252,14 @@ mod tests {
             flags: vk::MemoryHeapFlags::DEVICE_LOCAL,
         };
 
+        let mut features = Features::default();
+        features.vulkan13.dynamic_rendering = vk::TRUE;
+        features.vulkan13.synchronization2 = vk::TRUE;
+
         PhysicalDevice {
             handle: vk::PhysicalDevice::null(),
             properties,
-            features: Features::default(),
+            features,
             memory_properties,
             queue_families: vec![vk::QueueFamilyProperties {
                 queue_flags: vk::QueueFlags::GRAPHICS,
@@ -383,6 +394,25 @@ mod tests {
             device("new", vk::PhysicalDeviceType::INTEGRATED_GPU, 8 * GIB),
         ];
         assert_eq!(selected_name(devices), "new");
+    }
+
+    #[test]
+    fn rejects_devices_without_dynamic_rendering() {
+        let mut no_dynamic_rendering = device(
+            "no dynamic rendering",
+            vk::PhysicalDeviceType::DISCRETE_GPU,
+            16 * GIB,
+        );
+        no_dynamic_rendering.features.vulkan13.dynamic_rendering = vk::FALSE;
+        let devices = vec![
+            no_dynamic_rendering,
+            device(
+                "dynamic rendering",
+                vk::PhysicalDeviceType::INTEGRATED_GPU,
+                8 * GIB,
+            ),
+        ];
+        assert_eq!(selected_name(devices), "dynamic rendering");
     }
 
     #[test]

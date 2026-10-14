@@ -35,28 +35,19 @@ Outstanding tasks and future work.
       requires `VK_KHR_swapchain`, a queue family that can present, and a
       surface format and present mode. The swapchain is recreated on resize,
       and destroyed and recreated with the surface on suspend and resume.
-- [ ] **Render and present frames.** Fill in the `TODO` in
-      `VulkanRenderHardwareInterface::render_frame`: acquire swapchain
-      images, record and submit command buffers to the graphics queue, and
-      present on the present queue, with semaphores and fences to
-      synchronise them.
-  - Swapchain recreation is already deferred: `resize()` records the latest
-    size in `pending_window_size`, and `render_frame` recreates the
-    swapchain once at the start of the frame. Resize events are still
-    required, because on Wayland the swapchain does not go out of date when
-    the window is resized.
-  - `ERROR_OUT_OF_DATE_KHR` and `SUBOPTIMAL_KHR` from acquire and present
-    should also trigger recreation at the start of the next frame. They
-    give no new size, so `render_frame` needs a way to recreate with the
-    current size, for example by keeping the last known window size and a
-    separate "needs recreation" flag.
-
-  Also enable the device features the renderer uses (such as Vulkan 1.3's
-  `dynamic_rendering` and `synchronization2`), and remove the
-  `#[expect(dead_code)]` attributes on the queues in
-  `src/rhi/vulkan/device.rs`.
-- [ ] **Use `VK_EXT_swapchain_maintenance1` when available.** Depends on
-      "Render and present frames". Without it, there is no way to know when
+- [x] **Render and present frames.** `render_frame` in
+      `src/rhi/vulkan.rs` acquires a swapchain image, clears it to
+      `CLEAR_COLOUR` with dynamic rendering, and presents it, with two frames
+      in flight (`src/rhi/vulkan/frames.rs`) and a render-finished semaphore
+      per swapchain image. Resizes and `OUT_OF_DATE`/`SUBOPTIMAL` results
+      recreate the swapchain once at the start of the next frame. Vulkan
+      1.3's `dynamic_rendering` and `synchronization2` are enabled and
+      required.
+- [ ] **Render something other than a clear.** Replace `record_clear` with
+      real rendering: pipelines, shaders, buffers and descriptors, exposed
+      through the `RenderHardwareInterface` as opaque handles.
+- [ ] **Use `VK_EXT_swapchain_maintenance1` when available.** Without it,
+      there is no way to know when
       the presentation engine has finished with a swapchain's images, so
       `Swapchain::drop` in `src/rhi/vulkan/swapchain.rs` waits for the whole
       device to be idle before destroying it, on every recreation. With it:
@@ -104,13 +95,14 @@ Outstanding tasks and future work.
       frame, calls `App::update` (still a stub), then
       `RenderHardwareInterface::render_frame`.
 - [ ] **Add frame pacing.** The `winit` event loop runs in
-      `ControlFlow::Poll` mode so the engine can pace frames itself, but
-      nothing limits the frame rate yet: the stub frame loop runs hundreds of
-      thousands of frames per second and uses 100% of a CPU core while the
-      window is open. Limit the frame rate, for example by waiting on vsync
-      when presenting or by sleeping until the next frame is due. The swapchain uses the FIFO
-      present mode, which waits on vsync; revisit this (for example, offering
-      `MAILBOX` where supported) if the engine paces frames itself.
+      `ControlFlow::Poll` mode so the engine can pace frames itself. For now,
+      the swapchain's FIFO present mode limits the frame rate to the
+      display's refresh rate when there is a window (about 60 frames per
+      second and 6% of a CPU core on the development machine). Nothing limits
+      it while the window has no area or when headless, when the loop spins
+      at 100% of a CPU core. Decide how the engine paces frames (for example,
+      sleeping until the next frame is due, or offering `MAILBOX` where
+      supported, with a frame rate limit), and handle those cases too.
 - [ ] **Upgrade to `winit` 0.31 once it is stable.** We are on 0.30.13;
       0.31 is in beta (0.31.0-beta.3 at the time of writing). 0.31 splits
       surface handling out of `resumed`/`suspended`, which become app

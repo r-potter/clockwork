@@ -14,10 +14,8 @@ use super::physical_device::PhysicalDevice;
 pub struct LogicalDevice {
     device: ash::Device,
     queue_families: QueueFamilies,
-    #[expect(dead_code, reason = "will be used to submit rendering work")]
     graphics_queue: vk::Queue,
     /// `None` when headless.
-    #[expect(dead_code, reason = "will be used to present swapchain images")]
     present_queue: Option<vk::Queue>,
 }
 
@@ -25,8 +23,9 @@ impl LogicalDevice {
     /// Creates a logical device on `physical_device`, with one queue from each
     /// of `queue_families`.
     ///
-    /// If `queue_families` has a present family, `VK_KHR_swapchain` is
-    /// enabled.
+    /// Enables the Vulkan 1.3 `dynamic_rendering` and `synchronization2`
+    /// features, which device selection requires. If `queue_families` has a
+    /// present family, `VK_KHR_swapchain` is also enabled.
     ///
     /// # Errors
     ///
@@ -59,9 +58,13 @@ impl LogicalDevice {
             extensions.push(khr::swapchain::NAME.as_ptr());
         }
 
+        let mut vulkan13_features = vk::PhysicalDeviceVulkan13Features::default()
+            .dynamic_rendering(true)
+            .synchronization2(true);
         let create_info = vk::DeviceCreateInfo::default()
             .queue_create_infos(&queue_infos)
-            .enabled_extension_names(&extensions);
+            .enabled_extension_names(&extensions)
+            .push_next(&mut vulkan13_features);
         // SAFETY: `physical_device` was enumerated from `instance`, and
         // `create_info` and the structures it points to are valid for the
         // duration of the call. Selection checked that the queue families and
@@ -91,6 +94,17 @@ impl LogicalDevice {
     /// The queue families the device's queues were created from.
     pub fn queue_families(&self) -> QueueFamilies {
         self.queue_families
+    }
+
+    /// The queue to submit rendering work to.
+    pub fn graphics_queue(&self) -> vk::Queue {
+        self.graphics_queue
+    }
+
+    /// The queue to present swapchain images on, or `None` when headless.
+    /// May be the same queue as [`graphics_queue`](Self::graphics_queue).
+    pub fn present_queue(&self) -> Option<vk::Queue> {
+        self.present_queue
     }
 }
 
