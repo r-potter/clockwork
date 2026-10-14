@@ -6,14 +6,16 @@ use std::ffi::CStr;
 use std::ptr;
 
 use anyhow::{Context, Result};
-use ash::{Instance, vk};
+use ash::{Instance, ext, vk};
 
 /// A Vulkan physical device and its immutable properties.
 ///
 /// Everything is queried once, on creation. The version-specific structures
 /// (`vulkan11`, `vulkan12`, `vulkan13`) are only queried if the device
-/// supports that Vulkan version, and are left zeroed otherwise; check
-/// [`PhysicalDevice::api_version`] before relying on them.
+/// supports that Vulkan version, and extension structures only if it supports
+/// the extension. Otherwise they are left zeroed; check
+/// [`PhysicalDevice::api_version`] or
+/// [`PhysicalDevice::supports_extension`] before relying on them.
 ///
 /// `ash` 0.38 has no Vulkan 1.4 structures, so 1.4 features and properties are
 /// not included.
@@ -41,7 +43,8 @@ pub struct Properties {
     pub vulkan13: vk::PhysicalDeviceVulkan13Properties<'static>,
 }
 
-/// Device features, grouped by the Vulkan version that introduced them.
+/// Device features, grouped by the Vulkan version or extension that
+/// introduced them.
 ///
 /// The `p_next` pointers are always null.
 #[derive(Debug, Default)]
@@ -52,6 +55,8 @@ pub struct Features {
     pub vulkan11: vk::PhysicalDeviceVulkan11Features<'static>,
     pub vulkan12: vk::PhysicalDeviceVulkan12Features<'static>,
     pub vulkan13: vk::PhysicalDeviceVulkan13Features<'static>,
+    /// `VK_EXT_shader_object` features.
+    pub shader_object: vk::PhysicalDeviceShaderObjectFeaturesEXT<'static>,
 }
 
 impl PhysicalDevice {
@@ -81,6 +86,10 @@ impl PhysicalDevice {
         // `instance`, and every structure passed in is valid for the call.
         let core_properties = unsafe { instance.get_physical_device_properties(handle) };
         let api_version = core_properties.api_version;
+        // Queried first, as extension feature structures may only be chained
+        // if the device supports the extension.
+        let extensions = unsafe { instance.enumerate_device_extension_properties(handle) }
+            .context("failed to enumerate Vulkan device extensions")?;
 
         let mut properties = Properties {
             core: core_properties,
@@ -110,6 +119,9 @@ impl PhysicalDevice {
             if include_vulkan13 {
                 features2 = features2.push_next(&mut features.vulkan13);
             }
+            if extensions_include(&extensions, ext::shader_object::NAME) {
+                features2 = features2.push_next(&mut features.shader_object);
+            }
             unsafe { instance.get_physical_device_features2(handle, &mut features2) };
 
             // The chained structures point at each other; clear the pointers
@@ -120,13 +132,12 @@ impl PhysicalDevice {
             features.vulkan11.p_next = ptr::null_mut();
             features.vulkan12.p_next = ptr::null_mut();
             features.vulkan13.p_next = ptr::null_mut();
+            features.shader_object.p_next = ptr::null_mut();
         }
 
         let memory_properties = unsafe { instance.get_physical_device_memory_properties(handle) };
         let queue_families =
             unsafe { instance.get_physical_device_queue_family_properties(handle) };
-        let extensions = unsafe { instance.enumerate_device_extension_properties(handle) }
-            .context("failed to enumerate Vulkan device extensions")?;
 
         Ok(Self {
             handle,
@@ -177,8 +188,13 @@ impl PhysicalDevice {
 
     /// Whether the device supports the extension `name`.
     pub fn supports_extension(&self, name: &CStr) -> bool {
-        self.extensions
-            .iter()
-            .any(|extension| extension.extension_name_as_c_str() == Ok(name))
+        extensions_include(&self.extensions, name)
     }
+}
+
+/// Whether `extensions` includes the extension `name`.
+fn extensions_include(extensions: &[vk::ExtensionProperties], name: &CStr) -> bool {
+    extensions
+        .iter()
+        .any(|extension| extension.extension_name_as_c_str() == Ok(name))
 }

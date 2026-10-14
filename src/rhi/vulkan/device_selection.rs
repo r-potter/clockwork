@@ -13,7 +13,7 @@
 use std::cmp::Ordering;
 
 use anyhow::{Result, bail};
-use ash::{khr, vk};
+use ash::{ext, khr, vk};
 use tracing::info;
 
 use super::API_VERSION;
@@ -60,6 +60,21 @@ const REQUIREMENTS: &[Requirement] = &[
         // supports the version.
         description: "supports the targeted Vulkan version",
         is_met: |candidate| candidate.device.api_version() >= API_VERSION,
+    },
+    Requirement {
+        description: "supports VK_EXT_shader_object",
+        is_met: |candidate| {
+            candidate
+                .device
+                .supports_extension(ext::shader_object::NAME)
+                && candidate.device.features.shader_object.shader_object == vk::TRUE
+        },
+    },
+    Requirement {
+        // Needed by shaders that use `SV_VertexID`, as Slang compiles it using
+        // the base vertex.
+        description: "supports shader draw parameters",
+        is_met: |candidate| candidate.device.features.vulkan11.shader_draw_parameters == vk::TRUE,
     },
     Requirement {
         description: "supports dynamic rendering and synchronization2",
@@ -255,6 +270,8 @@ mod tests {
         let mut features = Features::default();
         features.vulkan13.dynamic_rendering = vk::TRUE;
         features.vulkan13.synchronization2 = vk::TRUE;
+        features.vulkan11.shader_draw_parameters = vk::TRUE;
+        features.shader_object.shader_object = vk::TRUE;
 
         PhysicalDevice {
             handle: vk::PhysicalDevice::null(),
@@ -266,7 +283,11 @@ mod tests {
                 queue_count: 1,
                 ..Default::default()
             }],
-            extensions: Vec::new(),
+            extensions: vec![
+                vk::ExtensionProperties::default()
+                    .extension_name(ext::shader_object::NAME)
+                    .unwrap(),
+            ],
         }
     }
 
@@ -416,6 +437,47 @@ mod tests {
     }
 
     #[test]
+    fn rejects_devices_without_shader_objects() {
+        let mut no_extension = device(
+            "no extension",
+            vk::PhysicalDeviceType::DISCRETE_GPU,
+            16 * GIB,
+        );
+        no_extension.extensions.clear();
+        let mut no_feature = device("no feature", vk::PhysicalDeviceType::DISCRETE_GPU, 16 * GIB);
+        no_feature.features.shader_object.shader_object = vk::FALSE;
+        let devices = vec![
+            no_extension,
+            no_feature,
+            device(
+                "shader objects",
+                vk::PhysicalDeviceType::INTEGRATED_GPU,
+                8 * GIB,
+            ),
+        ];
+        assert_eq!(selected_name(devices), "shader objects");
+    }
+
+    #[test]
+    fn rejects_devices_without_shader_draw_parameters() {
+        let mut no_draw_parameters = device(
+            "no draw parameters",
+            vk::PhysicalDeviceType::DISCRETE_GPU,
+            16 * GIB,
+        );
+        no_draw_parameters.features.vulkan11.shader_draw_parameters = vk::FALSE;
+        let devices = vec![
+            no_draw_parameters,
+            device(
+                "draw parameters",
+                vk::PhysicalDeviceType::INTEGRATED_GPU,
+                8 * GIB,
+            ),
+        ];
+        assert_eq!(selected_name(devices), "draw parameters");
+    }
+
+    #[test]
     fn rejects_devices_without_graphics() {
         let mut compute_only = device(
             "compute only",
@@ -462,7 +524,10 @@ mod tests {
             ),
             &[true],
         );
-        no_swapchain.device.extensions.clear();
+        no_swapchain
+            .device
+            .extensions
+            .retain(|extension| extension.extension_name_as_c_str() != Ok(khr::swapchain::NAME));
         let candidates = vec![
             no_swapchain,
             windowed(

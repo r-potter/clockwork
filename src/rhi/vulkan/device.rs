@@ -1,7 +1,7 @@
 //! The Vulkan logical device and its queues.
 
 use anyhow::{Context, Result};
-use ash::{Instance, khr, vk};
+use ash::{Instance, ext, khr, vk};
 
 use super::device_selection::QueueFamilies;
 use super::physical_device::PhysicalDevice;
@@ -13,6 +13,9 @@ use super::physical_device::PhysicalDevice;
 /// after every object created from it, and before the instance.
 pub struct LogicalDevice {
     device: ash::Device,
+    /// `VK_EXT_shader_object` functions, for creating, binding and drawing
+    /// with shader objects.
+    shader_object: ext::shader_object::Device,
     queue_families: QueueFamilies,
     graphics_queue: vk::Queue,
     /// `None` when headless.
@@ -23,9 +26,11 @@ impl LogicalDevice {
     /// Creates a logical device on `physical_device`, with one queue from each
     /// of `queue_families`.
     ///
-    /// Enables the Vulkan 1.3 `dynamic_rendering` and `synchronization2`
-    /// features, which device selection requires. If `queue_families` has a
-    /// present family, `VK_KHR_swapchain` is also enabled.
+    /// Enables the extensions and features device selection requires:
+    /// `VK_EXT_shader_object` and its `shader_object` feature, Vulkan 1.1's
+    /// `shader_draw_parameters`, and Vulkan 1.3's `dynamic_rendering` and
+    /// `synchronization2`. If `queue_families` has a present family,
+    /// `VK_KHR_swapchain` is also enabled.
     ///
     /// # Errors
     ///
@@ -53,18 +58,26 @@ impl LogicalDevice {
             })
             .collect();
 
-        let mut extensions = Vec::new();
+        let mut extensions = vec![ext::shader_object::NAME.as_ptr()];
         if queue_families.present.is_some() {
             extensions.push(khr::swapchain::NAME.as_ptr());
         }
 
+        // Slang compiles `SV_VertexID` using the base vertex, which needs
+        // `shader_draw_parameters`.
+        let mut vulkan11_features =
+            vk::PhysicalDeviceVulkan11Features::default().shader_draw_parameters(true);
         let mut vulkan13_features = vk::PhysicalDeviceVulkan13Features::default()
             .dynamic_rendering(true)
             .synchronization2(true);
+        let mut shader_object_features =
+            vk::PhysicalDeviceShaderObjectFeaturesEXT::default().shader_object(true);
         let create_info = vk::DeviceCreateInfo::default()
             .queue_create_infos(&queue_infos)
             .enabled_extension_names(&extensions)
-            .push_next(&mut vulkan13_features);
+            .push_next(&mut vulkan11_features)
+            .push_next(&mut vulkan13_features)
+            .push_next(&mut shader_object_features);
         // SAFETY: `physical_device` was enumerated from `instance`, and
         // `create_info` and the structures it points to are valid for the
         // duration of the call. Selection checked that the queue families and
@@ -79,6 +92,7 @@ impl LogicalDevice {
             .map(|family| unsafe { device.get_device_queue(family, 0) });
 
         Ok(Self {
+            shader_object: ext::shader_object::Device::new(instance, &device),
             device,
             queue_families,
             graphics_queue,
@@ -89,6 +103,11 @@ impl LogicalDevice {
     /// The device's function pointers and handle.
     pub fn handle(&self) -> &ash::Device {
         &self.device
+    }
+
+    /// The `VK_EXT_shader_object` functions.
+    pub fn shader_object(&self) -> &ext::shader_object::Device {
+        &self.shader_object
     }
 
     /// The queue families the device's queues were created from.

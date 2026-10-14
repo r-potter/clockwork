@@ -16,11 +16,12 @@ Outstanding tasks and future work.
   - update any API changes between 0.38 and `master`
 - [x] **Choose a physical device to render with.** Done in
       `src/rhi/vulkan/device_selection.rs`: devices are filtered by
-      `REQUIREMENTS` (Vulkan 1.4, dynamic rendering and synchronization2, and
-      a graphics queue; plus, when there is a window, `VK_KHR_swapchain`, a
-      queue family that can present, and a surface format and present mode),
-      then compared by device type and total device-local memory. The RHI
-      keeps only the chosen device.
+      `REQUIREMENTS` (Vulkan 1.4, `VK_EXT_shader_object`, shader draw
+      parameters, dynamic rendering and synchronization2, and a graphics
+      queue; plus, when there is a window, `VK_KHR_swapchain`, a queue family
+      that can present, and a surface format and present mode), then
+      compared by device type and total device-local memory. The RHI keeps
+      only the chosen device.
 - [ ] **Extend device selection as the renderer grows.** Add entries to
       `REQUIREMENTS` for the features, limits and extensions the renderer
       comes to depend on, and refine `compare` if needed. Remove the
@@ -45,9 +46,29 @@ Outstanding tasks and future work.
       recreate the swapchain once at the start of the next frame. Vulkan
       1.3's `dynamic_rendering` and `synchronization2` are enabled and
       required.
-- [ ] **Render something other than a clear.** Replace `record_clear` with
-      real rendering: pipelines, shaders, buffers and descriptors, exposed
-      through the `RenderHardwareInterface` as opaque handles.
+- [x] **Draw a triangle.** `TriangleShaders` in
+      `src/rhi/vulkan/shaders.rs` draws a triangle with per-corner colours
+      from `shaders/triangle.slang`, with no vertex buffers, using linked
+      `VK_EXT_shader_object` shader objects instead of a pipeline, with all
+      rendering state set when drawing. `build.rs` compiles the shaders to
+      SPIR-V with `slangc`, and the backend embeds them. Vulkan 1.1's
+      `shaderDrawParameters` is enabled and required, because Slang compiles
+      `SV_VertexID` using the base vertex.
+- [ ] **Decide what to do on drivers without `VK_EXT_shader_object`.**
+      Device selection requires it, so a device whose driver does not support
+      it is rejected. Most current desktop drivers do, but older drivers and
+      some mobile ones do not. Options: accept that, enable the Khronos
+      emulation layer (`VK_LAYER_KHRONOS_shader_object`, shipped with the
+      Vulkan SDK) when the extension is missing, or add a pipeline fallback.
+- [ ] **Add a rendering API to the RHI.** The triangle is hardcoded in the
+      Vulkan backend (`record_frame` in `src/rhi/vulkan.rs`). Expose
+      pipelines, shaders, buffers and descriptors through
+      `RenderHardwareInterface` as opaque handles, so that the application
+      decides what to draw.
+- [ ] **Compile shaders for other backends.** `build.rs` only targets
+      SPIR-V. Slang can also target Metal and DXIL, so when another backend
+      is added, compile each shader for it too, rather than writing the
+      shaders again.
 - [ ] **Use `VK_EXT_swapchain_maintenance1` when available.** Without it,
       there is no way to know when
       the presentation engine has finished with a swapchain's images, so
@@ -127,3 +148,7 @@ Outstanding tasks and future work.
       on machines (such as CI runners) with no Vulkan driver. Options include
       installing a software driver such as lavapipe on CI, or marking the test
       `#[ignore]` and running it separately.
+- [ ] **Install `slangc` on CI.** Building now runs the Slang shader
+      compiler, so CI machines need it, for example from the
+      `slang-compiler` package or the Vulkan SDK. `build.rs` finds it on
+      `PATH`, or at the path in the `SLANGC` environment variable.
