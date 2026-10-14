@@ -12,6 +12,7 @@
 //! enabled and its messages are emitted as `tracing` events from this module.
 //! See [`ENABLE_VALIDATION`] and [`debug_callback`].
 
+mod device_selection;
 mod physical_device;
 
 use std::ffi::{CStr, c_void};
@@ -47,10 +48,19 @@ const VALIDATION_LAYER: &CStr = c"VK_LAYER_KHRONOS_validation";
 
 /// Vulkan render hardware interface.
 ///
-/// Owns the Vulkan instance and, when validation is enabled, its debug
-/// messenger. Will later also own the selected physical device, the logical
-/// device and its queues.
+/// Owns the Vulkan instance and the selected physical device. Will later also
+/// own the logical device and its queues.
 pub struct VulkanRenderHardwareInterface {
+    physical_device: PhysicalDevice,
+    /// Declared last so that it is dropped last, after every object created
+    /// from it.
+    instance: VulkanInstance,
+}
+
+/// A Vulkan instance and, when validation is enabled, its debug messenger.
+///
+/// Both are destroyed when this is dropped.
+struct VulkanInstance {
     /// Function pointers for the Vulkan loader. Must outlive `instance`, as it
     /// keeps the loader library loaded.
     _entry: Entry,
@@ -66,15 +76,45 @@ struct DebugMessenger {
 }
 
 impl VulkanRenderHardwareInterface {
-    /// Initialises the Vulkan backend by loading the Vulkan loader and creating
-    /// an instance, with validation if [`ENABLE_VALIDATION`] is set.
+    /// Initialises the Vulkan backend: creates an instance (see
+    /// [`VulkanInstance::new`]) and selects a physical device to render with
+    /// (see [`device_selection`]).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if instance creation fails, if the physical devices
+    /// cannot be queried, or if none meets the minimum requirements.
+    pub fn new() -> Result<Self> {
+        let instance = VulkanInstance::new()?;
+
+        let devices = PhysicalDevice::enumerate(&instance.instance)?;
+        for device in &devices {
+            info!(
+                "found {:?} {}, supporting Vulkan {}",
+                device.device_type(),
+                device.name(),
+                format_version(device.api_version()),
+            );
+        }
+        let physical_device = device_selection::select(devices)?;
+
+        Ok(Self {
+            physical_device,
+            instance,
+        })
+    }
+}
+
+impl VulkanInstance {
+    /// Loads the Vulkan loader and creates an instance, with validation if
+    /// [`ENABLE_VALIDATION`] is set.
     ///
     /// # Errors
     ///
     /// Returns an error if the Vulkan loader cannot be found, if it is older
     /// than [`API_VERSION`], or if instance or debug messenger creation fails
     /// (for example, because no Vulkan driver is installed).
-    pub fn new() -> Result<Self> {
+    fn new() -> Result<Self> {
         // SAFETY: Loading the Vulkan loader runs its library initialisation
         // code, which we trust to be well behaved.
         let entry = unsafe { Entry::load() }.context("failed to load the Vulkan loader")?;
@@ -151,35 +191,26 @@ impl VulkanRenderHardwareInterface {
 
         // Construct `Self` before creating the messenger, so that the instance
         // is destroyed by `Drop` if messenger creation fails.
-        let mut rhi = Self {
+        let mut vulkan_instance = Self {
             _entry: entry,
             instance,
             debug_messenger: None,
         };
         if validation {
-            let debug_utils = debug_utils::Instance::new(&rhi._entry, &rhi.instance);
+            let debug_utils =
+                debug_utils::Instance::new(&vulkan_instance._entry, &vulkan_instance.instance);
             // SAFETY: `messenger_info` is valid, and `VK_EXT_debug_utils` was
             // enabled on the instance.
             let messenger =
                 unsafe { debug_utils.create_debug_utils_messenger(&messenger_info, None) }
                     .context("failed to create Vulkan debug messenger")?;
-            rhi.debug_messenger = Some(DebugMessenger {
+            vulkan_instance.debug_messenger = Some(DebugMessenger {
                 debug_utils,
                 messenger,
             });
         }
 
-        // TODO: choose a device to render with.
-        for device in PhysicalDevice::enumerate(&rhi.instance)? {
-            info!(
-                "found {:?} {}, supporting Vulkan {}",
-                device.device_type(),
-                device.name(),
-                format_version(device.api_version()),
-            );
-        }
-
-        Ok(rhi)
+        Ok(vulkan_instance)
     }
 }
 
@@ -257,7 +288,7 @@ fn format_version(version: u32) -> String {
     )
 }
 
-impl Drop for VulkanRenderHardwareInterface {
+impl Drop for VulkanInstance {
     fn drop(&mut self) {
         if let Some(debug_messenger) = &self.debug_messenger {
             // SAFETY: The messenger was created by `new` from this instance and
@@ -277,8 +308,9 @@ impl Drop for VulkanRenderHardwareInterface {
 impl fmt::Debug for VulkanRenderHardwareInterface {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("VulkanRenderHardwareInterface")
-            .field("instance", &self.instance.handle())
-            .field("validation", &self.debug_messenger.is_some())
+            .field("instance", &self.instance.instance.handle())
+            .field("validation", &self.instance.debug_messenger.is_some())
+            .field("physical_device", &self.physical_device.name())
             .finish_non_exhaustive()
     }
 }

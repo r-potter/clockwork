@@ -14,15 +14,16 @@ Outstanding tasks and future work.
   - add the Vulkan 1.4 features and properties to `PhysicalDevice` in
     `src/rhi/vulkan/physical_device.rs`
   - update any API changes between 0.38 and `master`
-- [ ] **Choose a physical device to render with.** `VulkanRenderHardwareInterface::new`
-      currently enumerates and logs the devices, then drops them (see the
-      `TODO` in `src/rhi/vulkan.rs`). Selection should filter and rank them
-      using the information in `PhysicalDevice`. As part of this:
-  - reject devices whose `api_version()` is below 1.4; the loader version
-    check does not guarantee that each GPU supports it
-  - decide whether the RHI keeps every `PhysicalDevice` or only the chosen one
-  - remove the `#[expect(dead_code)]` attributes in
-    `src/rhi/vulkan/physical_device.rs` as fields come into use
+- [x] **Choose a physical device to render with.** Done in
+      `src/rhi/vulkan/device_selection.rs`: devices are filtered by
+      `REQUIREMENTS` (Vulkan 1.4 and a graphics queue), then compared by
+      device type and largest device-local heap. The RHI keeps only the chosen
+      device.
+- [ ] **Extend device selection as the renderer grows.** Add entries to
+      `REQUIREMENTS` for the features, limits and extensions the renderer
+      comes to depend on, and refine `compare` if needed. Remove the
+      `#[expect(dead_code)]` attributes in `src/rhi/vulkan/physical_device.rs`
+      as fields come into use.
 - [ ] **Add surface and swapchain support** for presenting to a window: the
       `VK_KHR_surface` and platform surface instance extensions, and the
       `VK_KHR_swapchain` device extension (which device selection should
