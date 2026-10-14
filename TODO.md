@@ -37,6 +37,16 @@ Outstanding tasks and future work.
       though they are always null. If the RHI needs to be used across threads,
       add `unsafe impl Send`/`Sync` with a safety comment.
 
+## Engine
+
+- [ ] **Add a frame loop with frame pacing.** The `winit` event loop in
+      `src/main.rs` runs in `ControlFlow::Poll` mode so the engine can pace
+      frames itself, but there is no frame work or waiting yet, so it spins
+      and uses 100% of a CPU core while the window is open. Run each frame
+      (update, then render) from `ApplicationHandler::about_to_wait`, and
+      limit the frame rate, for example by waiting on vsync when presenting
+      or by sleeping until the next frame is due.
+
 ## Testing
 
 - [ ] **Make the unit tests work without a Vulkan driver.**
