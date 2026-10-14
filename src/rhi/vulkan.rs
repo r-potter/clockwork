@@ -14,16 +14,20 @@
 
 mod device_selection;
 mod physical_device;
+mod surface;
 
 use std::ffi::{CStr, c_void};
 use std::fmt;
+use std::sync::Arc;
 
 use anyhow::{Context, Result, bail};
 use ash::{Entry, Instance, ext::debug_utils, vk};
+use raw_window_handle::RawDisplayHandle;
 use tracing::{Level, debug, error, info, trace, warn};
 
-use super::{GraphicsApi, RenderHardwareInterface};
+use super::{GraphicsApi, RenderHardwareInterface, Window};
 use physical_device::PhysicalDevice;
+use surface::Surface;
 
 /// Name reported to the Vulkan driver for both the application and the engine.
 const NAME: &CStr = c"clockwork";
@@ -48,9 +52,12 @@ const VALIDATION_LAYER: &CStr = c"VK_LAYER_KHRONOS_validation";
 
 /// Vulkan render hardware interface.
 ///
-/// Owns the Vulkan instance and the selected physical device. Will later also
-/// own the logical device and its queues.
+/// Owns the Vulkan instance, the window surface (unless headless or
+/// suspended) and the selected physical device. Will later also own the
+/// logical device and its queues.
 pub struct VulkanRenderHardwareInterface {
+    /// `None` when headless, or while suspended.
+    surface: Option<Surface>,
     physical_device: PhysicalDevice,
     /// Declared last so that it is dropped last, after every object created
     /// from it.
@@ -62,11 +69,14 @@ pub struct VulkanRenderHardwareInterface {
 /// Both are destroyed when this is dropped.
 struct VulkanInstance {
     /// Function pointers for the Vulkan loader. Must outlive `instance`, as it
-    /// keeps the loader library loaded.
-    _entry: Entry,
+    /// keeps the loader library loaded. Also used to create surfaces.
+    entry: Entry,
     instance: Instance,
     /// Present only when validation is enabled and available.
     debug_messenger: Option<DebugMessenger>,
+    /// Whether the surface extensions for a display were enabled, so that
+    /// surfaces can be created. `false` when headless.
+    supports_surfaces: bool,
 }
 
 /// A debug messenger and the extension functions needed to destroy it.
@@ -77,15 +87,27 @@ struct DebugMessenger {
 
 impl VulkanRenderHardwareInterface {
     /// Initialises the Vulkan backend: creates an instance (see
-    /// [`VulkanInstance::new`]) and selects a physical device to render with
-    /// (see [`device_selection`]).
+    /// [`VulkanInstance::new`]), a surface for `window` if there is one, and
+    /// selects a physical device to render with (see [`device_selection`]).
+    ///
+    /// If `window` is `None`, runs headless: no surface is created, and no
+    /// surface extensions are enabled.
     ///
     /// # Errors
     ///
-    /// Returns an error if instance creation fails, if the physical devices
-    /// cannot be queried, or if none meets the minimum requirements.
-    pub fn new() -> Result<Self> {
-        let instance = VulkanInstance::new()?;
+    /// Returns an error if instance or surface creation fails, if the physical
+    /// devices cannot be queried, or if none meets the minimum requirements.
+    pub fn new(window: Option<Arc<dyn Window>>) -> Result<Self> {
+        let display_handle = window
+            .as_ref()
+            .map(|window| window.display_handle().map(|handle| handle.as_raw()))
+            .transpose()
+            .context("failed to get the window's display handle")?;
+        let instance = VulkanInstance::new(display_handle)?;
+
+        let surface = window
+            .map(|window| Surface::new(&instance.entry, &instance.instance, window))
+            .transpose()?;
 
         let devices = PhysicalDevice::enumerate(&instance.instance)?;
         for device in &devices {
@@ -99,6 +121,7 @@ impl VulkanRenderHardwareInterface {
         let physical_device = device_selection::select(devices)?;
 
         Ok(Self {
+            surface,
             physical_device,
             instance,
         })
@@ -109,12 +132,16 @@ impl VulkanInstance {
     /// Loads the Vulkan loader and creates an instance, with validation if
     /// [`ENABLE_VALIDATION`] is set.
     ///
+    /// If `display_handle` is `Some`, the instance extensions needed to create
+    /// surfaces for windows on that display are enabled.
+    ///
     /// # Errors
     ///
     /// Returns an error if the Vulkan loader cannot be found, if it is older
-    /// than [`API_VERSION`], or if instance or debug messenger creation fails
-    /// (for example, because no Vulkan driver is installed).
-    fn new() -> Result<Self> {
+    /// than [`API_VERSION`], if the display's window system is not supported,
+    /// or if instance or debug messenger creation fails (for example, because
+    /// no Vulkan driver is installed).
+    fn new(display_handle: Option<RawDisplayHandle>) -> Result<Self> {
         // SAFETY: Loading the Vulkan loader runs its library initialisation
         // code, which we trust to be well behaved.
         let entry = unsafe { Entry::load() }.context("failed to load the Vulkan loader")?;
@@ -142,6 +169,11 @@ impl VulkanInstance {
             layers.push(VALIDATION_LAYER.as_ptr());
             // Provided by the validation layer.
             extensions.push(debug_utils::NAME.as_ptr());
+        }
+        if let Some(display_handle) = display_handle {
+            let surface_extensions = ash_window::enumerate_required_extensions(display_handle)
+                .context("the window system is not supported by the Vulkan backend")?;
+            extensions.extend_from_slice(surface_extensions);
         }
 
         // Only ask Vulkan for messages at levels `tracing` will record, using
@@ -192,13 +224,14 @@ impl VulkanInstance {
         // Construct `Self` before creating the messenger, so that the instance
         // is destroyed by `Drop` if messenger creation fails.
         let mut vulkan_instance = Self {
-            _entry: entry,
+            entry,
             instance,
             debug_messenger: None,
+            supports_surfaces: display_handle.is_some(),
         };
         if validation {
             let debug_utils =
-                debug_utils::Instance::new(&vulkan_instance._entry, &vulkan_instance.instance);
+                debug_utils::Instance::new(&vulkan_instance.entry, &vulkan_instance.instance);
             // SAFETY: `messenger_info` is valid, and `VK_EXT_debug_utils` was
             // enabled on the instance.
             let messenger =
@@ -310,6 +343,8 @@ impl fmt::Debug for VulkanRenderHardwareInterface {
         f.debug_struct("VulkanRenderHardwareInterface")
             .field("instance", &self.instance.instance.handle())
             .field("validation", &self.instance.debug_messenger.is_some())
+            .field("headless", &self.is_headless())
+            .field("suspended", &self.is_suspended())
             .field("physical_device", &self.physical_device.name())
             .finish_non_exhaustive()
     }
@@ -319,5 +354,32 @@ impl RenderHardwareInterface for VulkanRenderHardwareInterface {
     /// Always [`GraphicsApi::Vulkan`].
     fn api(&self) -> GraphicsApi {
         GraphicsApi::Vulkan
+    }
+
+    fn is_headless(&self) -> bool {
+        !self.instance.supports_surfaces
+    }
+
+    fn is_suspended(&self) -> bool {
+        !self.is_headless() && self.surface.is_none()
+    }
+
+    fn suspend(&mut self) {
+        self.surface = None;
+    }
+
+    fn resume(&mut self, window: Arc<dyn Window>) -> Result<()> {
+        if self.is_headless() {
+            bail!("a headless Vulkan backend cannot render to a window");
+        }
+        // Destroy any existing surface first, as some platforms (such as
+        // Android) allow only one surface per window at a time.
+        self.surface = None;
+        self.surface = Some(Surface::new(
+            &self.instance.entry,
+            &self.instance.instance,
+            window,
+        )?);
+        Ok(())
     }
 }

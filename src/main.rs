@@ -3,9 +3,10 @@
 mod rhi;
 
 use std::io::IsTerminal;
+use std::sync::Arc;
 
 use anyhow::{Context, Result};
-use rhi::GraphicsApi;
+use rhi::{GraphicsApi, RenderHardwareInterface};
 use tracing::info;
 use tracing::level_filters::LevelFilter;
 use tracing_subscriber::EnvFilter;
@@ -40,10 +41,6 @@ fn main() -> Result<()> {
     // engine can pace frames itself.
     event_loop.set_control_flow(ControlFlow::Poll);
 
-    // Initialise the renderer backend. Only Vulkan is available for now.
-    let rhi = rhi::create(GraphicsApi::Vulkan)?;
-    info!("using {:?} backend", rhi.api());
-
     let mut app = App::default();
     event_loop
         .run_app(&mut app)
@@ -55,25 +52,62 @@ fn main() -> Result<()> {
 #[derive(Default)]
 struct App {
     /// Created when the application is first resumed.
-    window: Option<Window>,
+    window: Option<Arc<Window>>,
+    /// Renders to `window`. Created along with it.
+    rhi: Option<Box<dyn RenderHardwareInterface>>,
     /// An error that stopped the event loop, returned from `main`.
     error: Option<anyhow::Error>,
 }
 
+impl App {
+    /// Creates the window and the renderer backend that renders to it.
+    fn init(&mut self, event_loop: &ActiveEventLoop) -> Result<()> {
+        let attributes = Window::default_attributes().with_title(WINDOW_TITLE);
+        let window = Arc::new(
+            event_loop
+                .create_window(attributes)
+                .context("failed to create window")?,
+        );
+
+        // Only Vulkan is available for now.
+        let rhi = rhi::create(GraphicsApi::Vulkan, Some(window.clone()))?;
+        info!("using {:?} backend", rhi.api());
+
+        self.window = Some(window);
+        self.rhi = Some(rhi);
+        Ok(())
+    }
+}
+
 impl ApplicationHandler for App {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
-        // Some platforms (such as Android) resume more than once.
-        if self.window.is_some() {
-            return;
+        // The first resume creates the window and backend. Some platforms
+        // (such as Android) suspend and resume again later, and the backend
+        // then needs the window back.
+        let result = if let (Some(window), Some(rhi)) = (&self.window, &mut self.rhi) {
+            rhi.resume(window.clone())
+        } else {
+            self.init(event_loop)
+        };
+        if let Err(err) = result {
+            self.error = Some(err);
+            event_loop.exit();
         }
-        let attributes = Window::default_attributes().with_title(WINDOW_TITLE);
-        match event_loop.create_window(attributes) {
-            Ok(window) => self.window = Some(window),
-            Err(err) => {
-                self.error = Some(anyhow::Error::new(err).context("failed to create window"));
-                event_loop.exit();
-            }
+    }
+
+    fn suspended(&mut self, _event_loop: &ActiveEventLoop) {
+        // On some platforms (such as Android) the window's native handle is
+        // destroyed while suspended, so the backend must release everything
+        // that uses it.
+        if let Some(rhi) = &mut self.rhi {
+            rhi.suspend();
         }
+    }
+
+    fn exiting(&mut self, _event_loop: &ActiveEventLoop) {
+        // Destroy the backend, and with it the window surface, while the
+        // event loop's connection to the window system is still open.
+        self.rhi = None;
     }
 
     fn window_event(
