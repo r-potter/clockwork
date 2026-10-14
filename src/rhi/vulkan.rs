@@ -12,22 +12,26 @@
 //! enabled and its messages are emitted as `tracing` events from this module.
 //! See [`ENABLE_VALIDATION`] and [`debug_callback`].
 
+mod device;
 mod device_selection;
 mod physical_device;
 mod surface;
+mod swapchain;
 
 use std::ffi::{CStr, c_void};
 use std::fmt;
-use std::sync::Arc;
 
 use anyhow::{Context, Result, bail};
 use ash::{Entry, Instance, ext::debug_utils, vk};
 use raw_window_handle::RawDisplayHandle;
 use tracing::{Level, debug, error, info, trace, warn};
 
-use super::{GraphicsApi, RenderHardwareInterface, Window};
+use super::{GraphicsApi, RenderHardwareInterface, WindowSize, WindowTarget};
+use device::LogicalDevice;
+use device_selection::{Candidate, Selection};
 use physical_device::PhysicalDevice;
 use surface::Surface;
+use swapchain::Swapchain;
 
 /// Name reported to the Vulkan driver for both the application and the engine.
 const NAME: &CStr = c"clockwork";
@@ -52,10 +56,19 @@ const VALIDATION_LAYER: &CStr = c"VK_LAYER_KHRONOS_validation";
 
 /// Vulkan render hardware interface.
 ///
-/// Owns the Vulkan instance, the window surface (unless headless or
-/// suspended) and the selected physical device. Will later also own the
-/// logical device and its queues.
+/// Owns the Vulkan instance, the selected physical device, the logical device
+/// and, unless headless or suspended, the window surface and swapchain.
+///
+/// Fields are dropped in declaration order, so each is declared before the
+/// objects it was created from.
 pub struct VulkanRenderHardwareInterface {
+    /// The window size from the latest [`resize`](RenderHardwareInterface::resize),
+    /// if the swapchain has not been recreated for it yet. Applied at the
+    /// start of the next frame.
+    pending_window_size: Option<WindowSize>,
+    /// `None` when headless, while suspended, or while the window has no area.
+    swapchain: Option<Swapchain>,
+    device: LogicalDevice,
     /// `None` when headless, or while suspended.
     surface: Option<Surface>,
     physical_device: PhysicalDevice,
@@ -87,44 +100,93 @@ struct DebugMessenger {
 
 impl VulkanRenderHardwareInterface {
     /// Initialises the Vulkan backend: creates an instance (see
-    /// [`VulkanInstance::new`]), a surface for `window` if there is one, and
-    /// selects a physical device to render with (see [`device_selection`]).
+    /// [`VulkanInstance::new`]) and a surface for the window if there is one,
+    /// selects a physical device to render with (see [`device_selection`]),
+    /// then creates a logical device and, if there is a window, a swapchain.
     ///
-    /// If `window` is `None`, runs headless: no surface is created, and no
-    /// surface extensions are enabled.
+    /// If `window` is `None`, runs headless: no surface or swapchain is
+    /// created, and no surface or swapchain extensions are enabled.
     ///
     /// # Errors
     ///
-    /// Returns an error if instance or surface creation fails, if the physical
-    /// devices cannot be queried, or if none meets the minimum requirements.
-    pub fn new(window: Option<Arc<dyn Window>>) -> Result<Self> {
+    /// Returns an error if instance, surface, device or swapchain creation
+    /// fails, if the physical devices cannot be queried, or if none meets the
+    /// minimum requirements.
+    pub fn new(window: Option<WindowTarget>) -> Result<Self> {
         let display_handle = window
             .as_ref()
-            .map(|window| window.display_handle().map(|handle| handle.as_raw()))
+            .map(|target| target.window.display_handle().map(|handle| handle.as_raw()))
             .transpose()
             .context("failed to get the window's display handle")?;
         let instance = VulkanInstance::new(display_handle)?;
 
+        let window_size = window.as_ref().map(|target| target.size);
         let surface = window
-            .map(|window| Surface::new(&instance.entry, &instance.instance, window))
+            .map(|target| Surface::new(&instance.entry, &instance.instance, target.window))
             .transpose()?;
 
-        let devices = PhysicalDevice::enumerate(&instance.instance)?;
-        for device in &devices {
-            info!(
-                "found {:?} {}, supporting Vulkan {}",
-                device.device_type(),
-                device.name(),
-                format_version(device.api_version()),
-            );
-        }
-        let physical_device = device_selection::select(devices)?;
+        let candidates = PhysicalDevice::enumerate(&instance.instance)?
+            .into_iter()
+            .map(|device| {
+                info!(
+                    "found {:?} {}, supporting Vulkan {}",
+                    device.device_type(),
+                    device.name(),
+                    format_version(device.api_version()),
+                );
+                let surface_support = surface
+                    .as_ref()
+                    .map(|surface| surface.support(&device))
+                    .transpose()?;
+                Ok(Candidate {
+                    device,
+                    surface_support,
+                })
+            })
+            .collect::<Result<_>>()?;
+        let Selection {
+            device: physical_device,
+            queue_families,
+        } = device_selection::select(candidates)?;
 
-        Ok(Self {
+        let device = LogicalDevice::new(&instance.instance, &physical_device, queue_families)?;
+
+        let mut rhi = Self {
+            pending_window_size: None,
+            swapchain: None,
+            device,
             surface,
             physical_device,
             instance,
-        })
+        };
+        if let Some(size) = window_size {
+            rhi.recreate_swapchain(size)?;
+        }
+        Ok(rhi)
+    }
+
+    /// Replaces the swapchain with one for the current surface, sized to fit
+    /// `window_size`. Removes it if the surface has no area. Does nothing if
+    /// there is no surface.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if swapchain creation fails.
+    fn recreate_swapchain(&mut self, window_size: WindowSize) -> Result<()> {
+        let Some(surface) = &self.surface else {
+            return Ok(());
+        };
+        // Pass the old swapchain to the new one so that its resources can be
+        // reused, then drop it.
+        self.swapchain = Swapchain::new(
+            &self.instance.instance,
+            &self.device,
+            &self.physical_device,
+            surface,
+            window_size,
+            self.swapchain.as_ref(),
+        )?;
+        Ok(())
     }
 }
 
@@ -346,6 +408,19 @@ impl fmt::Debug for VulkanRenderHardwareInterface {
             .field("headless", &self.is_headless())
             .field("suspended", &self.is_suspended())
             .field("physical_device", &self.physical_device.name())
+            .field("queue_families", &self.device.queue_families())
+            .field(
+                "swapchain",
+                &self.swapchain.as_ref().map(|swapchain| {
+                    let extent = swapchain.extent();
+                    format!(
+                        "{}x{} {:?}",
+                        extent.width,
+                        extent.height,
+                        swapchain.format().format,
+                    )
+                }),
+            )
             .finish_non_exhaustive()
     }
 }
@@ -365,21 +440,61 @@ impl RenderHardwareInterface for VulkanRenderHardwareInterface {
     }
 
     fn suspend(&mut self) {
+        // `resume` provides the window's size at that point.
+        self.pending_window_size = None;
+        // The swapchain must be destroyed before its surface.
+        self.swapchain = None;
         self.surface = None;
     }
 
-    fn resume(&mut self, window: Arc<dyn Window>) -> Result<()> {
+    fn resume(&mut self, target: WindowTarget) -> Result<()> {
         if self.is_headless() {
             bail!("a headless Vulkan backend cannot render to a window");
         }
-        // Destroy any existing surface first, as some platforms (such as
-        // Android) allow only one surface per window at a time.
-        self.surface = None;
-        self.surface = Some(Surface::new(
-            &self.instance.entry,
-            &self.instance.instance,
-            window,
-        )?);
+        // Destroy any existing swapchain and surface first, as some platforms
+        // (such as Android) allow only one surface per window at a time.
+        self.suspend();
+
+        let surface = Surface::new(&self.instance.entry, &self.instance.instance, target.window)?;
+        // The device was selected for the previous surface, so check that it
+        // can still present to this one.
+        let present_family = self
+            .device
+            .queue_families()
+            .present
+            .context("a windowed Vulkan backend has no present queue family")?;
+        if !surface.can_present(self.physical_device.handle, present_family)? {
+            bail!(
+                "{} cannot present to the resumed window",
+                self.physical_device.name(),
+            );
+        }
+        self.surface = Some(surface);
+
+        self.recreate_swapchain(target.size)
+    }
+
+    fn resize(&mut self, size: WindowSize) {
+        if self.surface.is_some() {
+            self.pending_window_size = Some(size);
+        }
+    }
+
+    fn render_frame(&mut self) -> Result<()> {
+        // Recreate the swapchain once for all resizes since the last frame.
+        // Window systems may also report a resize without a change in size.
+        if let Some(size) = self.pending_window_size.take() {
+            let unchanged = self
+                .swapchain
+                .as_ref()
+                .is_some_and(|swapchain| swapchain.window_size() == size);
+            if !unchanged {
+                self.recreate_swapchain(size)?;
+            }
+        }
+
+        // TODO: acquire a swapchain image, record and submit rendering work,
+        // and present.
         Ok(())
     }
 }

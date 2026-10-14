@@ -6,56 +6,106 @@
 //!    [`REQUIREMENTS`] is rejected, and the reasons are logged.
 //! 2. **Comparison.** The remaining devices are compared in pairs with
 //!    [`compare`], keeping the better of each pair, until one is left.
+//!
+//! The queue families to use on the selected device are then chosen with
+//! [`queue_families`].
 
 use std::cmp::Ordering;
 
 use anyhow::{Result, bail};
-use ash::vk;
+use ash::{khr, vk};
 use tracing::info;
 
 use super::API_VERSION;
 use super::physical_device::PhysicalDevice;
+use super::surface::SurfaceSupport;
+
+/// A device being considered for selection.
+pub struct Candidate {
+    pub device: PhysicalDevice,
+    /// How the device can present to the window's surface, or `None` when
+    /// headless.
+    pub surface_support: Option<SurfaceSupport>,
+}
+
+/// The selected device, and the queue families to use on it.
+pub struct Selection {
+    pub device: PhysicalDevice,
+    pub queue_families: QueueFamilies,
+}
+
+/// Indices of the queue families to use on a device.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct QueueFamilies {
+    pub graphics: u32,
+    /// Can present to the window's surface. `None` when headless. May be the
+    /// same family as `graphics`.
+    pub present: Option<u32>,
+}
 
 /// A minimum requirement a device must meet to be selected.
 struct Requirement {
     /// Describes what is required, for logging when a device fails it.
     description: &'static str,
-    is_met: fn(&PhysicalDevice) -> bool,
+    is_met: fn(&Candidate) -> bool,
 }
 
 /// Every requirement a device must meet to be selected.
+///
+/// Requirements about presenting only apply when there is a window, and are
+/// always met when headless.
 const REQUIREMENTS: &[Requirement] = &[
     Requirement {
         // The loader version check does not guarantee that each device
         // supports the version.
         description: "supports the targeted Vulkan version",
-        is_met: |device| device.api_version() >= API_VERSION,
+        is_met: |candidate| candidate.device.api_version() >= API_VERSION,
     },
     Requirement {
         description: "has a queue family that supports graphics",
-        is_met: |device| {
-            device
-                .queue_families
-                .iter()
-                .any(|family| family.queue_flags.contains(vk::QueueFlags::GRAPHICS))
+        is_met: |candidate| graphics_families(&candidate.device).next().is_some(),
+    },
+    Requirement {
+        description: "supports VK_KHR_swapchain",
+        is_met: |candidate| {
+            candidate.surface_support.is_none()
+                || candidate.device.supports_extension(khr::swapchain::NAME)
+        },
+    },
+    Requirement {
+        description: "has a queue family that can present to the window",
+        is_met: |candidate| {
+            candidate
+                .surface_support
+                .as_ref()
+                .is_none_or(|support| support.present_families.contains(&true))
+        },
+    },
+    Requirement {
+        description: "supports a surface format and present mode for the window",
+        is_met: |candidate| {
+            candidate.surface_support.as_ref().is_none_or(|support| {
+                !support.formats.is_empty() && !support.present_modes.is_empty()
+            })
         },
     },
 ];
 
-/// Chooses the best of `devices` that meets every requirement.
+/// Chooses the best of `candidates` that meets every requirement, and the
+/// queue families to use on it.
 ///
 /// # Errors
 ///
 /// Returns an error if no device meets every requirement.
-pub fn select(devices: Vec<PhysicalDevice>) -> Result<PhysicalDevice> {
-    let selected = devices
+pub fn select(candidates: Vec<Candidate>) -> Result<Selection> {
+    let selected = candidates
         .into_iter()
-        .filter(|device| {
-            let unmet = unmet_requirements(device);
+        .filter(|candidate| {
+            let unmet = unmet_requirements(candidate);
             if !unmet.is_empty() {
                 info!(
                     "rejected {}: does not meet requirements: {}",
-                    device.name(),
+                    candidate.device.name(),
                     unmet.join(", "),
                 );
             }
@@ -63,9 +113,9 @@ pub fn select(devices: Vec<PhysicalDevice>) -> Result<PhysicalDevice> {
         })
         // Keep the earlier device on ties, so the result does not depend on
         // how ties are broken by the standard library.
-        .reduce(|best, device| {
-            if compare(&device, &best) == Ordering::Greater {
-                device
+        .reduce(|best, candidate| {
+            if compare(&candidate.device, &best.device) == Ordering::Greater {
+                candidate
             } else {
                 best
             }
@@ -74,15 +124,23 @@ pub fn select(devices: Vec<PhysicalDevice>) -> Result<PhysicalDevice> {
     let Some(selected) = selected else {
         bail!("no Vulkan device meets the minimum requirements; see the log for details");
     };
-    info!("selected {}", selected.name());
-    Ok(selected)
+    let queue_families = queue_families(&selected);
+    info!(
+        "selected {}, with queue families {queue_families:?}",
+        selected.device.name(),
+    );
+    Ok(Selection {
+        device: selected.device,
+        queue_families,
+    })
 }
 
-/// Returns the descriptions of the requirements that `device` does not meet.
-fn unmet_requirements(device: &PhysicalDevice) -> Vec<&'static str> {
+/// Returns the descriptions of the requirements that `candidate` does not
+/// meet.
+fn unmet_requirements(candidate: &Candidate) -> Vec<&'static str> {
     REQUIREMENTS
         .iter()
-        .filter(|requirement| !(requirement.is_met)(device))
+        .filter(|requirement| !(requirement.is_met)(candidate))
         .map(|requirement| requirement.description)
         .collect()
 }
@@ -111,6 +169,49 @@ fn device_type_rank(device_type: vk::PhysicalDeviceType) -> u8 {
         vk::PhysicalDeviceType::CPU => 1,
         _ => 0,
     }
+}
+
+/// Chooses the queue families to use on a candidate that meets every
+/// requirement.
+///
+/// Prefers a single family that supports both graphics and presenting, so
+/// that swapchain images do not need to be shared between queue families.
+/// Otherwise uses the first family that supports each.
+///
+/// # Panics
+///
+/// Panics if `candidate` does not meet the requirements.
+fn queue_families(candidate: &Candidate) -> QueueFamilies {
+    let Some(support) = &candidate.surface_support else {
+        let graphics = graphics_families(&candidate.device).next();
+        return QueueFamilies {
+            graphics: graphics.expect("requirements guarantee a graphics queue family"),
+            present: None,
+        };
+    };
+
+    let can_present = |family: &u32| support.present_families[*family as usize];
+    let (graphics, present) = match graphics_families(&candidate.device).find(can_present) {
+        Some(family) => (Some(family), Some(family)),
+        None => (
+            graphics_families(&candidate.device).next(),
+            (0..support.present_families.len() as u32).find(can_present),
+        ),
+    };
+    QueueFamilies {
+        graphics: graphics.expect("requirements guarantee a graphics queue family"),
+        present: Some(present.expect("requirements guarantee a present queue family")),
+    }
+}
+
+/// The indices of `device`'s queue families that support graphics.
+fn graphics_families(device: &PhysicalDevice) -> impl Iterator<Item = u32> + '_ {
+    device
+        .queue_families
+        .iter()
+        .enumerate()
+        .filter(|(_, family)| family.queue_flags.contains(vk::QueueFlags::GRAPHICS))
+        .map(|(index, _)| index as u32)
 }
 
 #[cfg(test)]
@@ -158,8 +259,52 @@ mod tests {
         }
     }
 
+    /// Wraps `devices` as candidates for headless selection.
+    fn headless(devices: Vec<PhysicalDevice>) -> Vec<Candidate> {
+        devices
+            .into_iter()
+            .map(|device| Candidate {
+                device,
+                surface_support: None,
+            })
+            .collect()
+    }
+
+    /// Adds `VK_KHR_swapchain` to `device`'s extensions, and wraps it as a
+    /// candidate whose queue families can present as given by
+    /// `present_families`.
+    fn windowed(mut device: PhysicalDevice, present_families: &[bool]) -> Candidate {
+        device.extensions.push(
+            vk::ExtensionProperties::default()
+                .extension_name(khr::swapchain::NAME)
+                .unwrap(),
+        );
+        Candidate {
+            device,
+            surface_support: Some(SurfaceSupport {
+                present_families: present_families.to_vec(),
+                formats: vec![vk::SurfaceFormatKHR::default()],
+                present_modes: vec![vk::PresentModeKHR::FIFO],
+            }),
+        }
+    }
+
+    /// Adds a queue family with `flags` to `device`.
+    fn with_family(mut device: PhysicalDevice, flags: vk::QueueFlags) -> PhysicalDevice {
+        device.queue_families.push(vk::QueueFamilyProperties {
+            queue_flags: flags,
+            queue_count: 1,
+            ..Default::default()
+        });
+        device
+    }
+
     fn selected_name(devices: Vec<PhysicalDevice>) -> String {
-        select(devices).unwrap().name().into_owned()
+        select(headless(devices))
+            .unwrap()
+            .device
+            .name()
+            .into_owned()
     }
 
     #[test]
@@ -259,7 +404,110 @@ mod tests {
     fn fails_when_no_device_meets_the_requirements() {
         let mut old = device("old", vk::PhysicalDeviceType::DISCRETE_GPU, 16 * GIB);
         old.properties.core.api_version = vk::API_VERSION_1_3;
-        assert!(select(vec![old]).is_err());
+        assert!(select(headless(vec![old])).is_err());
         assert!(select(Vec::new()).is_err());
+    }
+
+    #[test]
+    fn headless_selection_does_not_need_presenting() {
+        // No swapchain extension and no present support.
+        let device = device("headless", vk::PhysicalDeviceType::DISCRETE_GPU, 8 * GIB);
+        let selection = select(headless(vec![device])).unwrap();
+        assert_eq!(
+            selection.queue_families,
+            QueueFamilies {
+                graphics: 0,
+                present: None,
+            },
+        );
+    }
+
+    #[test]
+    fn rejects_windowed_devices_without_the_swapchain_extension() {
+        let mut no_swapchain = windowed(
+            device(
+                "no swapchain",
+                vk::PhysicalDeviceType::DISCRETE_GPU,
+                16 * GIB,
+            ),
+            &[true],
+        );
+        no_swapchain.device.extensions.clear();
+        let candidates = vec![
+            no_swapchain,
+            windowed(
+                device("swapchain", vk::PhysicalDeviceType::INTEGRATED_GPU, 8 * GIB),
+                &[true],
+            ),
+        ];
+        assert_eq!(select(candidates).unwrap().device.name(), "swapchain");
+    }
+
+    #[test]
+    fn rejects_windowed_devices_that_cannot_present() {
+        let candidates = vec![
+            windowed(
+                device(
+                    "cannot present",
+                    vk::PhysicalDeviceType::DISCRETE_GPU,
+                    16 * GIB,
+                ),
+                &[false],
+            ),
+            windowed(
+                device(
+                    "can present",
+                    vk::PhysicalDeviceType::INTEGRATED_GPU,
+                    8 * GIB,
+                ),
+                &[true],
+            ),
+        ];
+        assert_eq!(select(candidates).unwrap().device.name(), "can present");
+    }
+
+    #[test]
+    fn rejects_windowed_devices_without_surface_formats() {
+        let mut no_formats = windowed(
+            device("no formats", vk::PhysicalDeviceType::DISCRETE_GPU, 16 * GIB),
+            &[true],
+        );
+        no_formats.surface_support.as_mut().unwrap().formats.clear();
+        assert!(select(vec![no_formats]).is_err());
+    }
+
+    #[test]
+    fn prefers_one_family_for_graphics_and_presenting() {
+        // Family 0 supports graphics but cannot present; family 1 does both.
+        let device = with_family(
+            device("device", vk::PhysicalDeviceType::DISCRETE_GPU, 8 * GIB),
+            vk::QueueFlags::GRAPHICS,
+        );
+        let selection = select(vec![windowed(device, &[false, true])]).unwrap();
+        assert_eq!(
+            selection.queue_families,
+            QueueFamilies {
+                graphics: 1,
+                present: Some(1),
+            },
+        );
+    }
+
+    #[test]
+    fn uses_separate_families_when_no_family_does_both() {
+        // Family 0 supports graphics but cannot present; family 1 can present
+        // but does not support graphics.
+        let device = with_family(
+            device("device", vk::PhysicalDeviceType::DISCRETE_GPU, 8 * GIB),
+            vk::QueueFlags::COMPUTE,
+        );
+        let selection = select(vec![windowed(device, &[false, true])]).unwrap();
+        assert_eq!(
+            selection.queue_families,
+            QueueFamilies {
+                graphics: 0,
+                present: Some(1),
+            },
+        );
     }
 }

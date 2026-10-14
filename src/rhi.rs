@@ -37,6 +37,22 @@ pub trait Window: HasDisplayHandle + HasWindowHandle {}
 
 impl<T: HasDisplayHandle + HasWindowHandle + ?Sized> Window for T {}
 
+/// The size of a window's drawable area, in physical pixels.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WindowSize {
+    pub width: u32,
+    pub height: u32,
+}
+
+/// A window for a backend to render to, and its current size.
+///
+/// The size is needed because some window systems (such as Wayland) leave the
+/// size of the rendered images to the application.
+pub struct WindowTarget {
+    pub window: Arc<dyn Window>,
+    pub size: WindowSize,
+}
+
 /// Graphics API used by the render hardware interface.
 ///
 /// Passed to [`create`] to choose a backend, and returned by
@@ -67,24 +83,46 @@ pub trait RenderHardwareInterface: Debug {
     fn is_suspended(&self) -> bool;
 
     /// Releases the window and everything that depends on it, such as the
-    /// window surface, while keeping all other resources.
+    /// window surface and swapchain, while keeping all other resources.
     ///
     /// Must be called when the window becomes unavailable, for example when
     /// the application is suspended on Android. Does nothing if already
     /// suspended, or if headless.
     fn suspend(&mut self);
 
-    /// Starts rendering to `window` again after [`suspend`](Self::suspend).
+    /// Starts rendering to `target` again after [`suspend`](Self::suspend).
     ///
-    /// `window` must be on the same display as the window the backend was
+    /// The window must be on the same display as the window the backend was
     /// created with. If the backend is not suspended, its current window is
     /// replaced.
     ///
     /// # Errors
     ///
-    /// Returns an error if the backend is headless, or if the window's
-    /// resources (such as its surface) cannot be created.
-    fn resume(&mut self, window: Arc<dyn Window>) -> Result<()>;
+    /// Returns an error if the backend is headless, if the selected device
+    /// cannot present to the window, or if the window's resources (such as
+    /// its surface and swapchain) cannot be created.
+    fn resume(&mut self, target: WindowTarget) -> Result<()>;
+
+    /// Records a new window size. Size-dependent resources, such as the
+    /// swapchain, are recreated for it at the start of the next
+    /// [`render_frame`](Self::render_frame), so a stream of resizes (as during
+    /// an interactive resize) causes only one recreation per frame.
+    ///
+    /// Must be called whenever the window is resized. Does nothing if headless
+    /// or suspended. A size with no area (for example, when minimised) pauses
+    /// presenting until a later resize.
+    fn resize(&mut self, size: WindowSize);
+
+    /// Renders and presents one frame.
+    ///
+    /// Currently a stub: it only applies any pending [`resize`](Self::resize).
+    /// Does nothing else if headless, suspended, or while the window has no
+    /// area.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if size-dependent resources cannot be recreated.
+    fn render_frame(&mut self) -> Result<()>;
 }
 
 /// Creates the render hardware interface for the given graphics API.
@@ -98,7 +136,7 @@ pub trait RenderHardwareInterface: Debug {
 /// the graphics API is not supported on this system.
 pub fn create(
     api: GraphicsApi,
-    window: Option<Arc<dyn Window>>,
+    window: Option<WindowTarget>,
 ) -> Result<Box<dyn RenderHardwareInterface>> {
     Ok(match api {
         GraphicsApi::Vulkan => Box::new(VulkanRenderHardwareInterface::new(window)?),
@@ -151,14 +189,24 @@ mod tests {
     }
 
     #[test]
-    fn headless_backends_ignore_suspend_and_reject_resume() {
+    fn headless_backends_ignore_suspend_and_resize_and_reject_resume() {
+        let size = WindowSize {
+            width: 640,
+            height: 480,
+        };
         for &api in ALL_GRAPHICS_APIS {
             let mut rhi = create(api, None)
                 .unwrap_or_else(|err| panic!("failed to create {api:?} backend: {err:?}"));
             rhi.suspend();
             assert!(rhi.is_headless());
             assert!(!rhi.is_suspended());
-            assert!(rhi.resume(Arc::new(UnavailableWindow)).is_err());
+            rhi.resize(size);
+            assert!(rhi.render_frame().is_ok());
+            let target = WindowTarget {
+                window: Arc::new(UnavailableWindow),
+                size,
+            };
+            assert!(rhi.resume(target).is_err());
             assert!(rhi.is_headless());
         }
     }

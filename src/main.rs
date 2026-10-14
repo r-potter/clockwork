@@ -4,13 +4,15 @@ mod rhi;
 
 use std::io::IsTerminal;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
-use rhi::{GraphicsApi, RenderHardwareInterface};
-use tracing::info;
+use rhi::{GraphicsApi, RenderHardwareInterface, WindowSize, WindowTarget};
 use tracing::level_filters::LevelFilter;
+use tracing::{info, trace};
 use tracing_subscriber::EnvFilter;
 use winit::application::ApplicationHandler;
+use winit::dpi::PhysicalSize;
 use winit::event::WindowEvent;
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::window::{Window, WindowId};
@@ -55,6 +57,11 @@ struct App {
     window: Option<Arc<Window>>,
     /// Renders to `window`. Created along with it.
     rhi: Option<Box<dyn RenderHardwareInterface>>,
+    /// When the previous frame started. `None` before the first frame, and
+    /// after suspending, so that time spent suspended is not counted.
+    last_frame_start: Option<Instant>,
+    /// The number of frames run so far.
+    frame_count: u64,
     /// An error that stopped the event loop, returned from `main`.
     error: Option<anyhow::Error>,
 }
@@ -70,12 +77,60 @@ impl App {
         );
 
         // Only Vulkan is available for now.
-        let rhi = rhi::create(GraphicsApi::Vulkan, Some(window.clone()))?;
+        let rhi = rhi::create(GraphicsApi::Vulkan, Some(window_target(&window)))?;
         info!("using {:?} backend", rhi.api());
 
         self.window = Some(window);
         self.rhi = Some(rhi);
         Ok(())
+    }
+
+    /// Runs one frame: updates the game state, then renders it.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if rendering fails.
+    fn frame(&mut self) -> Result<()> {
+        let start = Instant::now();
+        let delta = self
+            .last_frame_start
+            .map_or(Duration::ZERO, |last| start - last);
+        self.last_frame_start = Some(start);
+        self.frame_count += 1;
+        trace!(frame = self.frame_count, ?delta, "starting frame");
+
+        self.update(delta);
+        if let Some(rhi) = &mut self.rhi {
+            rhi.render_frame()?;
+        }
+        Ok(())
+    }
+
+    /// Advances the game state by `delta`, the time since the previous frame.
+    fn update(&mut self, _delta: Duration) {
+        // TODO: update the game state.
+    }
+
+    /// Stores `err` to be returned from `main`, and stops the event loop.
+    fn fail(&mut self, event_loop: &ActiveEventLoop, err: anyhow::Error) {
+        self.error = Some(err);
+        event_loop.exit();
+    }
+}
+
+/// Describes `window` and its current size for the renderer backend.
+fn window_target(window: &Arc<Window>) -> WindowTarget {
+    WindowTarget {
+        window: window.clone(),
+        size: window_size(window.inner_size()),
+    }
+}
+
+/// Converts a `winit` window size to the renderer backend's representation.
+fn window_size(size: PhysicalSize<u32>) -> WindowSize {
+    WindowSize {
+        width: size.width,
+        height: size.height,
     }
 }
 
@@ -85,13 +140,12 @@ impl ApplicationHandler for App {
         // (such as Android) suspend and resume again later, and the backend
         // then needs the window back.
         let result = if let (Some(window), Some(rhi)) = (&self.window, &mut self.rhi) {
-            rhi.resume(window.clone())
+            rhi.resume(window_target(window))
         } else {
             self.init(event_loop)
         };
         if let Err(err) = result {
-            self.error = Some(err);
-            event_loop.exit();
+            self.fail(event_loop, err);
         }
     }
 
@@ -102,11 +156,31 @@ impl ApplicationHandler for App {
         if let Some(rhi) = &mut self.rhi {
             rhi.suspend();
         }
+        self.last_frame_start = None;
+    }
+
+    fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        // Called once per event loop iteration, after pending events have
+        // been handled. In `ControlFlow::Poll` mode the loop does not wait
+        // for events, so this runs a frame on every iteration.
+        //
+        // No frames run before the backend is created, or while suspended,
+        // when the game is paused and there is nothing to render to.
+        let Some(rhi) = &self.rhi else {
+            return;
+        };
+        if rhi.is_suspended() {
+            return;
+        }
+        if let Err(err) = self.frame() {
+            self.fail(event_loop, err);
+        }
     }
 
     fn exiting(&mut self, _event_loop: &ActiveEventLoop) {
-        // Destroy the backend, and with it the window surface, while the
-        // event loop's connection to the window system is still open.
+        // Destroy the backend, and with it the window surface and swapchain,
+        // while the event loop's connection to the window system is still
+        // open.
         self.rhi = None;
     }
 
@@ -116,8 +190,14 @@ impl ApplicationHandler for App {
         _window_id: WindowId,
         event: WindowEvent,
     ) {
-        if event == WindowEvent::CloseRequested {
-            event_loop.exit();
+        match event {
+            WindowEvent::CloseRequested => event_loop.exit(),
+            WindowEvent::Resized(size) => {
+                if let Some(rhi) = &mut self.rhi {
+                    rhi.resize(window_size(size));
+                }
+            }
+            _ => {}
         }
     }
 }

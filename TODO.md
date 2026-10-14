@@ -29,12 +29,57 @@ Outstanding tasks and future work.
       the surface. Passing no window runs the backend headless.
       `RenderHardwareInterface::suspend` and `resume` drop and recreate the
       surface, keeping the rest of the backend.
-- [ ] **Add swapchain support** for presenting to the surface: the
-      `VK_KHR_swapchain` device extension, which device selection should
-      require when not headless, along with a queue family that can present
-      to the surface. The swapchain must be destroyed in `suspend` and
-      recreated in `resume`, along with the surface. On `resume`, check that
-      the selected device can still present to the new surface.
+- [x] **Add swapchain support.** Done in `src/rhi/vulkan/swapchain.rs`,
+      with the logical device and its graphics and present queues in
+      `src/rhi/vulkan/device.rs`. When there is a window, device selection
+      requires `VK_KHR_swapchain`, a queue family that can present, and a
+      surface format and present mode. The swapchain is recreated on resize,
+      and destroyed and recreated with the surface on suspend and resume.
+- [ ] **Render and present frames.** Fill in the `TODO` in
+      `VulkanRenderHardwareInterface::render_frame`: acquire swapchain
+      images, record and submit command buffers to the graphics queue, and
+      present on the present queue, with semaphores and fences to
+      synchronise them.
+  - Swapchain recreation is already deferred: `resize()` records the latest
+    size in `pending_window_size`, and `render_frame` recreates the
+    swapchain once at the start of the frame. Resize events are still
+    required, because on Wayland the swapchain does not go out of date when
+    the window is resized.
+  - `ERROR_OUT_OF_DATE_KHR` and `SUBOPTIMAL_KHR` from acquire and present
+    should also trigger recreation at the start of the next frame. They
+    give no new size, so `render_frame` needs a way to recreate with the
+    current size, for example by keeping the last known window size and a
+    separate "needs recreation" flag.
+
+  Also enable the device features the renderer uses (such as Vulkan 1.3's
+  `dynamic_rendering` and `synchronization2`), and remove the
+  `#[expect(dead_code)]` attributes on the queues in
+  `src/rhi/vulkan/device.rs`.
+- [ ] **Use `VK_EXT_swapchain_maintenance1` when available.** Depends on
+      "Render and present frames". Without it, there is no way to know when
+      the presentation engine has finished with a swapchain's images, so
+      `Swapchain::drop` in `src/rhi/vulkan/swapchain.rs` waits for the whole
+      device to be idle before destroying it, on every recreation. With it:
+  - pass a fence with each present (`VkSwapchainPresentFenceInfoEXT`), and
+    destroy a retired swapchain, and the semaphores used to present its
+    images, only once the fences for its presents have signalled, instead
+    of calling `device_wait_idle`
+  - before recreating, release images that were acquired but not presented
+    (`vkReleaseSwapchainImagesEXT`), so they are not left held by the old
+    swapchain
+  - query the `swapchainMaintenance1` feature
+    (`VkPhysicalDeviceSwapchainMaintenance1FeaturesEXT`) in `PhysicalDevice`,
+    and enable the extension and feature when supported. It also needs the
+    `VK_EXT_surface_maintenance1` and `VK_KHR_get_surface_capabilities2`
+    instance extensions. Keep the current `device_wait_idle` path as a
+    fallback for devices without it, rather than making it a requirement.
+  - consider its other features: switching present modes without
+    recreating the swapchain (`VkSwapchainPresentModesCreateInfoEXT`), which
+    would help the frame pacing work, and controlling how images are scaled
+    while a resize is in progress (`VkSwapchainPresentScalingCreateInfoEXT`)
+
+  `ash` 0.38 has bindings for the EXT extensions. Newer Vulkan headers may
+  also define KHR versions; check when updating to the Vulkan 1.4 bindings.
 - [ ] **Support Android.** The app already handles `suspended` and
       `resumed`, destroying and recreating the surface, but it cannot be built
       for Android yet. This needs an `android_main` entry point (with the app
@@ -53,13 +98,19 @@ Outstanding tasks and future work.
 
 ## Engine
 
-- [ ] **Add a frame loop with frame pacing.** The `winit` event loop in
-      `src/main.rs` runs in `ControlFlow::Poll` mode so the engine can pace
-      frames itself, but there is no frame work or waiting yet, so it spins
-      and uses 100% of a CPU core while the window is open. Run each frame
-      (update, then render) from `ApplicationHandler::about_to_wait`, and
-      limit the frame rate, for example by waiting on vsync when presenting
-      or by sleeping until the next frame is due.
+- [x] **Add a frame loop.** `App::about_to_wait` in `src/main.rs` runs
+      `App::frame` on every event loop iteration (except before the backend
+      exists and while suspended), which measures the time since the last
+      frame, calls `App::update` (still a stub), then
+      `RenderHardwareInterface::render_frame`.
+- [ ] **Add frame pacing.** The `winit` event loop runs in
+      `ControlFlow::Poll` mode so the engine can pace frames itself, but
+      nothing limits the frame rate yet: the stub frame loop runs hundreds of
+      thousands of frames per second and uses 100% of a CPU core while the
+      window is open. Limit the frame rate, for example by waiting on vsync
+      when presenting or by sleeping until the next frame is due. The swapchain uses the FIFO
+      present mode, which waits on vsync; revisit this (for example, offering
+      `MAILBOX` where supported) if the engine paces frames itself.
 - [ ] **Upgrade to `winit` 0.31 once it is stable.** We are on 0.30.13;
       0.31 is in beta (0.31.0-beta.3 at the time of writing). 0.31 splits
       surface handling out of `resumed`/`suspended`, which become app

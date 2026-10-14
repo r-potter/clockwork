@@ -178,7 +178,6 @@ impl PhysicalDevice {
     }
 
     /// Whether the device supports the extension `name`.
-    #[expect(dead_code, reason = "will be used by device selection")]
     pub fn supports_extension(&self, name: &CStr) -> bool {
         self.extensions
             .iter()
