@@ -12,14 +12,17 @@
 //! enabled and its messages are emitted as `tracing` events from this module.
 //! See [`ENABLE_VALIDATION`] and [`debug_callback`].
 
+mod physical_device;
+
 use std::ffi::{CStr, c_void};
 use std::fmt;
 
 use anyhow::{Context, Result, bail};
 use ash::{Entry, Instance, ext::debug_utils, vk};
-use tracing::{Level, debug, error, trace, warn};
+use tracing::{Level, debug, error, info, trace, warn};
 
 use super::{GraphicsApi, RenderHardwareInterface};
+use physical_device::PhysicalDevice;
 
 /// Name reported to the Vulkan driver for both the application and the engine.
 const NAME: &CStr = c"clockwork";
@@ -164,6 +167,16 @@ impl VulkanRenderHardwareInterface {
                 debug_utils,
                 messenger,
             });
+        }
+
+        // TODO: choose a device to render with.
+        for device in PhysicalDevice::enumerate(&rhi.instance)? {
+            info!(
+                "found {:?} {}, supporting Vulkan {}",
+                device.device_type(),
+                device.name(),
+                format_version(device.api_version()),
+            );
         }
 
         Ok(rhi)
