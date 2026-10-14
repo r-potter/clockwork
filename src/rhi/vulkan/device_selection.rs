@@ -160,7 +160,7 @@ fn unmet_requirements(candidate: &Candidate) -> Vec<&'static str> {
 ///
 /// 1. device type, preferring discrete GPUs, then integrated, virtual, CPU
 ///    and other devices
-/// 2. size of the largest device-local memory heap
+/// 2. total size of the device-local memory heaps
 fn compare(a: &PhysicalDevice, b: &PhysicalDevice) -> Ordering {
     device_type_rank(a.device_type())
         .cmp(&device_type_rank(b.device_type()))
@@ -352,7 +352,7 @@ mod tests {
     }
 
     #[test]
-    fn compares_the_largest_heap_not_the_total() {
+    fn compares_the_total_not_the_largest_heap() {
         let mut split = device("split", vk::PhysicalDeviceType::DISCRETE_GPU, 6 * GIB);
         split.memory_properties.memory_heap_count = 2;
         split.memory_properties.memory_heaps[1] = vk::MemoryHeap {
@@ -360,10 +360,10 @@ mod tests {
             flags: vk::MemoryHeapFlags::DEVICE_LOCAL,
         };
         let devices = vec![
-            split,
             device("single", vk::PhysicalDeviceType::DISCRETE_GPU, 8 * GIB),
+            split,
         ];
-        assert_eq!(selected_name(devices), "single");
+        assert_eq!(selected_name(devices), "split");
     }
 
     #[test]

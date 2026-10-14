@@ -16,9 +16,11 @@ Outstanding tasks and future work.
   - update any API changes between 0.38 and `master`
 - [x] **Choose a physical device to render with.** Done in
       `src/rhi/vulkan/device_selection.rs`: devices are filtered by
-      `REQUIREMENTS` (Vulkan 1.4 and a graphics queue), then compared by
-      device type and largest device-local heap. The RHI keeps only the chosen
-      device.
+      `REQUIREMENTS` (Vulkan 1.4, dynamic rendering and synchronization2, and
+      a graphics queue; plus, when there is a window, `VK_KHR_swapchain`, a
+      queue family that can present, and a surface format and present mode),
+      then compared by device type and total device-local memory. The RHI
+      keeps only the chosen device.
 - [ ] **Extend device selection as the renderer grows.** Add entries to
       `REQUIREMENTS` for the features, limits and extensions the renderer
       comes to depend on, and refine `compare` if needed. Remove the

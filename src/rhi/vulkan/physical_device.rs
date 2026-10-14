@@ -156,7 +156,7 @@ impl PhysicalDevice {
         self.properties.core.api_version
     }
 
-    /// The size, in bytes, of the device's largest device-local memory heap, or
+    /// The total size, in bytes, of the device's device-local memory heaps, or
     /// 0 if it has none.
     ///
     /// On integrated GPUs this is typically shared system memory.
@@ -166,8 +166,7 @@ impl PhysicalDevice {
             .iter()
             .filter(|heap| heap.flags.contains(vk::MemoryHeapFlags::DEVICE_LOCAL))
             .map(|heap| heap.size)
-            .max()
-            .unwrap_or(0)
+            .sum()
     }
 
     /// The device's limits, such as maximum image sizes.
