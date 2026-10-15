@@ -26,7 +26,7 @@ These platforms are supported from the start, and every design accounts for them
 | | Linux | Windows |
 |---|---|---|
 | Build and T0 | CI (hosted runner) | CI (hosted runner) |
-| T1 and smoke runs | CI, on a pinned lavapipe, with X11 and Wayland on virtual displays; and on the RTX 3090 before review | On a Windows machine with a GPU, before review |
+| T1 and smoke runs | CI, on a pinned lavapipe, with X11 and Wayland on virtual displays; and on the RTX 3090 before review | On the Windows desktop with an RTX 4090, before review |
 
 macOS and Android aren't supported. ADR 0002's extensions aren't available there yet.
 

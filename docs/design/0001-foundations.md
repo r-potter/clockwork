@@ -35,7 +35,7 @@ Clockwork draws a hardcoded triangle through a Vulkan 1.4 backend (`src/rhi/vulk
 9. CI on every push, with no GPU:
    - build and T0 tests on Linux and Windows
    - on Linux, T1 tests and windowed smoke runs under X11 and Wayland, on a pinned lavapipe built from Mesa source
-10. Hardware checks before review: T1 tests and smoke runs on the RTX 3090 (Linux, X11 and Wayland) and on a Windows machine (Win32), for what lavapipe can't cover.
+10. Hardware checks before review: T1 tests and smoke runs on the RTX 3090 (Linux, X11 and Wayland) and on the Windows desktop with an RTX 4090 (Win32), for what lavapipe can't cover.
 11. Comprehensive rustdoc: every item documented, including private items, struct fields and test helpers.
 
 ## Non-goals
@@ -360,6 +360,8 @@ Developer tooling is an `xtask` crate: a small Rust binary in `xtask/`, run thro
 
 ### Hardware checks before review
 
+The two machines are the Linux development machine with the RTX 3090, and the Windows desktop with an RTX 4090 ("the Windows machine" elsewhere in this design). The Windows driver's support for ADR 0002's extensions is checked with `vulkaninfo` in `foundations-ash-1.4`, and its version is recorded in `docs/testing.md` next to the Linux one.
+
 CI can't cover everything, so each branch's review description records the result of:
 - `cargo xtask check --gpu` on the RTX 3090, under Linux, with both window systems in a desktop session. This covers multi-queue paths and present timing, which lavapipe lacks, and validation on a real driver.
 - `cargo xtask check --gpu` on the Windows machine, under Win32.
@@ -623,13 +625,14 @@ Each slice also writes its section of the testing guide (R19).
 | Mesa `main` at the pinned commit has bugs that cause false failures | Medium | Noise in CI | Pin a commit that passes Mesa's own CI. Report bugs upstream, and move the pin when fixed. Never suppress a lavapipe-only failure without a matching upstream issue. |
 | Lavapipe behaves differently from hardware drivers, hiding bugs or reporting false ones | Medium | Missed bugs, or noise | The hardware checks before review. A failure on only one driver is investigated, not suppressed. |
 | Multi-queue paths and present timing aren't tested in CI | Certain | Regressions found late | Hardware checks before review are required for any branch touching queues, synchronization or presentation |
+| The Windows driver lacks an ADR 0002 extension | Low | Windows T1 tests can't run | Check it with `vulkaninfo` in `foundations-ash-1.4`, before anything requires the extensions, and update the driver if needed |
 | Windows rendering isn't tested in CI | Certain | Windows-only regressions found late | The `windows` CI job builds and runs T0, and the Windows machine's checks are part of every review. Revisit when Windows lavapipe with descriptor heaps is available. |
 | Smoke runs on virtual displays are flaky (Xvfb or headless Weston with lavapipe's presentation) | Medium | Spurious failures | Exit after a frame count, not after a time. If presentation through headless Weston proves unreliable, keep the Wayland run on the RTX 3090 only, and record it here. |
 | The lavapipe build breaks when CI's runner image changes | Low | CI job fails | The cache key includes the image. The prerequisites check names missing build dependencies. |
 
 ## Open questions
 
-1. **Which Windows machine?** The hardware checks need a Windows machine with a GPU and driver that support ADR 0002's extensions. Which machine is it, and is it available for every review?
+None remain. See *Resolved in review* below.
 
 ## Resolved in review
 
@@ -638,7 +641,8 @@ Each slice also writes its section of the testing guide (R19).
 | CI scope | No GPU in CI. T1 tests and Linux smoke runs use a pinned lavapipe, with hardware checks before review. (An earlier answer assumed a self-hosted GPU runner.) |
 | Platforms | Windows (Win32), X11 and Wayland, from the start (ADR 0003) |
 | Check tooling | `xtask`, because shell scripts don't run on Windows |
-| Windows GPU testing | By hand on a Windows machine before review, not lavapipe in CI |
+| Windows GPU testing | By hand before review, not lavapipe in CI |
+| Which Windows machine | The Windows desktop with an RTX 4090 |
 | Missing validation layer | T1 tests always fail without it. There's no override. |
 | Documentation strictness | Comprehensive: every item, including private items, fields and test helpers |
 | Smoke-run configuration | Command-line options for the application, not environment variables |
@@ -662,3 +666,4 @@ Each slice also writes its section of the testing guide (R19).
 | 2026-10-15 | Revised after review: replaced the `ValidationReport` side channel with capture of `tracing` events. Added engine-wide sessions in a new `diagnostics` module, attributed through spans or an explicit field, with `TestSession` failing tests on any unexpected warning or error. Validation became required at creation (`Validation::Required`), with no query method. `--fail-on-validation` became `--fail-on-warnings`. Added the logging-level contract and the `foundations-diagnostics` slice. |
 | 2026-10-15 | Revised after review: moved the architecture overview and the ADRs for steps 4 and 7 to a separate design branch, and the testing guide into the implementation slices. Added the test tier definitions and the guide's plan (R19). |
 | 2026-10-15 | Revised after review: Windows (Win32), X11 and Wayland supported from the start (new ADR 0003). `cargo xtask` replaced the shell script. A pinned lavapipe built from Mesa source replaced the self-hosted GPU runner in CI, with Linux and Windows CI jobs and hardware checks before review. Added R20 and R21, the `foundations-lavapipe` slice, and `CLOCKWORK_REQUIRED_CAPABILITIES` in place of `CLOCKWORK_REQUIRE_ALL_CAPABILITIES`. |
+| 2026-10-15 | Revised after review: the Windows hardware checks run on the Windows desktop with an RTX 4090, closing the last open question |
