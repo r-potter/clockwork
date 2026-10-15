@@ -19,7 +19,7 @@ Clockwork is a rendering engine for showcasing graphics and simulation technique
 3. **Pure cores, thin shells.** Each subsystem keeps its logic in plain Rust that can be tested without a GPU, window or file system: the frame graph compiler, ECS storage and scheduling, importers' mesh processing, input mapping. The parts that touch Vulkan, winit or disk stay small and translate only.
 4. **No silent failure.** Importers report everything they skip. Device selection logs why each device was rejected. The validation layer's messages fail the tests.
 5. **Modern Vulkan only.** Vulkan 1.4, with descriptor heaps, device address commands, shader objects, dynamic rendering and timeline semaphores, and no legacy fallback paths. See [ADR 0002](decisions/0002-vulkan-feature-baseline.md).
-6. **Every platform from the start.** Windows (Win32), and Linux under both X11 and Wayland, are supported from the first step, and every design accounts for their differences. See [ADR 0003](decisions/0003-supported-platforms.md).
+6. **Every platform from the start.** Windows (Win32), and Linux under both X11 and Wayland, are supported from the first step, and every design accounts for their differences. Android, macOS and iOS are planned, through Mesa's Turnip and KosmicKrisp drivers, so no design may assume a desktop. See [ADR 0003](decisions/0003-supported-platforms.md).
 7. **Decisions are written down.** Every design and every cross-cutting decision has a document. Deviations are recorded, not left in commit messages.
 
 ## Subsystems
