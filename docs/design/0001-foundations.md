@@ -4,7 +4,7 @@
 - **Author:** Ralph Potter, with Claude
 - **Created:** 2026-10-15
 - **Accepted:**
-- **Depends on:** ADRs [0001](../decisions/0001-single-binary-crate.md) and [0002](../decisions/0002-vulkan-feature-baseline.md)
+- **Depends on:** ADRs [0001](../decisions/0001-single-binary-crate.md), [0002](../decisions/0002-vulkan-feature-baseline.md) and [0003](../decisions/0003-supported-platforms.md)
 
 ## Context
 
@@ -15,6 +15,8 @@ Clockwork draws a hardcoded triangle through a Vulkan 1.4 backend (`src/rhi/vulk
 - **Every test needs a Vulkan driver.** The two tests in `src/rhi.rs` create a real instance, so `cargo test` fails on a machine without one, such as a hosted CI runner. Device selection's tests (`src/rhi/vulkan/device_selection.rs`) are pure and don't, but they can't be run separately from the GPU ones. This is the "Make the unit tests work without a Vulkan driver" item in `TODO.md`.
 - **The bindings are behind.** `ash` 0.38 has bindings only up to Vulkan 1.3.281. The engine requests 1.4 with a hand-built version number, and can't query 1.4 features or the extensions ADR 0002 requires: `VK_EXT_descriptor_heap`, `VK_KHR_device_address_commands` and `VK_EXT_present_timing`.
 - **Checks are manual.** Formatting, clippy, docs and the windowed run are done by hand, there's no CI, and nothing enforces the `// SAFETY:` comments the code already writes everywhere.
+- **Only Linux has ever been run.** ADR 0003 makes Windows (Win32), X11 and Wayland supported from the start, so every check must run on both operating systems, and the windowed checks under all three window systems.
+- **There's no CI machine with a GPU.** GPU tests in CI need a software Vulkan driver. Mesa's lavapipe supports every extension ADR 0002 requires, but `VK_EXT_descriptor_heap` only on Mesa's `main` branch as of 2026-10-15: Mesa 26.2.5 doesn't have it, and the development machine's Mesa 26.0.8 has none of the three ADR 0002 extensions.
 - **The application has no options.** Device choice, validation features and run length can't be set when starting it.
 - **The development machine is being set up again.** As of 2026-10-15, after the driver upgrade, neither `slangc` nor the Khronos validation layer is installed, so `cargo build` fails in `build.rs`. Both will come from a Vulkan SDK installed in the home directory, whose `setup-env.sh` sets `VULKAN_SDK`, `PATH`, `LD_LIBRARY_PATH` and the layer path.
 
@@ -29,8 +31,12 @@ Clockwork draws a hardcoded triangle through a Vulkan 1.4 backend (`src/rhi/vulk
 5. Tests that skip cleanly on devices without a capability, and a way to make sure skips never hide failures on the reference device.
 6. Vulkan 1.4 bindings, with the 1.4 features and the ADR 0002 extensions queried and reported. They aren't required yet: the RHI design makes them required as the code that uses them lands.
 7. Command-line options for the application: device, validation, and automated smoke runs that fail on any warning.
-8. One command that runs every check a branch must pass, and CI that runs it on every push. T0 runs on a hosted runner, and T1 on a self-hosted GPU runner.
-9. Comprehensive rustdoc: every item documented, including private items, struct fields and test helpers.
+8. One command, `cargo xtask check`, that runs every check a branch must pass, on Linux and Windows.
+9. CI on every push, with no GPU:
+   - build and T0 tests on Linux and Windows
+   - on Linux, T1 tests and windowed smoke runs under X11 and Wayland, on a pinned lavapipe built from Mesa source
+10. Hardware checks before review: T1 tests and smoke runs on the RTX 3090 (Linux, X11 and Wayland) and on a Windows machine (Win32), for what lavapipe can't cover.
+11. Comprehensive rustdoc: every item documented, including private items, struct fields and test helpers.
 
 ## Non-goals
 
@@ -39,7 +45,8 @@ Clockwork draws a hardcoded triangle through a Vulkan 1.4 backend (`src/rhi/vulk
 - **The job system.** Span propagation to worker threads is a requirement this design places on it (see "Consequences for later designs"), but the job system itself is designed in `0005-ecs`.
 - **Structured diagnostics as data.** Importers' `ImportReport` and similar reports are designed with their subsystems. This design covers log events only.
 - **Property, snapshot, benchmark and fuzz infrastructure.** Each arrives with the first design that needs it (see "Test tiers").
-- **Setting up the GPU runner machine.** You install the runner and the Vulkan SDK. This design specifies what the runner must provide, under "GPU runner".
+- **Lavapipe on Windows.** No released Mesa has descriptor-heap support on lavapipe, and Windows builds of Mesa are only packaged for releases, so Windows T1 tests and smoke runs are run by hand on a Windows machine with a GPU. Revisit this when a Mesa release with descriptor heaps is packaged for Windows.
+- **A GPU in CI.** CI uses lavapipe only. Multi-queue paths (lavapipe has one queue family) and present timing (lavapipe doesn't support it) are covered by the hardware checks before review.
 
 ## Requirements
 
@@ -53,17 +60,19 @@ Clockwork draws a hardcoded triangle through a Vulkan 1.4 backend (`src/rhi/vulk
 | R6 | Synchronization validation is on by default in debug builds and tests | T1 `sync_hazards_are_reported` records a write-after-write hazard and sees it reported |
 | R7 | When validation is *required*, creating a backend fails if the layer is missing or a requested feature is unsupported. When it's only *preferred*, a warning is logged and creation continues. T1 tests always require it. | The decision is a pure function of the requested validation and the available layers and settings, with T0 tests for each case |
 | R8 | Tests needing no GPU pass with no Vulkan driver installed | The hosted CI job runs them on a runner with no Vulkan driver |
-| R9 | T1 tests skip, with a message, when the device lacks a capability, and fail instead under `CLOCKWORK_REQUIRE_ALL_CAPABILITIES=1` | T0 tests of the skip decision; a T1 run on llvmpipe shows the skip messages |
+| R9 | T1 tests skip, with a message, when the device lacks a capability, unless `CLOCKWORK_REQUIRED_CAPABILITIES` lists it (or is `all`), in which case they fail | T0 tests of the skip decision; T1 runs on lavapipe with its expected set, and on the RTX 3090 with `all` |
 | R10 | Device selection can be restricted to devices whose name contains a given substring | T0 tests in `device_selection`: a match, no match (an error listing the available devices), and case-insensitivity |
 | R11 | `ash` provides the Vulkan 1.4 and ADR 0002 extension bindings, and `ash-window` builds against the same `ash` | `cargo tree -d` shows one `ash`. `vk::API_VERSION_1_4` replaces the hand-built version. |
 | R12 | 1.4 features and properties, and the ADR 0002 extension features, are queried and logged | T1 `reference_device_reports_required_extensions` passes on the RTX 3090 with all capabilities required |
-| R13 | `unsafe` blocks must have `// SAFETY:` comments, and every item must be documented | Clippy lints in `Cargo.toml`. `scripts/check` passes with `-D warnings`. |
+| R13 | `unsafe` blocks must have `// SAFETY:` comments, and every item must be documented | Clippy lints in `Cargo.toml`. `cargo xtask check` passes with `-D warnings`. |
 | R14 | The application takes the command-line options `--device`, `--validation`, `--exit-after-frames` and `--fail-on-warnings`, documented in `--help` | T0 tests of option parsing, including invalid values |
 | R15 | The application counts warnings and errors from every subsystem and dependency, prints a summary at exit, and exits with an error under `--fail-on-warnings` if any were counted | T0 test of the counting layer; the smoke runs (R16) use `--fail-on-warnings` |
-| R16 | `scripts/check` runs every per-branch check; `--gpu` adds T1 tests and windowed smoke runs under Wayland and X11; `--gpu --no-window` adds only the T1 tests | Running each form on the branch that adds it |
-| R17 | CI runs on every push: T0 checks on a hosted runner, and `scripts/check --gpu --no-window` on the self-hosted GPU runner | Green runs of both jobs on the CI slice's branch |
-| R18 | `build.rs` finds `slangc` in the Vulkan SDK | Lookup order: `SLANGC`, then `$VULKAN_SDK/bin/slangc`, then `PATH`. The build-failure message names all three. |
+| R16 | `cargo xtask check` runs every per-branch check on Linux and Windows. `--gpu` adds T1 tests and windowed smoke runs under every window system the platform supports. `--lavapipe` uses the pinned lavapipe. `--virtual-displays` (Linux) starts Xvfb and a headless Weston for the smoke runs. | Running each form on the branch that adds it, on both operating systems |
+| R17 | CI runs on every push: `cargo xtask check` on hosted Linux and Windows runners, and `cargo xtask check --gpu --lavapipe --virtual-displays` on a hosted Linux runner | Green runs of all three jobs on the slices that add them |
+| R18 | `build.rs` finds `slangc` in the Vulkan SDK on Linux and Windows | Lookup order: `SLANGC`, then the SDK's binary directory (`$VULKAN_SDK/bin/slangc` on Linux, `%VULKAN_SDK%\Bin\slangc.exe` on Windows), then `PATH`. A pure function with T0 tests for both platforms on any machine. The build-failure message names all three. |
 | R19 | `docs/testing.md` describes every tool and rule the slices add, written in the slice that adds it | Each slice's review checks its section of the guide (see "Testing guide") |
+| R20 | `cargo xtask lavapipe` builds lavapipe from a pinned Mesa commit, reproducibly, and the T1 tests and smoke runs can use it | The pinned build reports `VK_EXT_descriptor_heap` and `VK_KHR_device_address_commands`, and `reference_device_reports_required_extensions` passes on it |
+| R21 | The application runs under Win32, X11 and Wayland, and the smoke runs exercise each | Smoke runs pass under X11 and Wayland in CI, and under Win32 on the Windows machine before review |
 
 ## Architecture
 
@@ -77,7 +86,7 @@ Every design's test plan uses these tiers. Tiers marked *(later)* get their tool
 | T0 | Property *(later)* | Invariants over generated inputs, with `proptest` | Everywhere |
 | T0 | Snapshot *(later)* | Readable output that's easier to review than to assert on, such as execution plans and import reports, with `insta` | Everywhere |
 | T0 | Soundness *(later)* | `unsafe` code under `miri`, and concurrency primitives under `loom` (nightly toolchain) | Everywhere |
-| T1 | GPU | Real Vulkan work, headless, with validation required and synchronization validation on | Development machine and the GPU CI runner |
+| T1 | GPU | Real Vulkan work, headless, with validation required and synchronization validation on | Pinned lavapipe in CI (Linux); the RTX 3090 and the Windows machine before review |
 | T1 | Golden image *(later)* | Rendered images compared against checked-in references, within a tolerance | As above, on the reference device |
 | T2 | Fuzz *(later)* | Parsers: frame graph descriptions, glTF, USD, with `cargo-fuzz` | On demand |
 | T2 | Benchmark *(later)* | Hot paths, tracked for regressions, with `criterion` | On demand |
@@ -88,7 +97,7 @@ How tests are told apart:
 - **Asset tests are ignored by default**, and run with `--ignored`.
 - **Everything else is T0.**
 
-Tests are unit tests inside the binary crate (ADR 0001). Shared helpers live in `src/test_support.rs`, compiled only for tests.
+Tests are unit tests inside the engine crate (ADR 0001). Shared helpers live in `src/test_support.rs`, compiled only for tests. `xtask` has its own unit tests.
 
 ### Logging levels are a contract
 
@@ -246,7 +255,7 @@ The application and the tests configure a backend the same way, through `Backend
   | `--exit-after-frames <N>` | Exit cleanly after rendering N frames | Run until closed |
   | `--fail-on-warnings` | Require validation, and exit with an error if any warning or error was logged | Off |
 
-- **Environment (tests).** `cargo test` can't pass options to tests, so tests read `CLOCKWORK_DEVICE`, `CLOCKWORK_VALIDATION` (same syntax as `--validation`, except that `off` is rejected) and `CLOCKWORK_REQUIRE_ALL_CAPABILITIES`. The environment is read only in `src/test_support.rs`. The engine never reads it, so its behaviour depends only on its options.
+- **Environment (tests).** `cargo test` can't pass options to tests, so tests read `CLOCKWORK_DEVICE`, `CLOCKWORK_VALIDATION` (same syntax as `--validation`, except that `off` is rejected) and `CLOCKWORK_REQUIRED_CAPABILITIES` (`all`, or a comma-separated list of capability names). The environment is read only in `src/test_support.rs`. The engine never reads it, so its behaviour depends only on its options.
 - **The option values are parsed by the same functions** (`ValidationFeatures::from_str`), so the two sources can't drift apart.
 
 ### Device filter
@@ -282,49 +291,80 @@ Selection gains a phase 0, before requirements. If `BackendOptions::device_filte
 
 | Slice | Section of the guide |
 |---|---|
-| `foundations-checks` | Prerequisites and the Vulkan SDK environment; the test tiers and how to run each; `scripts/check`; conventions for writing tests (naming, one behaviour per test, fixtures in `testdata/`, failing test first for bug fixes) |
+| `foundations-checks` | Prerequisites on Linux and Windows, and the Vulkan SDK environment on each; the test tiers and how to run each; `cargo xtask check`; conventions for writing tests (naming, one behaviour per test, fixtures in `testdata/`, failing test first for bug fixes); CI jobs |
 | `foundations-diagnostics` | Warnings and errors fail tests: `TestSession`, expectations, and the rules (no other subscribers, threads enter the session span, unattributed banners, suppression) |
-| `foundations-validation` | GPU tests: required validation, `CLOCKWORK_VALIDATION` and its features, capability skips and `CLOCKWORK_REQUIRE_ALL_CAPABILITIES`, `CLOCKWORK_DEVICE` |
-| `foundations-cli` | Smoke runs, and the table relating test variables to application options |
+| `foundations-validation` | GPU tests: required validation, `CLOCKWORK_VALIDATION` and its features, capability skips and `CLOCKWORK_REQUIRED_CAPABILITIES`, `CLOCKWORK_DEVICE` |
+| `foundations-cli` | Smoke runs on each window system, virtual displays, and the table relating test variables to application options |
 | `foundations-ash-1.4` | The minimum Vulkan SDK and driver versions |
-| `foundations-ci` | CI jobs and the GPU runner's requirements |
+| `foundations-lavapipe` | Building and using the pinned lavapipe, bumping the pin, and the lavapipe CI job |
 
-### Checks
+### Platforms
 
-**`scripts/check`** is a POSIX shell script with no dependencies beyond the toolchain. It runs:
-1. a prerequisites check: `slangc` found as `build.rs` would find it (R18); and with `--gpu`, the validation layer. It prints the `slangc` path, the SDK version and the layer found, and reports anything missing with a pointer to `docs/testing.md`.
-2. `cargo fmt --check`
-3. `cargo clippy --all-targets -- -D warnings`, in debug and release
-4. `cargo doc --no-deps --document-private-items`, with `RUSTDOCFLAGS=-D warnings`
-5. `cargo test -- --skip gpu_tests`
+ADR 0003 makes three window systems supported from the start:
 
-**With `--gpu`**, it also runs:
-- `cargo test` with `CLOCKWORK_REQUIRE_ALL_CAPABILITIES=1`
-- unless `--no-window` is given, a windowed smoke run under Wayland, then under X11 (with `WAYLAND_DISPLAY` unset, so winit falls back to X11). Each run is `cargo run -- --exit-after-frames 300 --fail-on-warnings`, and fails if the app exits non-zero. If there's no display for a backend, that's an error, not a silent skip. Use `--no-window` to leave the smoke runs out on purpose.
+| OS | Window systems | How the smoke runs choose it |
+|---|---|---|
+| Windows | Win32 | The only one |
+| Linux | Wayland, X11 | winit uses Wayland when `WAYLAND_DISPLAY` is set, and X11 otherwise. A run forces X11 by unsetting `WAYLAND_DISPLAY` for the child process. |
+
+Platform-specific behaviour in step 0:
+- **`slangc` lookup** (R18): the SDK's directory and executable name differ.
+- **The Vulkan SDK:** on Linux, `setup-env.sh` sets the variables, including the layer path. On Windows, the installer sets `VULKAN_SDK`, and registers the validation layer in the registry. Neither setup is inspected directly. The prerequisites check asks the Vulkan loader which layers it can find, which is correct on both.
+- **Line endings:** a `.gitattributes` file keeps text files, including shaders, as LF on every platform, so that diffs and `cargo fmt --check` agree.
+- **Paths:** `xtask` and the engine build paths with `Path`, never by joining strings, and tests that compare paths compare `Path` values.
+
+### Checks: `cargo xtask`
+
+Developer tooling is an `xtask` crate: a small Rust binary in `xtask/`, run through an alias in `.cargo/config.toml` (`xtask = "run --package xtask --"`). The repository becomes a Cargo workspace with two members: the engine (the root package, unchanged, still a single binary crate per ADR 0001) and `xtask`. `default-members` is the engine alone, so plain `cargo build`, `run` and `test` behave as they do today.
+
+`xtask` uses `clap` for its options and `xshell` to run commands. Its logic is pure functions with unit tests: option handling, the `slangc` lookup (shared with `build.rs` as `build/slangc.rs`), deciding which window systems are available, and building the Mesa configuration.
+
+**`cargo xtask check`** runs, in order:
+1. a prerequisites check. It prints the `slangc` path and version, the Vulkan SDK version, and, with `--gpu`, the layers and devices the Vulkan loader finds (`xtask` uses `ash` for this). Anything missing is reported with a pointer to `docs/testing.md`.
+2. `cargo fmt --all --check`
+3. `cargo clippy --workspace --all-targets -- -D warnings`, in debug and release
+4. `cargo doc --workspace --no-deps --document-private-items`, with `RUSTDOCFLAGS=-D warnings`
+5. `cargo test --workspace -- --skip gpu_tests`
+
+**Options:**
+
+| Option | Adds |
+|---|---|
+| `--gpu` | `cargo test` including T1, with `CLOCKWORK_REQUIRED_CAPABILITIES=all`; then a smoke run under each window system the platform supports: `cargo run -- --exit-after-frames 300 --fail-on-warnings`, which must exit successfully. A window system with no display available is an error, not a silent skip. |
+| `--no-window` | With `--gpu`: leave out the smoke runs, on purpose |
+| `--lavapipe` | With `--gpu`: use the pinned lavapipe (see below) as the only driver, through the loader's `VK_DRIVER_FILES` variable, set for child processes only. The required capabilities become lavapipe's expected set: everything except `DedicatedComputeQueue`, `DedicatedTransferQueue` and `PresentTiming`. |
+| `--virtual-displays` | Linux, with `--gpu`: start `Xvfb` and a headless Weston (`weston --backend=headless`) for the smoke runs, and stop them afterwards, so that smoke runs work with no desktop session |
+
+### Lavapipe
+
+`cargo xtask lavapipe` builds lavapipe, Mesa's CPU Vulkan driver, from a pinned commit:
+- **The pin** is a constant in `xtask/src/lavapipe.rs`, with the commit hash, its date and the reason for choosing it. It's a Mesa `main` commit until a release has descriptor-heap support on lavapipe; then it becomes that release's tag. Changing the pin is a reviewed change like any other.
+- **The build** uses Meson, with only what lavapipe needs: `-Dvulkan-drivers=swrast -Dgallium-drivers=llvmpipe -Dplatforms=x11,wayland -Dbuildtype=release`. It's installed in `target/lavapipe/<commit>/`, so builds for different pins coexist and `cargo clean` removes them. The build needs LLVM, Meson, Ninja, Python with Mako, and the X11 and Wayland development packages. The exact list is in `docs/testing.md`, and the prerequisites check reports what's missing.
+- **The output** is the driver and its ICD manifest (`lvp_icd.x86_64.json`). `--lavapipe` points `VK_DRIVER_FILES` at the manifest.
+- **The same build** is used in CI and locally, so a lavapipe failure in CI can be reproduced with `cargo xtask check --gpu --lavapipe`.
+- **Linux only.** Windows is covered by the Windows machine (see Non-goals).
 
 ### CI
 
-`.github/workflows/ci.yml` runs on every push and on pull requests, with two jobs:
+`.github/workflows/ci.yml` runs on every push and on pull requests, on GitHub-hosted runners only:
 
-| Job | Runs on | Runs | Toolchain setup |
-|---|---|---|---|
-| `checks` | `ubuntu-latest` | `scripts/check` (T0) | Pinned `slangc` release from `shader-slang/slang`'s GitHub releases. No Vulkan driver, which proves R8. |
-| `gpu` | `[self-hosted, linux, gpu]` | `scripts/check --gpu --no-window` | From the runner's environment |
+| Job | Runner | Runs |
+|---|---|---|
+| `linux` | `ubuntu-latest` | `cargo xtask check`, with no Vulkan driver installed, which proves R8 |
+| `windows` | `windows-latest` | `cargo xtask check`, likewise |
+| `linux-lavapipe` | `ubuntu-latest` | `cargo xtask lavapipe`, then `cargo xtask check --gpu --lavapipe --virtual-displays` |
 
-### GPU runner
+- **Toolchain:** every job installs a pinned Vulkan SDK version, for `slangc` and the validation layer. On Windows the SDK provides `slangc.exe`.
+- **Caching:** the lavapipe build is cached, keyed on the Mesa commit and the runner's image, so it's rebuilt only when the pin changes. An uncached build takes several minutes.
+- **No secrets and no self-hosted runners,** so pull requests from forks are safe to run.
 
-The runner is a GitHub Actions self-hosted runner on the development machine (the RTX 3090), or a machine like it. It must provide:
+### Hardware checks before review
 
-- **Toolchain and drivers:**
-  - the Rust stable toolchain
-  - the NVIDIA driver
-  - the Vulkan SDK, the same version as development. Its variables (`VULKAN_SDK`, `PATH`, `LD_LIBRARY_PATH`, and the layer path) go in the runner's `.env` file, because the runner service doesn't run `setup-env.sh` or a login shell.
-- **Labels:** `self-hosted`, `linux` and `gpu`.
-- **Security:**
-  - Self-hosted runners run whatever code a workflow checks out, so the `gpu` job runs only for pushes to this repository and for pull requests from branches in it (`github.event.pull_request.head.repo.full_name == github.repository`), never for forks.
-  - The repository setting "Require approval for all outside collaborators" should also be on.
-- **Exclusive use of the GPU:** a `concurrency` group serializes `gpu` jobs, so they don't contend for it.
-- **Windowed smoke runs** stay a pre-review step on the development machine (`scripts/check --gpu`). The runner service has no desktop session.
+CI can't cover everything, so each branch's review description records the result of:
+- `cargo xtask check --gpu` on the RTX 3090, under Linux, with both window systems in a desktop session. This covers multi-queue paths and present timing, which lavapipe lacks, and validation on a real driver.
+- `cargo xtask check --gpu` on the Windows machine, under Win32.
+
+A branch that touches only code with no platform or GPU behaviour, such as documentation or `xtask` itself, may say so instead.
 
 ## API
 
@@ -446,7 +486,7 @@ impl VulkanTestBackend {
     pub fn headless(session: &TestSession) -> Self;
 
     /// Returns whether the device has `capability`. If it doesn't, prints a skip message,
-    /// or panics under `CLOCKWORK_REQUIRE_ALL_CAPABILITIES`.
+    /// or panics if `CLOCKWORK_REQUIRED_CAPABILITIES` includes it.
     pub fn has(&self, capability: Capability) -> bool;
 }
 
@@ -509,7 +549,11 @@ Not performance-critical.
 - **`lexopt`, `argh` or hand-written parsing instead of `clap`.** All are smaller, but `clap` is the de facto standard, generates complete `--help` text from doc comments, and will scale as options are added.
 - **Marking GPU tests `#[ignore]`.** Then `cargo test` on the development machine would silently skip them, which is the wrong default for the machine that's meant to run them. Rejected for the `gpu_tests` naming convention.
 - **A Cargo feature `gpu-tests`.** It would need a rebuild to switch tiers, and it's easy to forget. Rejected.
-- **`just` or an `xtask` crate for checks.** `just` is another tool to install. `xtask` needs a second crate, against ADR 0001. Rejected for a shell script.
+- **A shell script for checks.** An earlier revision used `scripts/check`, a POSIX shell script. It needs no build step and every line is a command you can copy, but it doesn't run on Windows without Git Bash or WSL (and WSL can't check the Windows build), and its logic (the `slangc` lookup, display detection, Mesa configuration) couldn't be unit-tested. Replaced in review by `xtask` once Windows became a requirement.
+- **`just`, `cargo-make` or `make`.** Each is another tool to install, and still leaves the logic untested. Rejected.
+- **A self-hosted GPU runner.** Planned in an earlier revision, but no machine is available. Replaced by lavapipe in CI, plus hardware checks before review.
+- **Building lavapipe on Windows in CI.** Possible with MSVC, LLVM and Meson, but the first build is slow, and it's the most fragile part of CI. Rejected in review for a Windows machine, until a Mesa release with descriptor heaps is packaged for Windows.
+- **Using the distribution's Mesa or a released Mesa.** Neither has descriptor heaps on lavapipe yet. Rejected for a pinned `main` commit.
 - **An override to run T1 tests without validation.** It would make a pass that proves less than it claims. Rejected in review.
 
 ## Consequences for later designs
@@ -533,33 +577,34 @@ Not performance-critical.
   - command-line parsing with `clap`'s `try_parse_from`, including `--help` succeeding, plus `clap`'s `debug_assert` test of the command definition (R14)
   - the skip-or-fail decision (R9)
   - device filter matching (R10)
-  - the `slangc` lookup order (R18). Build scripts can't have tests of their own, so the lookup is a pure function of the environment in `build/slangc.rs`. `build.rs` uses it, and the crate also includes it under `cfg(test)` through `#[path]`, so that its tests run with `cargo test`.
+  - the `slangc` lookup order on both platforms (R18). Build scripts can't have tests of their own, so the lookup is a pure function of the environment and the platform, in `build/slangc.rs`. `build.rs` and `xtask` use it, and `xtask`'s tests cover it.
+  - `xtask`: option handling, the window systems chosen for each platform and environment, the required-capability set for `--lavapipe`, and the Meson arguments (R16, R20)
   - the `ALL_GRAPHICS_APIS` compile-time check (kept)
 - **T1:**
   - the moved headless tests, now each in a `TestSession`
   - `validation_errors_are_counted`: create an object with an invalid parameter on purpose, expecting the error by its VUID (R5)
   - `sync_hazards_are_reported`: two unsynchronized transfer writes to one buffer, expecting the hazard (R6)
   - `reference_device_reports_required_extensions` (R12)
-  - all of these on the RTX 3090, and with `CLOCKWORK_DEVICE=llvmpipe`, checking that the capability skips are reported there
-- **Smoke:** windowed runs under Wayland and X11 with `--fail-on-warnings` (R16).
-- **CI:** both jobs green (R8, R17).
+  - all of these on the pinned lavapipe in CI, with its expected capability set, and on the RTX 3090 and the Windows machine with all capabilities required
+- **Smoke:** windowed runs with `--fail-on-warnings` under X11 and Wayland, on virtual displays in CI and in a desktop session on the RTX 3090; under Win32 on the Windows machine (R16, R21).
+- **CI:** all three jobs green (R8, R17).
 - **Fixtures:** none.
 
 ## Implementation slices
 
 | Branch | Contents | Requirements |
 |---|---|---|
-| `design/foundations` | This design and the documentation set (this branch) | R1 |
-| `foundations-checks` | The `slangc` lookup in `build.rs`; `[lints]`, and documenting everything they report; `scripts/check` without `--gpu` | R13, R18, part of R16 |
+| `design/foundations` | This design, the design process and template, and ADRs 0001 to 0003 (this branch) | R1 |
+| `foundations-checks` | The workspace and `xtask` with `cargo xtask check` (no `--gpu`); the `slangc` lookup for both platforms; `.gitattributes`; `[lints]`, and documenting everything they report; any fixes the Windows build needs; the `linux` and `windows` CI jobs | R13, R18, part of R16 and R17 |
 | `foundations-diagnostics` | `src/diagnostics.rs`: sessions, attribution, classification, `DiagnosticCounter`; `TestCapture` and `TestSession`; the application's subscriber rebuilt with per-layer filters and a session. No GPU needed. | R2, R3, R4, part of R15 |
-| `foundations-validation` | Validation events on `clockwork::validation` with explicit sessions; `VK_EXT_layer_settings`; `BackendOptions`, `Validation` and `ValidationFeatures`; `VulkanTestBackend` and capability skips; the device filter; the tier split (moving tests); `scripts/check --gpu --no-window`. Closes the "unit tests without a Vulkan driver" item in `TODO.md`. | R5–R10, part of R16 |
-| `foundations-cli` | `clap` options, the summary at exit, `--fail-on-warnings`, and windowed smoke runs in `scripts/check --gpu` | R14, R15, R16 |
+| `foundations-validation` | Validation events on `clockwork::validation` with explicit sessions; `VK_EXT_layer_settings`; `BackendOptions`, `Validation` and `ValidationFeatures`; `VulkanTestBackend` and capability skips; the device filter; the tier split (moving tests); `cargo xtask check --gpu --no-window`. Closes the "unit tests without a Vulkan driver" item in `TODO.md`. | R5–R10, part of R16 |
+| `foundations-cli` | `clap` options, the summary at exit, `--fail-on-warnings`; smoke runs in `cargo xtask check --gpu` for each window system, and `--virtual-displays` | R14, R15, R16, R21 |
 | `foundations-ash-1.4` | The pinned `ash`, `API_VERSION_1_4`, 1.4 and extension queries, the capability summary log, and the minimum Vulkan SDK version recorded in `docs/testing.md`. Closes the "Vulkan 1.4 bindings" item in `TODO.md`. | R11, R12 |
-| `foundations-ci` | The workflow with both jobs, and the runner requirements in `docs/testing.md`. Closes the "install `slangc` on CI" item in `TODO.md`. | R8, R17 |
+| `foundations-lavapipe` | `cargo xtask lavapipe`, `--lavapipe`, and the `linux-lavapipe` CI job. Closes the "install `slangc` on CI" item in `TODO.md`. | R17, R20 |
 
 Each slice also writes its section of the testing guide (R19).
 
-`foundations-diagnostics` comes before `foundations-validation`, so that validation is built on it. `foundations-validation` comes before `foundations-ash-1.4`, so that the binding upgrade is checked by the new harness, including synchronization validation.
+`foundations-diagnostics` comes before `foundations-validation`, so that validation is built on it. `foundations-validation` comes before `foundations-ash-1.4`, so that the binding upgrade is checked by the new harness, including synchronization validation. `foundations-lavapipe` comes last, because lavapipe's value in CI is checking the ADR 0002 extensions, which `foundations-ash-1.4` makes visible.
 
 ## Risks
 
@@ -574,19 +619,26 @@ Each slice also writes its section of the testing guide (R19).
 | The SDK's validation layer doesn't know `VK_EXT_descriptor_heap` or device-address commands, and reports errors or doesn't validate them | Medium | False failures or blind spots from step 1 | Check the SDK's layer against the extensions in `foundations-ash-1.4`, and record the minimum SDK version in `docs/testing.md`. Update the SDK if it's too old. |
 | Synchronization validation reports false positives on new extensions | Medium | Noise | Suppress individually with a reason and an upstream issue (R4) |
 | The layer setting names differ between layer versions | Low | Settings silently ignored | Check the requested settings against the layer manifest at creation. Under `Required`, an unknown setting is an error. |
-| The runner's environment differs from the interactive shell's (for example, a missing SDK variable) | Medium | GPU job fails, or tests a different layer | `scripts/check` prints the `slangc` path, the SDK version and the layer found, at the start of every run |
-| The self-hosted runner executes untrusted code | Low with the job restrictions | Compromise of the development machine | Run the `gpu` job only for pushes to this repository and pull requests from its branches, and require approval for outside collaborators |
-| The windowed smoke run is flaky | Low | Spurious failures | It runs only on the development machine. Exit after a frame count, not after a time. |
+| A machine's environment differs from what the checks expect (for example, a missing SDK variable) | Medium | Checks fail, or test a different layer or driver | `cargo xtask check` prints the `slangc` path, the SDK version, and the layers and devices the loader finds, at the start of every run |
+| Mesa `main` at the pinned commit has bugs that cause false failures | Medium | Noise in CI | Pin a commit that passes Mesa's own CI. Report bugs upstream, and move the pin when fixed. Never suppress a lavapipe-only failure without a matching upstream issue. |
+| Lavapipe behaves differently from hardware drivers, hiding bugs or reporting false ones | Medium | Missed bugs, or noise | The hardware checks before review. A failure on only one driver is investigated, not suppressed. |
+| Multi-queue paths and present timing aren't tested in CI | Certain | Regressions found late | Hardware checks before review are required for any branch touching queues, synchronization or presentation |
+| Windows rendering isn't tested in CI | Certain | Windows-only regressions found late | The `windows` CI job builds and runs T0, and the Windows machine's checks are part of every review. Revisit when Windows lavapipe with descriptor heaps is available. |
+| Smoke runs on virtual displays are flaky (Xvfb or headless Weston with lavapipe's presentation) | Medium | Spurious failures | Exit after a frame count, not after a time. If presentation through headless Weston proves unreliable, keep the Wayland run on the RTX 3090 only, and record it here. |
+| The lavapipe build breaks when CI's runner image changes | Low | CI job fails | The cache key includes the image. The prerequisites check names missing build dependencies. |
 
 ## Open questions
 
-None remain. See *Resolved in review* below.
+1. **Which Windows machine?** The hardware checks need a Windows machine with a GPU and driver that support ADR 0002's extensions. Which machine is it, and is it available for every review?
 
 ## Resolved in review
 
 | Question | Resolution |
 |---|---|
-| CI scope | Assume a self-hosted GPU runner: CI runs T1 tests too |
+| CI scope | No GPU in CI. T1 tests and Linux smoke runs use a pinned lavapipe, with hardware checks before review. (An earlier answer assumed a self-hosted GPU runner.) |
+| Platforms | Windows (Win32), X11 and Wayland, from the start (ADR 0003) |
+| Check tooling | `xtask`, because shell scripts don't run on Windows |
+| Windows GPU testing | By hand on a Windows machine before review, not lavapipe in CI |
 | Missing validation layer | T1 tests always fail without it. There's no override. |
 | Documentation strictness | Comprehensive: every item, including private items, fields and test helpers |
 | Smoke-run configuration | Command-line options for the application, not environment variables |
@@ -607,5 +659,6 @@ None remain. See *Resolved in review* below.
 |---|---|
 | 2026-10-15 | Proposed |
 | 2026-10-15 | Revised after review: added a self-hosted GPU runner for T1 in CI, removed the option to run T1 tests without validation, added command-line options (`BackendOptions`, `clap`) in place of environment variables for the application, `slangc` lookup in the Vulkan SDK, and the `foundations-cli` slice |
-| 2026-10-15 | Revised after review: moved the architecture overview and the ADRs for steps 4 and 7 to a separate design branch, and the testing guide into the implementation slices. Added the test tier definitions and the guide's plan (R19). |
 | 2026-10-15 | Revised after review: replaced the `ValidationReport` side channel with capture of `tracing` events. Added engine-wide sessions in a new `diagnostics` module, attributed through spans or an explicit field, with `TestSession` failing tests on any unexpected warning or error. Validation became required at creation (`Validation::Required`), with no query method. `--fail-on-validation` became `--fail-on-warnings`. Added the logging-level contract and the `foundations-diagnostics` slice. |
+| 2026-10-15 | Revised after review: moved the architecture overview and the ADRs for steps 4 and 7 to a separate design branch, and the testing guide into the implementation slices. Added the test tier definitions and the guide's plan (R19). |
+| 2026-10-15 | Revised after review: Windows (Win32), X11 and Wayland supported from the start (new ADR 0003). `cargo xtask` replaced the shell script. A pinned lavapipe built from Mesa source replaced the self-hosted GPU runner in CI, with Linux and Windows CI jobs and hardware checks before review. Added R20 and R21, the `foundations-lavapipe` slice, and `CLOCKWORK_REQUIRED_CAPABILITIES` in place of `CLOCKWORK_REQUIRE_ALL_CAPABILITIES`. |

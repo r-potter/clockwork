@@ -25,8 +25,8 @@ The exact list is maintained in device selection's `REQUIREMENTS` (`src/rhi/vulk
 
 ## Consequences
 
-- Devices without the required extensions are rejected at start-up, with the reasons logged. As of this date that includes Mesa's llvmpipe, and every non-recent driver.
-- **Testing:** T1 tests that need a missing capability skip on such devices, and the reference device runs with `CLOCKWORK_REQUIRE_ALL_CAPABILITIES=1` so that skips can't hide failures (see design 0001). Hosted CI runners have no GPU and run T0 tests only. A self-hosted runner on the reference device runs T1.
+- Devices without the required extensions are rejected at start-up, with the reasons logged. As of this date that includes every released Mesa lavapipe (26.2.5 and older), and every non-recent driver.
+- **Testing:** there's no GPU in CI, so CI runs T1 tests on lavapipe built from a pinned Mesa `main` commit, which supports every required extension (Mesa's `docs/features.txt`, 2026-10-15). Lavapipe has one queue family and no present timing, so those paths are tested only by the hardware checks before review. T1 tests that need a missing capability skip, and `CLOCKWORK_REQUIRED_CAPABILITIES` makes a skip fail for any capability the device is expected to have (see design 0001).
 - `ash` 0.38 on crates.io lacks the bindings, so `ash` is pinned to a git revision (`0001-foundations`).
 - Validation can't see accesses through descriptor heaps, so GPU-assisted validation is part of the test process for shader and binding changes.
 - Android, macOS (MoltenVK) and older desktop GPUs are out of reach until their drivers catch up. Revisit this if one of them becomes a goal.

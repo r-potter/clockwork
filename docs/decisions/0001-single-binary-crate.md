@@ -18,5 +18,5 @@ A separate crate is added only when something needs one:
 ## Consequences
 
 - There's no `tests/` directory. End-to-end tests, such as rendering a frame headless and reading it back, are unit tests in `gpu_tests` modules.
-- There's no `xtask` crate. Developer tooling is shell scripts in `scripts/`.
+- Developer tooling isn't part of the engine. It's an `xtask` crate in `xtask/`, run as `cargo xtask`, which makes the repository a Cargo workspace. The engine is still one binary crate: it's the workspace's root package and its only default member, so `cargo build`, `run` and `test` behave as they do without a workspace. Shell scripts were considered, but they don't run on Windows (ADR 0003).
 - Dependency rules between the engine's modules are enforced by review, not by crate boundaries. Revisit this if a rule is broken more than once.
