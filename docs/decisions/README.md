@@ -34,3 +34,5 @@ What becomes easier, what becomes harder, and what would make us revisit this.
 | 0001 | [Keep the engine a single binary crate](0001-single-binary-crate.md) | Accepted |
 | 0002 | [Target a bleeding-edge Vulkan feature set with no fallbacks](0002-vulkan-feature-baseline.md) | Accepted |
 | 0003 | [Support Windows, X11 and Wayland from the start](0003-supported-platforms.md) | Accepted |
+| 0004 | [Build our own entity-component system](0004-own-ecs.md) | Proposed |
+| 0005 | [Embed Lua through mlua for scripting](0005-lua-scripting.md) | Proposed |
