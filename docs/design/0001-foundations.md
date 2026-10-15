@@ -102,7 +102,7 @@ Tests are unit tests inside the engine crate (ADR 0001). Shared helpers live in 
 
 ### Logging levels are a contract
 
-Failing tests on warnings only works if `WARN` and `ERROR` mean something definite. This design defines them for the whole engine. The architecture document, when written, restates them.
+Failing tests on warnings only works if `WARN` and `ERROR` mean something definite. This design defines them for the whole engine, and [`ARCHITECTURE.md`](../ARCHITECTURE.md#diagnostics-and-logging-levels) restates them.
 
 | Level | Meaning | Examples |
 |---|---|---|

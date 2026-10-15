@@ -12,7 +12,7 @@ A common Rust layout splits an application into a library crate and a thin binar
 The engine stays one binary crate (`src/main.rs`). Tests are unit tests within it, with shared fixtures in `src/test_support.rs`, compiled only under `cfg(test)`.
 
 A separate crate is added only when something needs one:
-- **The importers** become `crates/import`, so that `openusd`'s long compile stays out of the engine's rebuild cycle (`0006-importers`).
+- **The asset importers** become `crates/assets`, so that `openusd`'s long compile stays out of the engine's rebuild cycle (`0006-importers`).
 - **Android** needs the app in a library crate for its `android_main` entry point (see `TODO.md`).
 
 ## Consequences
