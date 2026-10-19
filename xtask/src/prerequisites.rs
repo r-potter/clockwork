@@ -5,6 +5,7 @@
 //! - the `slangc` the engine's `build.rs` will find, where it came from, and
 //!   its version
 //! - the Vulkan SDK's version, from `VULKAN_SDK`
+//! - with `--lavapipe`, the manifest of the lavapipe build used
 //! - with `--gpu`, the layers and devices the Vulkan loader finds
 //!
 //! A missing `slangc` is an error, since nothing builds without it. A missing
@@ -26,13 +27,15 @@ use crate::slangc;
 const VALIDATION_LAYER: &str = "VK_LAYER_KHRONOS_validation";
 
 /// Reports the prerequisites, failing if `slangc` can't be found or run, or,
-/// if `gpu` is set, if the validation layer or a device is missing.
+/// if `gpu` is set, if the validation layer or a device is missing. `driver`
+/// is the manifest of the only Vulkan driver the loader is to use, if any,
+/// as with `--lavapipe`.
 ///
 /// # Errors
 ///
 /// Returns an error, pointing to `docs/testing.md`, if `slangc` isn't found
 /// or doesn't run, or if `gpu` is set and the GPU tests can't run.
-pub fn check(sh: &Shell, gpu: bool) -> Result<()> {
+pub fn check(sh: &Shell, gpu: bool, driver: Option<&Path>) -> Result<()> {
     eprintln!("==> prerequisites");
     let env = slangc::Environment::from_process();
 
@@ -74,6 +77,9 @@ pub fn check(sh: &Shell, gpu: bool) -> Result<()> {
         ),
     }
 
+    if let Some(driver) = driver {
+        eprintln!("Vulkan driver: {} alone", driver.display());
+    }
     if gpu {
         check_vulkan()?;
     }
