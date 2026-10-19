@@ -14,8 +14,12 @@ use crate::rhi::Window;
 /// destroyed when this is dropped, so the owner must drop it before the
 /// instance it was created from, and after any swapchain created for it.
 pub struct Surface {
+    /// The `VK_KHR_surface` functions for the instance.
     surface_fn: khr::surface::Instance,
+    /// The surface, created for `_window`.
     surface: vk::SurfaceKHR,
+    /// The window the surface presents to, kept alive for as long as the
+    /// surface.
     _window: Arc<dyn Window>,
 }
 
@@ -25,7 +29,9 @@ pub struct SurfaceSupport {
     /// Whether each queue family can present to the surface, indexed by queue
     /// family index.
     pub present_families: Vec<bool>,
+    /// The formats the device supports for swapchains on the surface.
     pub formats: Vec<vk::SurfaceFormatKHR>,
+    /// The present modes the device supports for swapchains on the surface.
     pub present_modes: Vec<vk::PresentModeKHR>,
 }
 
@@ -93,8 +99,8 @@ impl Surface {
     ///
     /// Returns an error if the query fails.
     pub fn can_present(&self, device: vk::PhysicalDevice, family: u32) -> Result<bool> {
-        // SAFETY (all `unsafe` blocks in this `impl`): `device` and the surface
-        // were created from the same instance, which is still alive.
+        // SAFETY: `device` and the surface were created from the same
+        // instance, which is still alive.
         unsafe {
             self.surface_fn
                 .get_physical_device_surface_support(device, family, self.surface)
@@ -108,6 +114,7 @@ impl Surface {
     ///
     /// Returns an error if the query fails.
     pub fn formats(&self, device: vk::PhysicalDevice) -> Result<Vec<vk::SurfaceFormatKHR>> {
+        // SAFETY: as in `can_present`.
         unsafe {
             self.surface_fn
                 .get_physical_device_surface_formats(device, self.surface)
@@ -121,6 +128,7 @@ impl Surface {
     ///
     /// Returns an error if the query fails.
     pub fn present_modes(&self, device: vk::PhysicalDevice) -> Result<Vec<vk::PresentModeKHR>> {
+        // SAFETY: as in `can_present`.
         unsafe {
             self.surface_fn
                 .get_physical_device_surface_present_modes(device, self.surface)
@@ -136,6 +144,7 @@ impl Surface {
     ///
     /// Returns an error if the query fails.
     pub fn capabilities(&self, device: vk::PhysicalDevice) -> Result<vk::SurfaceCapabilitiesKHR> {
+        // SAFETY: as in `can_present`.
         unsafe {
             self.surface_fn
                 .get_physical_device_surface_capabilities(device, self.surface)

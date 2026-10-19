@@ -1,0 +1,113 @@
+# Continuous integration (R17 in design 0001). See "CI jobs" in
+# docs/testing.md.
+#
+# Both jobs run `cargo xtask check` on a hosted runner with no Vulkan driver,
+# which proves that the GPU-free (T0) tests need none (R8). Each installs a
+# pinned Vulkan SDK for `slangc`. GPU (T1) tests in CI arrive with the
+# `linux-lavapipe` job, in the `foundations-lavapipe` slice.
+#
+# No secrets and no self-hosted runners, so pull requests from forks are safe
+# to run.
+
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  # The pinned Vulkan SDK. To update it, change the version and both hashes,
+  # which LunarG publishes at
+  # https://sdk.lunarg.com/sdk/sha/<version>/<linux|windows>/<file>.json
+  VULKAN_SDK_VERSION: 1.4.341.1
+  VULKAN_SDK_LINUX_SHA256: 3bf0f762afb6c79bc6a9d9fb5998745ccff928800a29619b501ed9de7fd9789b
+  VULKAN_SDK_WINDOWS_SHA256: bcf2d75aa9556889ab974858666e20b3655b6055a0db704ccb47279ff33b5bfe
+
+jobs:
+  linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install Rust
+        run: |
+          rustup toolchain install stable --profile minimal --component clippy,rustfmt
+          rustup default stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Cache the Vulkan SDK download
+        uses: actions/cache@v4
+        with:
+          path: ~/vulkan-sdk-download
+          key: vulkan-sdk-linux-${{ env.VULKAN_SDK_VERSION }}
+
+      - name: Install the Vulkan SDK
+        run: |
+          file="vulkansdk-linux-x86_64-$VULKAN_SDK_VERSION.tar.xz"
+          mkdir -p ~/vulkan-sdk-download ~/vulkan
+          if [ ! -f ~/vulkan-sdk-download/"$file" ]; then
+            curl --fail --location --silent --show-error \
+              --output ~/vulkan-sdk-download/"$file" \
+              "https://sdk.lunarg.com/sdk/download/$VULKAN_SDK_VERSION/linux/$file"
+          fi
+          echo "$VULKAN_SDK_LINUX_SHA256  $HOME/vulkan-sdk-download/$file" | sha256sum --check
+          tar --extract --xz --file ~/vulkan-sdk-download/"$file" --directory ~/vulkan
+          # What the SDK's `setup-env.sh` sets, for this and later steps.
+          sdk="$HOME/vulkan/$VULKAN_SDK_VERSION/x86_64"
+          echo "VULKAN_SDK=$sdk" >> "$GITHUB_ENV"
+          echo "$sdk/bin" >> "$GITHUB_PATH"
+          echo "LD_LIBRARY_PATH=$sdk/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" >> "$GITHUB_ENV"
+          echo "VK_ADD_LAYER_PATH=$sdk/share/vulkan/explicit_layer.d" >> "$GITHUB_ENV"
+
+      - name: cargo xtask check
+        run: cargo xtask check
+
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install Rust
+        run: |
+          rustup toolchain install stable --profile minimal --component clippy,rustfmt
+          rustup default stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Cache the Vulkan SDK download
+        uses: actions/cache@v4
+        with:
+          path: ~\vulkan-sdk-download
+          key: vulkan-sdk-windows-${{ env.VULKAN_SDK_VERSION }}
+
+      - name: Install the Vulkan SDK
+        shell: pwsh
+        run: |
+          $file = "vulkansdk-windows-X64-$env:VULKAN_SDK_VERSION.exe"
+          $download = Join-Path $HOME "vulkan-sdk-download"
+          $installer = Join-Path $download $file
+          New-Item -ItemType Directory -Force $download | Out-Null
+          if (-not (Test-Path $installer)) {
+            Invoke-WebRequest -Uri "https://sdk.lunarg.com/sdk/download/$env:VULKAN_SDK_VERSION/windows/$file" -OutFile $installer
+          }
+          $hash = (Get-FileHash -Algorithm SHA256 $installer).Hash
+          if ($hash -ne $env:VULKAN_SDK_WINDOWS_SHA256) {
+            throw "Vulkan SDK installer hash mismatch: got $hash"
+          }
+          $sdk = "C:\VulkanSDK\$env:VULKAN_SDK_VERSION"
+          # The installer is a GUI program, so PowerShell wouldn't wait for it
+          # if it were run directly.
+          $process = Start-Process -FilePath $installer -Wait -PassThru -ArgumentList `
+            "--root", $sdk, "--accept-licenses", "--default-answer", "--confirm-command", "install"
+          if ($process.ExitCode -ne 0) { throw "Vulkan SDK installer failed ($($process.ExitCode))" }
+          # What the installer sets for new sessions, for this job's later steps.
+          "VULKAN_SDK=$sdk" >> $env:GITHUB_ENV
+          "$sdk\Bin" >> $env:GITHUB_PATH
+
+      - name: cargo xtask check
+        run: cargo xtask check

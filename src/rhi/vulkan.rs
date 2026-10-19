@@ -82,13 +82,18 @@ pub struct VulkanRenderHardwareInterface {
     /// matches the surface, so that it is recreated at the start of the next
     /// frame.
     swapchain_out_of_date: bool,
+    /// The command buffers and synchronization objects for each frame in
+    /// flight.
     frames: Frames,
+    /// The shader objects that draw the triangle.
     triangle_shaders: TriangleShaders,
     /// `None` when headless, while suspended, or while the window has no area.
     swapchain: Option<Swapchain>,
+    /// The logical device, and its queues, created on `physical_device`.
     device: LogicalDevice,
     /// `None` when headless, or while suspended.
     surface: Option<Surface>,
+    /// The physical device chosen by [`device_selection::select`].
     physical_device: PhysicalDevice,
     /// Declared last so that it is dropped last, after every object created
     /// from it.
@@ -102,6 +107,7 @@ struct VulkanInstance {
     /// Function pointers for the Vulkan loader. Must outlive `instance`, as it
     /// keeps the loader library loaded. Also used to create surfaces.
     entry: Entry,
+    /// The instance, created from `entry`.
     instance: Instance,
     /// Present only when validation is enabled and available.
     debug_messenger: Option<DebugMessenger>,
@@ -112,7 +118,9 @@ struct VulkanInstance {
 
 /// A debug messenger and the extension functions needed to destroy it.
 struct DebugMessenger {
+    /// The `VK_EXT_debug_utils` functions for the instance.
     debug_utils: debug_utils::Instance,
+    /// The messenger, created with `debug_utils`.
     messenger: vk::DebugUtilsMessengerEXT,
 }
 
@@ -232,17 +240,20 @@ impl VulkanRenderHardwareInterface {
             .present_queue()
             .context("a windowed Vulkan backend has no present queue")?;
 
-        // SAFETY (all `unsafe` blocks in this function): every handle used
-        // was created on `device`, or by `swapchain` on `device`, and each
-        // info structure is valid for the duration of its call.
+        // Every handle used below was created on `device`, or by `swapchain`
+        // on `device`, and each info structure is valid for the duration of
+        // its call. The `SAFETY` comments below rely on this.
 
         // Wait until the GPU has finished the last frame that used these
         // resources.
+        // SAFETY: `frame.in_flight` is a fence created on `device`.
         unsafe { device.wait_for_fences(&[frame.in_flight], true, u64::MAX) }
             .context("failed to wait for Vulkan frame fence")?;
 
         // `image_acquired` is unsignalled: the submit that waited on it last
         // time has finished, as its fence has signalled.
+        // SAFETY: `image_acquired` was created on `device`, and is
+        // unsignalled with no pending operations, as above.
         let (image_index, mut out_of_date) =
             match unsafe { swapchain.acquire(frame.image_acquired) } {
                 Ok(result) => result,
@@ -253,17 +264,24 @@ impl VulkanRenderHardwareInterface {
             };
         let (image, image_view) = swapchain.image(image_index);
 
+        // SAFETY: the fence was created on `device`, and has signalled, so no
+        // queue submission still uses it.
         unsafe { device.reset_fences(&[frame.in_flight]) }
             .context("failed to reset Vulkan frame fence")?;
-        // The fence wait above guarantees that the GPU has finished with the
-        // command buffer.
+        // SAFETY: the fence wait above guarantees that the GPU has finished
+        // with the command buffer.
         unsafe { frame.reset_commands(device) }?;
 
         let command_buffer = frame.command_buffer;
         let begin_info = vk::CommandBufferBeginInfo::default()
             .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
+        // SAFETY: the command buffer was allocated on `device` and has just
+        // been reset, and `begin_info` is valid for the call.
         unsafe { device.begin_command_buffer(command_buffer, &begin_info) }
             .context("failed to begin Vulkan command buffer")?;
+        // SAFETY: the command buffer is recording, `image` and `image_view`
+        // are a swapchain image of the swapchain's extent and its view, and
+        // everything was created on `device`.
         unsafe {
             record_frame(
                 device,
@@ -274,6 +292,7 @@ impl VulkanRenderHardwareInterface {
                 &self.triangle_shaders,
             )
         };
+        // SAFETY: the command buffer is recording, on `device`.
         unsafe { device.end_command_buffer(command_buffer) }
             .context("failed to end Vulkan command buffer")?;
 
@@ -291,6 +310,9 @@ impl VulkanRenderHardwareInterface {
             .wait_semaphore_infos(slice::from_ref(&wait))
             .command_buffer_infos(slice::from_ref(&command_buffer_info))
             .signal_semaphore_infos(slice::from_ref(&signal));
+        // SAFETY: the graphics queue, semaphores, command buffer and fence
+        // were all created on `device`, the command buffer has ended, the
+        // fence is unsignalled, and the info structures outlive the call.
         unsafe {
             device.queue_submit2(
                 self.device.graphics_queue(),
@@ -300,8 +322,9 @@ impl VulkanRenderHardwareInterface {
         }
         .context("failed to submit Vulkan frame")?;
 
-        // The present queue's family can present to the surface, checked by
-        // device selection and on resume.
+        // SAFETY: the present queue was created on `device`, and its family
+        // can present to the surface, as checked by device selection and on
+        // resume. `image_index` was acquired above.
         match unsafe { swapchain.present(present_queue, image_index) } {
             Ok(suboptimal) => out_of_date |= suboptimal,
             Err(vk::Result::ERROR_OUT_OF_DATE_KHR) => out_of_date = true,

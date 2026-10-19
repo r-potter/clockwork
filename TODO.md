@@ -148,12 +148,12 @@ Outstanding tasks and future work.
 - [ ] **Make the unit tests work without a Vulkan driver.**
       `create_succeeds_for_every_graphics_api` runs headless, so it does not
       need a display, but it still creates a real Vulkan instance, so it fails
-      on machines (such as CI runners) with no Vulkan driver. Options include
-      installing a software driver such as lavapipe on CI, or marking the test
-      `#[ignore]` and running it separately. The `foundations-validation`
-      slice of design 0001 closes this, by splitting the tests into tiers.
-- [ ] **Install `slangc` on CI.** Building now runs the Slang shader
-      compiler, so CI machines need it, for example from the
-      `slang-compiler` package or the Vulkan SDK. `build.rs` finds it on
-      `PATH`, or at the path in the `SLANGC` environment variable. The
-      `foundations-lavapipe` slice of design 0001 closes this.
+      on machines (such as CI runners) with no Vulkan driver. For now, it and
+      the other test that creates a backend are in a `gpu_tests` module in
+      `src/rhi.rs`, which `cargo xtask check` skips. The
+      `foundations-validation` slice of design 0001 closes this, by splitting
+      the tests into tiers properly.
+- [x] **Install `slangc` on CI.** Done in the `foundations-checks` slice of
+      design 0001: the `linux` and `windows` jobs in
+      `.github/workflows/ci.yml` install a pinned Vulkan SDK, and `build.rs`
+      finds `slangc` in it (see `build/slangc.rs`).

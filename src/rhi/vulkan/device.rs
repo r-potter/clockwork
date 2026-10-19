@@ -12,11 +12,14 @@ use super::physical_device::PhysicalDevice;
 /// The device is destroyed when this is dropped, so the owner must drop it
 /// after every object created from it, and before the instance.
 pub struct LogicalDevice {
+    /// The device's function pointers and handle.
     device: ash::Device,
     /// `VK_EXT_shader_object` functions, for creating, binding and drawing
     /// with shader objects.
     shader_object: ext::shader_object::Device,
+    /// The families the queues below were created from.
     queue_families: QueueFamilies,
+    /// The queue rendering work is submitted to.
     graphics_queue: vk::Queue,
     /// `None` when headless.
     present_queue: Option<vk::Queue>,
@@ -89,6 +92,7 @@ impl LogicalDevice {
         let graphics_queue = unsafe { device.get_device_queue(queue_families.graphics, 0) };
         let present_queue = queue_families
             .present
+            // SAFETY: as above.
             .map(|family| unsafe { device.get_device_queue(family, 0) });
 
         Ok(Self {

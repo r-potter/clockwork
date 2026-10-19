@@ -13,8 +13,9 @@ use super::device::LogicalDevice;
 /// `build.rs`.
 const TRIANGLE_SPIRV: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/triangle.spv"));
 
-/// The shader entry points in [`TRIANGLE_SPIRV`].
+/// The vertex shader's entry point in [`TRIANGLE_SPIRV`].
 const VERTEX_ENTRY_POINT: &CStr = c"vertexMain";
+/// The fragment shader's entry point in [`TRIANGLE_SPIRV`].
 const FRAGMENT_ENTRY_POINT: &CStr = c"fragmentMain";
 
 /// Linked vertex and fragment shader objects (`VK_EXT_shader_object`) that
@@ -29,8 +30,11 @@ const FRAGMENT_ENTRY_POINT: &CStr = c"fragmentMain";
 pub struct TriangleShaders {
     /// Kept to destroy the shaders.
     shader_object: ext::shader_object::Device,
+    /// The device the shaders were created on, for its core functions.
     device: ash::Device,
+    /// The vertex shader, linked with `fragment`.
     vertex: vk::ShaderEXT,
+    /// The fragment shader, linked with `vertex`.
     fragment: vk::ShaderEXT,
 }
 

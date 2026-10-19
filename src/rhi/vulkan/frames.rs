@@ -18,6 +18,7 @@ const FRAMES_IN_FLIGHT: usize = 2;
 pub struct Frames {
     /// Kept to destroy the resources.
     device: ash::Device,
+    /// One entry per frame in flight: [`FRAMES_IN_FLIGHT`] once created.
     frames: Vec<Frame>,
     /// Index into `frames` of the frame to record next.
     current: usize,
@@ -27,6 +28,7 @@ pub struct Frames {
 pub struct Frame {
     /// Reset at the start of each frame, freeing `command_buffer`'s commands.
     command_pool: vk::CommandPool,
+    /// The frame's commands, allocated from `command_pool`.
     pub command_buffer: vk::CommandBuffer,
     /// Signalled when the swapchain image the frame renders to is acquired.
     pub image_acquired: vk::Semaphore,
@@ -75,12 +77,11 @@ impl Frame {
     /// Creates one frame's resources on `device`. If a later step fails, the
     /// resources already created are destroyed.
     fn new(device: &ash::Device, graphics_family: u32) -> Result<Self> {
-        // SAFETY (all `unsafe` blocks in this function): `device` is a valid
-        // logical device, and each create info is valid for the duration of
-        // its call.
         let pool_info = vk::CommandPoolCreateInfo::default()
             .flags(vk::CommandPoolCreateFlags::TRANSIENT)
             .queue_family_index(graphics_family);
+        // SAFETY: `device` is a valid logical device, and `pool_info` is valid
+        // for the duration of the call.
         let command_pool = unsafe { device.create_command_pool(&pool_info, None) }
             .context("failed to create Vulkan command pool")?;
         let mut frame = Self {
@@ -103,13 +104,17 @@ impl Frame {
             .command_pool(self.command_pool)
             .level(vk::CommandBufferLevel::PRIMARY)
             .command_buffer_count(1);
-        // SAFETY (all `unsafe` blocks in this function): as in `new`.
+        // SAFETY: `device` is a valid logical device, the command pool was
+        // created on it, and `allocate_info` is valid for the call.
         self.command_buffer = unsafe { device.allocate_command_buffers(&allocate_info) }
             .context("failed to allocate Vulkan command buffer")?[0];
+        // SAFETY: `device` is a valid logical device.
         self.image_acquired =
             unsafe { device.create_semaphore(&vk::SemaphoreCreateInfo::default(), None) }
                 .context("failed to create Vulkan semaphore")?;
         let fence_info = vk::FenceCreateInfo::default().flags(vk::FenceCreateFlags::SIGNALED);
+        // SAFETY: `device` is a valid logical device, and `fence_info` is
+        // valid for the call.
         self.in_flight = unsafe { device.create_fence(&fence_info, None) }
             .context("failed to create Vulkan fence")?;
         Ok(())
