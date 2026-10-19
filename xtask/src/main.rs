@@ -32,7 +32,15 @@ struct Cli {
 enum Command {
     /// Run every check a branch must pass: prerequisites, formatting, clippy
     /// (debug and release), rustdoc, and the tests that need no GPU.
-    Check,
+    Check {
+        /// Also run the GPU (T1) tests, with every capability required. Needs
+        /// a Vulkan driver and the validation layer.
+        #[arg(long)]
+        gpu: bool,
+        /// With --gpu, leave out the windowed smoke runs.
+        #[arg(long, requires = "gpu")]
+        no_window: bool,
+    },
 }
 
 /// Runs the task named on the command line.
@@ -43,7 +51,9 @@ enum Command {
 fn main() -> Result<()> {
     let cli = Cli::parse();
     match cli.command {
-        Command::Check => check::run(&workspace_root()),
+        Command::Check { gpu, no_window } => {
+            check::run(&workspace_root(), check::Options { gpu, no_window })
+        }
     }
 }
 
@@ -70,11 +80,37 @@ mod tests {
         Cli::command().debug_assert();
     }
 
-    /// `cargo xtask check` selects the check task.
+    /// `cargo xtask check` selects the check task, with no GPU checks.
     #[test]
     fn check_parses() {
         let cli = Cli::try_parse_from(["xtask", "check"]).unwrap();
-        assert_eq!(cli.command, Command::Check);
+        assert_eq!(
+            cli.command,
+            Command::Check {
+                gpu: false,
+                no_window: false,
+            }
+        );
+    }
+
+    /// `--gpu --no-window` asks for the GPU tests without smoke runs.
+    #[test]
+    fn check_gpu_no_window_parses() {
+        let cli = Cli::try_parse_from(["xtask", "check", "--gpu", "--no-window"]).unwrap();
+        assert_eq!(
+            cli.command,
+            Command::Check {
+                gpu: true,
+                no_window: true,
+            }
+        );
+    }
+
+    /// `--no-window` only means something with `--gpu`, so it's an error
+    /// without it.
+    #[test]
+    fn no_window_requires_gpu() {
+        assert!(Cli::try_parse_from(["xtask", "check", "--no-window"]).is_err());
     }
 
     /// A task is required: running with none is an error, not a silent pass.
@@ -83,11 +119,11 @@ mod tests {
         assert!(Cli::try_parse_from(["xtask"]).is_err());
     }
 
-    /// `--gpu` arrives in a later slice. Until then, asking for it must fail
-    /// rather than run fewer checks than requested.
+    /// Options from later slices, such as `--lavapipe`, must fail until
+    /// they exist, rather than run fewer checks than requested.
     #[test]
     fn unknown_options_are_errors() {
-        assert!(Cli::try_parse_from(["xtask", "check", "--gpu"]).is_err());
+        assert!(Cli::try_parse_from(["xtask", "check", "--gpu", "--lavapipe"]).is_err());
     }
 
     /// The workspace root holds the root `Cargo.toml` and this crate.

@@ -129,10 +129,6 @@ impl Session {
     }
 
     /// The session's ID.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "used by foundations-validation's backend options")
-    )]
     pub fn id(&self) -> SessionId {
         self.id
     }
@@ -204,10 +200,7 @@ pub enum MessageMatch {
     /// exactly. Use it whenever the message has an ID.
     #[cfg_attr(
         not(test),
-        expect(
-            dead_code,
-            reason = "no message with an ID is suppressed yet; validation messages get IDs in foundations-validation"
-        )
+        expect(dead_code, reason = "no message with an ID is suppressed yet")
     )]
     Id(&'static str),
     /// The start of the event's message, for messages with no ID, such as a
@@ -223,11 +216,10 @@ pub enum MessageMatch {
 /// such as a false positive in the validation layer. A normal condition logged
 /// at `WARN` is fixed by changing its level instead.
 pub const SUPPRESSED: &[Suppression] = &[
-    // Logged by the Vulkan loader through the debug messenger, which logs on
-    // `clockwork::rhi::vulkan` until foundations-validation moves its messages
-    // to `VALIDATION_TARGET`. Move this entry's target with them.
+    // Logged by the Vulkan loader through the debug messenger, so on the
+    // validation target. The loader's messages have no VUID.
     Suppression {
-        target: "clockwork::rhi::vulkan",
+        target: VALIDATION_TARGET,
         message: MessageMatch::Prefix("Layer VK_LAYER_OBS_HOOK uses API version "),
         reason: "OBS Studio's implicit capture layer declares an older Vulkan version than the \
                  engine requests, so the loader warns about it on every instance. The layer \
@@ -833,7 +825,12 @@ mod tests {
              specified API version of 1.5. May cause issues.",
         ] {
             assert_eq!(
-                classify(Level::WARN, "clockwork::rhi::vulkan", None, message),
+                classify(
+                    Level::WARN,
+                    VALIDATION_TARGET,
+                    Some("Loader Message"),
+                    message
+                ),
                 Class::Suppressed,
             );
         }

@@ -40,11 +40,20 @@ If none has it, the build fails with a message naming all three. Changing `SLANG
 ## `cargo xtask check`
 
 `cargo xtask check` runs every check a branch must pass, and is what CI runs. Run it before asking for review. It runs, stopping at the first failure:
-1. **Prerequisites:** prints the `slangc` it found, where from, and its version, and the Vulkan SDK's version. A missing `slangc` is an error; a missing `VULKAN_SDK` is only reported, since only GPU tests need the SDK's validation layer.
+1. **Prerequisites:** prints the `slangc` it found, where from, and its version, and the Vulkan SDK's version. A missing `slangc` is an error; a missing `VULKAN_SDK` is only reported, since only GPU tests need the SDK's validation layer. With `--gpu`, it also prints the layers and devices the Vulkan loader finds, and fails if the validation layer is missing or there's no device.
 2. **Formatting:** `cargo fmt --all --check`. Run `cargo fmt --all` to fix it.
 3. **Clippy**, in debug and release: `cargo clippy --workspace --all-targets -- -D warnings`, so every warning, including the lints below, fails the check.
 4. **Rustdoc:** `cargo doc --workspace --no-deps --document-private-items`, with `RUSTDOCFLAGS=-D warnings`, so broken intra-doc links fail the check.
-5. **Tests that need no GPU:** `cargo test --workspace -- --skip gpu_tests`.
+5. **Tests that need no GPU:** `cargo test --workspace -- --skip gpu_tests`. With `--gpu`, every tier instead (see "GPU tests" below).
+
+Options:
+
+| Option | Effect |
+|---|---|
+| `--gpu` | Run the GPU (T1) tests too, with `CLOCKWORK_REQUIRED_CAPABILITIES=all`: `cargo test --workspace` in place of step 5. Needs a Vulkan 1.4 driver and the validation layer. |
+| `--no-window` | With `--gpu`: leave out the windowed smoke runs. |
+
+The windowed smoke runs arrive in a later slice of design 0001. Until then, `--gpu` must be given with `--no-window`, and is an error without it, so that asking for smoke runs can't quietly run fewer checks. Run `cargo xtask check --gpu --no-window` before asking for review on a machine with a GPU, and say in the review which machine it passed on.
 
 `cargo xtask` is an alias (in `.cargo/config.toml`) for running the `xtask` crate, the repository's developer tooling. The repository is a Cargo workspace of the engine and `xtask`, with the engine as its only default member, so plain `cargo build`, `cargo run` and `cargo test` act on the engine alone.
 
@@ -66,13 +75,13 @@ Tests are unit tests inside the crate they test (ADR 0001). There's no `tests/` 
 | Tier | Kind | Needs | How to run |
 |---|---|---|---|
 | T0 | Unit: pure logic, such as device selection and the `slangc` lookup | Nothing beyond the prerequisites | `cargo test --workspace -- --skip gpu_tests`, or `cargo xtask check` |
-| T1 | GPU: real Vulkan work, headless | A Vulkan 1.4 driver | `cargo test`, which runs every tier |
+| T1 | GPU: real Vulkan work, headless, with validation required | A Vulkan 1.4 driver and the validation layer | `cargo test`, which runs every tier, or `cargo xtask check --gpu --no-window` |
 
 How tests are told apart:
 - **T1 tests live in modules named `gpu_tests`**, so `--skip gpu_tests` leaves them out. Don't use `gpu_tests` anywhere else in a test's path, or it will be skipped too.
 - **Everything else is T0**, and must pass on a machine with no Vulkan driver, as the CI runners are.
 
-Later slices of design 0001 add T1 tooling (`cargo xtask check --gpu`, required validation, capability skips), and later designs add the other tiers the design lists.
+Later designs add the other tiers design 0001 lists.
 
 ## Writing tests
 
@@ -158,6 +167,91 @@ Each expectation is met by one event, so a warning that's expected twice is decl
 ### How it works
 
 `src/diagnostics.rs` defines sessions and the layers. A `Session` has a process-unique `SessionId`, and a span named `session` with the ID in a `session` field. An event is attributed to its own `session` field if it has one, otherwise to the nearest enclosing session span, otherwise to nothing. The test subscriber has three layers, each with its own filter: `SessionLayer`, which records each session span's ID; a fmt layer, filtered by `RUST_LOG`; and `TestCapture`, which takes every warning and error and routes it to its session's `TestSession`. The application's subscriber is the same, except that a `DiagnosticCounter` counts warnings and errors in place of `TestCapture`.
+
+## GPU tests
+
+T1 tests do real Vulkan work, headless, so they need a driver but no display. They live in modules named `gpu_tests`, next to the code they test: `src/rhi/gpu_tests.rs` creates backends through `rhi::create`, and `src/rhi/vulkan/gpu_tests.rs` tests the Vulkan backend itself.
+
+### Writing one
+
+A Vulkan T1 test creates its backend with `VulkanTestBackend::headless` (`src/rhi/vulkan/test_support.rs`), in a `TestSession`:
+
+```rust
+use crate::diagnostics::capture::TestSession;
+use super::test_support::VulkanTestBackend; // in src/rhi/vulkan/gpu_tests.rs
+
+#[test]
+fn clears_are_validated() {
+    let session = TestSession::new();
+    let backend = VulkanTestBackend::headless(&session);
+    // ...use backend.device, and so on...
+} // `backend` is dropped, then `session`, which fails the test if anything was logged at WARN or above
+```
+
+Declare the session first, so that the backend is dropped first, and anything logged while it's destroyed still reaches the session. Tests of `rhi::create` itself pass it `test_support::backend_options(&session)`, which is how `VulkanTestBackend` is configured too.
+
+### Validation is required
+
+Every T1 test runs with the Khronos validation layer, and can't run without it: `VulkanTestBackend::headless` and `backend_options` always ask for `Validation::Required`, so creating the backend fails if the layer, or a requested feature, isn't available. There's no way to turn validation off for tests, because a pass without it would prove less than it claims.
+
+Validation messages are events on the `clockwork::validation` target, attributed to the backend's session (the debug messenger passes the session's ID explicitly, since the layer can call it from any thread). So, like any other warning or error, a validation warning or error fails the test that caused it. Each event has a `message_id` field, the message's VUID or other ID, such as `VUID-VkBufferCreateInfo-size-00912` or `SYNC-HAZARD-WRITE-AFTER-WRITE`. A test that makes a mistake on purpose expects the message by its ID:
+
+```rust
+session.expect(Level::ERROR, VALIDATION_TARGET, |event| {
+    event.message_id.as_deref() == Some("VUID-VkBufferCreateInfo-size-00912")
+});
+```
+
+A false positive is suppressed by its ID, with a reason and an upstream issue (see "Rules" above). Best-practices messages (IDs beginning `BestPractices-`) are only logged, never counted. The Vulkan loader's own messages come through the same messenger, so they're on `clockwork::validation` too, with the ID `Loader Message`, which identifies none of them: suppress those by prefix.
+
+### `CLOCKWORK_VALIDATION`
+
+Which validation features T1 tests require: `sync` (core and synchronization validation) if it's unset. It's a comma-separated list of:
+
+| Feature | Checks | Notes |
+|---|---|---|
+| `core` | API usage against the specification's valid usage rules | Implied by every other feature |
+| `sync` | Hazards between commands, such as two writes with no barrier between them | The default |
+| `gpu` | Inside shaders, such as out-of-bounds accesses (GPU-assisted validation) | Slow |
+| `best-practices` | Advice | Logged, never counted |
+
+`off` is rejected, since T1 tests always validate. For example, to check a change with GPU-assisted validation too:
+
+```sh
+CLOCKWORK_VALIDATION=sync,gpu cargo test
+```
+
+On Windows, in PowerShell: `$env:CLOCKWORK_VALIDATION = "sync,gpu"; cargo test`.
+
+The features are passed to the layer as settings, through `VK_EXT_layer_settings`, using the setting names in the layer's manifest, `VkLayer_khronos_validation.json` (listed in `FEATURE_SETTINGS` in `src/rhi/vulkan/validation.rs`). Every feature's setting is passed, on or off, so that what's validated doesn't depend on the layer's defaults. If a newer layer renames a setting, it reports the old name with a `VALIDATION-SETTINGS` warning, which fails every T1 test: update the table from the new manifest.
+
+### `CLOCKWORK_DEVICE`
+
+Restricts the tests to devices whose names contain it, ignoring case, for example `CLOCKWORK_DEVICE=4090`, or `llvmpipe` for lavapipe. If no device matches, creating the backend fails, listing every device's name. Unset, the tests use the device the backend would choose anyway: the best that meets the requirements.
+
+### Capabilities and skips
+
+Some tests need a capability that not every device has, such as a dedicated transfer queue or `VK_EXT_present_timing`. They declare it with `require_capabilities!`, which returns from the test early if the device lacks any of them:
+
+```rust
+let session = TestSession::new();
+let backend = VulkanTestBackend::headless(&session);
+require_capabilities!(backend, Capability::DescriptorHeap);
+```
+
+The capabilities are listed in `Capability`, in `src/rhi/vulkan/test_support.rs`, with the names used below: `descriptor-heap`, `device-address-commands`, `present-timing`, `dedicated-compute-queue` and `dedicated-transfer-queue`. The list is for tests only, until the RHI has its own capability query. The three extensions are recognised by name only, until the Vulkan 1.4 bindings let their features be queried.
+
+A skipped test passes, but prints a banner to stderr, even when the test passes, so skips are visible:
+
+```text
+=== clockwork: skipped rhi::vulkan::gpu_tests::...: NVIDIA GeForce RTX 4090 lacks the device-address-commands capability ===
+```
+
+### `CLOCKWORK_REQUIRED_CAPABILITIES`
+
+Skips mustn't hide failures on the machines that have the capability. `CLOCKWORK_REQUIRED_CAPABILITIES` lists the capabilities whose absence fails a test rather than skipping it: `all`, or a comma-separated list of the names above. Unset, nothing is required, and every missing capability skips. An unknown name is an error, so that a typo can't turn a failure into a skip.
+
+`cargo xtask check --gpu` sets it to `all`, so on the reference machines a test needing a capability either runs or fails.
 
 ## CI
 

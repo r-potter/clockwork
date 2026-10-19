@@ -145,14 +145,21 @@ Outstanding tasks and future work.
 
 ## Testing
 
-- [ ] **Make the unit tests work without a Vulkan driver.**
-      `create_succeeds_for_every_graphics_api` runs headless, so it does not
-      need a display, but it still creates a real Vulkan instance, so it fails
-      on machines (such as CI runners) with no Vulkan driver. For now, it and
-      the other test that creates a backend are in a `gpu_tests` module in
-      `src/rhi.rs`, which `cargo xtask check` skips. The
-      `foundations-validation` slice of design 0001 closes this, by splitting
-      the tests into tiers properly.
+- [ ] **Run a T1 test that needs a capability.** `require_capabilities!`
+      and `VulkanTestBackend::has` (`src/rhi/vulkan/test_support.rs`) have
+      T0 tests, but no T1 test needs a capability yet, so they carry
+      `#[expect(dead_code)]`/`#[expect(unused_imports)]`. Remove those with
+      the first one, `reference_device_reports_required_extensions` in
+      `foundations-ash-1.4`. The RTX 4090's driver (610.88) has
+      `VK_EXT_descriptor_heap` and `VK_EXT_present_timing` but not
+      `VK_KHR_device_address_commands`, so that test will fail on the Windows
+      machine under `cargo xtask check --gpu` until its driver has it.
+
+- [x] **Make the unit tests work without a Vulkan driver.** Done in the
+      `foundations-validation` slice of design 0001: every test that creates
+      a backend is a T1 test, in a `gpu_tests` module (`src/rhi/gpu_tests.rs`
+      and `src/rhi/vulkan/gpu_tests.rs`), which `cargo xtask check` skips and
+      `cargo xtask check --gpu --no-window` runs, with validation required.
 - [x] **Install `slangc` on CI.** Done in the `foundations-checks` slice of
       design 0001: the `linux` and `windows` jobs in
       `.github/workflows/ci.yml` install a pinned Vulkan SDK, and `build.rs`
@@ -164,7 +171,6 @@ Outstanding tasks and future work.
       0001 (R4).
 - [x] **Stop the OBS Vulkan layer failing tests on the Windows machine.**
       The loader's warning about OBS's implicit layer, `VK_LAYER_OBS_HOOK`,
-      is suppressed by prefix, so OBS can still capture the engine. Its
-      entry's target is `clockwork::rhi::vulkan`, where the debug messenger
-      logs today: `foundations-validation` must move it to
-      `clockwork::validation` along with the messenger's messages.
+      is suppressed by prefix, on `clockwork::validation`, where the debug
+      messenger logs the loader's messages, so OBS can still capture the
+      engine.
