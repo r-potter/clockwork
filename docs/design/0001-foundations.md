@@ -305,7 +305,7 @@ ADR 0003 makes three window systems supported from the start:
 | OS | Window systems | How the smoke runs choose it |
 |---|---|---|
 | Windows | Win32 | The only one |
-| Linux | Wayland, X11 | winit uses Wayland when `WAYLAND_DISPLAY` is set, and X11 otherwise. A run forces X11 by unsetting `WAYLAND_DISPLAY` for the child process. |
+| Linux | Wayland, X11 | winit uses Wayland when `WAYLAND_DISPLAY` or `WAYLAND_SOCKET` is set, and X11 otherwise. A run forces X11 by unsetting both for the child process, and forces Wayland by unsetting `DISPLAY`, so that it can't end up under X11 either. |
 
 Platform-specific behaviour in step 0:
 - **`slangc` lookup** (R18): the SDK's directory and executable name differ.
@@ -670,3 +670,4 @@ None remain. See *Resolved in review* below.
 | 2026-10-19 | Accepted |
 | 2026-10-19 | Revised during `foundations-diagnostics`: a `SUPPRESSED` entry matches its message by ID or, for messages without one (dependencies through `log`, and the Vulkan loader), by the start of its text (R4). Matching on target alone would have suppressed everything on that target. |
 | 2026-10-19 | Revised during `foundations-validation`: unknown layer settings are caught by the layer's own `VALIDATION-SETTINGS` warning, which is counted, rather than by reading the layer's manifest at creation. The loader doesn't say where it found the manifest, so reading it would mean repeating the loader's search on each platform. An unknown setting therefore fails the test or `--fail-on-warnings` run rather than `rhi::create`. The availability decision (R7) depends on whether the layer is installed and provides `VK_EXT_layer_settings`. |
+| 2026-10-19 | Revised during `foundations-cli`: the X11 smoke run also unsets `WAYLAND_SOCKET`, which makes winit choose Wayland too, and the Wayland smoke run unsets `DISPLAY`, so that each run can only use its own window system (see "Platforms"). |
