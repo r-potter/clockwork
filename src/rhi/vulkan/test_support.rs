@@ -4,7 +4,7 @@
 //! The capability list is a stand-in, for tests only. Design `0002-rhi`
 //! replaces it with the RHI's own capability query.
 
-use ash::vk;
+use ash::{ext, khr, vk};
 
 use super::VulkanRenderHardwareInterface;
 use super::physical_device::PhysicalDevice;
@@ -55,21 +55,28 @@ impl Capability {
 
     /// Whether `device` has the capability.
     ///
-    /// The extensions are checked by name only: `ash` 0.38 has no bindings
-    /// for their feature structures, so their features can't be queried until
-    /// `foundations-ash-1.4`.
+    /// An extension capability needs both the extension and its main
+    /// feature.
     pub fn is_supported_by(self, device: &PhysicalDevice) -> bool {
+        let features = &device.features;
         let has_family = |wanted: vk::QueueFlags, unwanted: vk::QueueFlags| {
             device.queue_families.iter().any(|family| {
                 family.queue_flags.contains(wanted) && !family.queue_flags.intersects(unwanted)
             })
         };
         match self {
-            Self::DescriptorHeap => device.supports_extension(c"VK_EXT_descriptor_heap"),
-            Self::DeviceAddressCommands => {
-                device.supports_extension(c"VK_KHR_device_address_commands")
+            Self::DescriptorHeap => {
+                device.supports_extension(ext::descriptor_heap::NAME)
+                    && features.descriptor_heap.descriptor_heap == vk::TRUE
             }
-            Self::PresentTiming => device.supports_extension(c"VK_EXT_present_timing"),
+            Self::DeviceAddressCommands => {
+                device.supports_extension(khr::device_address_commands::NAME)
+                    && features.device_address_commands.device_address_commands == vk::TRUE
+            }
+            Self::PresentTiming => {
+                device.supports_extension(ext::present_timing::NAME)
+                    && features.present_timing.present_timing == vk::TRUE
+            }
             Self::DedicatedComputeQueue => {
                 has_family(vk::QueueFlags::COMPUTE, vk::QueueFlags::GRAPHICS)
             }
@@ -174,8 +181,10 @@ mod tests {
     //! T0 tests of the capability list and [`require_capabilities!`].
 
     use std::cell::RefCell;
+    use std::ffi::CStr;
 
     use super::*;
+    use crate::rhi::vulkan::physical_device::{Features, Properties};
 
     /// Every capability has a distinct name, so none can be required by
     /// mistake in place of another.
@@ -185,6 +194,68 @@ mod tests {
         names.sort_unstable();
         names.dedup();
         assert_eq!(names.len(), Capability::ALL.len());
+    }
+
+    /// Creates a device with `extensions`, and with every feature of the
+    /// extensions the capabilities check.
+    fn device_with(extensions: &[&CStr]) -> PhysicalDevice {
+        let mut features = Features::default();
+        features.descriptor_heap.descriptor_heap = vk::TRUE;
+        features.device_address_commands.device_address_commands = vk::TRUE;
+        features.present_timing.present_timing = vk::TRUE;
+        PhysicalDevice {
+            handle: vk::PhysicalDevice::null(),
+            properties: Properties::default(),
+            features,
+            memory_properties: vk::PhysicalDeviceMemoryProperties::default(),
+            queue_families: Vec::new(),
+            extensions: extensions
+                .iter()
+                .map(|name| {
+                    vk::ExtensionProperties::default()
+                        .extension_name(name)
+                        .unwrap()
+                })
+                .collect(),
+        }
+    }
+
+    /// The capabilities each extension provides, with its name.
+    const EXTENSION_CAPABILITIES: [(Capability, &CStr); 3] = [
+        (Capability::DescriptorHeap, ext::descriptor_heap::NAME),
+        (
+            Capability::DeviceAddressCommands,
+            khr::device_address_commands::NAME,
+        ),
+        (Capability::PresentTiming, ext::present_timing::NAME),
+    ];
+
+    /// A device with an extension and its feature has the capability, and
+    /// one without the extension lacks it.
+    #[test]
+    fn extension_capabilities_need_the_extension() {
+        for (capability, name) in EXTENSION_CAPABILITIES {
+            assert!(
+                capability.is_supported_by(&device_with(&[name])),
+                "{capability:?}"
+            );
+            assert!(
+                !capability.is_supported_by(&device_with(&[])),
+                "{capability:?}"
+            );
+        }
+    }
+
+    /// A device that has an extension but doesn't support its feature lacks
+    /// the capability, so a test can't run on a driver that only advertises
+    /// it.
+    #[test]
+    fn extension_capabilities_need_the_feature() {
+        for (capability, name) in EXTENSION_CAPABILITIES {
+            let mut device = device_with(&[name]);
+            device.features = Features::default();
+            assert!(!capability.is_supported_by(&device), "{capability:?}");
+        }
     }
 
     /// A fake backend, with the capabilities it has, recording which were
