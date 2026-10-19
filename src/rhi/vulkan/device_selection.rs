@@ -156,13 +156,71 @@ pub fn select(candidates: Vec<Candidate>, device_filter: Option<&str>) -> Result
     };
     let queue_families = queue_families(&selected);
     info!(
-        "selected {}, with queue families {queue_families:?}",
+        "selected {} ({}), with queue families {queue_families:?}",
         selected.device.name(),
+        capability_summary(&selected.device),
     );
     Ok(Selection {
         device: selected.device,
         queue_families,
     })
+}
+
+/// An optional capability that [`select`] reports for the selected device.
+struct ReportedCapability {
+    /// The capability's name, for the log.
+    name: &'static str,
+    /// Returns whether the device has the capability.
+    is_supported: fn(&PhysicalDevice) -> bool,
+}
+
+/// The optional capabilities that [`select`] reports for the selected device.
+///
+/// These are the ADR 0002 extensions that [`REQUIREMENTS`] doesn't require,
+/// until the code that uses them makes them required (design `0002-rhi`). A
+/// feature is only set when the device supports its extension.
+const REPORTED_CAPABILITIES: &[ReportedCapability] = &[
+    ReportedCapability {
+        name: "descriptor heap",
+        is_supported: |device| device.features.descriptor_heap.descriptor_heap == vk::TRUE,
+    },
+    ReportedCapability {
+        name: "device address commands",
+        is_supported: |device| {
+            let features = &device.features.device_address_commands;
+            features.device_address_commands == vk::TRUE
+        },
+    },
+    ReportedCapability {
+        name: "present timing",
+        is_supported: |device| device.features.present_timing.present_timing == vk::TRUE,
+    },
+    ReportedCapability {
+        name: "swapchain maintenance",
+        is_supported: |device| {
+            let features = &device.features.swapchain_maintenance1;
+            features.swapchain_maintenance1 == vk::TRUE
+        },
+    },
+];
+
+/// Summarises which of [`REPORTED_CAPABILITIES`] `device` has and lacks, for
+/// the log: for example, `has descriptor heap; lacks present timing`.
+fn capability_summary(device: &PhysicalDevice) -> String {
+    let mut has = Vec::new();
+    let mut lacks = Vec::new();
+    for capability in REPORTED_CAPABILITIES {
+        if (capability.is_supported)(device) {
+            has.push(capability.name);
+        } else {
+            lacks.push(capability.name);
+        }
+    }
+    match (has.is_empty(), lacks.is_empty()) {
+        (false, true) => format!("has {}", has.join(", ")),
+        (true, false) => format!("lacks {}", lacks.join(", ")),
+        _ => format!("has {}; lacks {}", has.join(", "), lacks.join(", ")),
+    }
 }
 
 /// Keeps the candidates whose names contain `device_filter`, ignoring case,
@@ -717,6 +775,49 @@ mod tests {
             err.to_string(),
             "no Vulkan device's name contains \"radeon\"; the devices are: \
              NVIDIA GeForce RTX 4090, Intel(R) UHD Graphics 770",
+        );
+    }
+
+    /// The summary lists every reported capability a device has.
+    #[test]
+    fn the_summary_lists_the_capabilities_a_device_has() {
+        let mut device = device("device", vk::PhysicalDeviceType::DISCRETE_GPU, 8 * GIB);
+        let features = &mut device.features;
+        features.descriptor_heap.descriptor_heap = vk::TRUE;
+        features.device_address_commands.device_address_commands = vk::TRUE;
+        features.present_timing.present_timing = vk::TRUE;
+        features.swapchain_maintenance1.swapchain_maintenance1 = vk::TRUE;
+        assert_eq!(
+            capability_summary(&device),
+            "has descriptor heap, device address commands, present timing, swapchain maintenance",
+        );
+    }
+
+    /// The summary lists the capabilities a device lacks too, as the log
+    /// contract says an optional extension a device lacks is notable.
+    #[test]
+    fn the_summary_lists_the_capabilities_a_device_lacks() {
+        let mut device = device("device", vk::PhysicalDeviceType::DISCRETE_GPU, 8 * GIB);
+        device.features.descriptor_heap.descriptor_heap = vk::TRUE;
+        device
+            .features
+            .device_address_commands
+            .device_address_commands = vk::TRUE;
+        assert_eq!(
+            capability_summary(&device),
+            "has descriptor heap, device address commands; \
+             lacks present timing, swapchain maintenance",
+        );
+    }
+
+    /// A device with none of the capabilities lists only what it lacks.
+    #[test]
+    fn the_summary_of_a_device_without_capabilities() {
+        let device = device("device", vk::PhysicalDeviceType::DISCRETE_GPU, 8 * GIB);
+        assert_eq!(
+            capability_summary(&device),
+            "lacks descriptor heap, device address commands, present timing, \
+             swapchain maintenance",
         );
     }
 
