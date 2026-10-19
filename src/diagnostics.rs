@@ -50,6 +50,7 @@ use tracing::field::{Field, Visit};
 use tracing::level_filters::LevelFilter;
 use tracing::span::Attributes;
 use tracing::{Event, Level, Metadata, Span, Subscriber, info_span};
+use tracing_log::NormalizeEvent;
 use tracing_subscriber::Layer;
 use tracing_subscriber::filter::{FilterFn, filter_fn};
 use tracing_subscriber::layer::Context;
@@ -237,6 +238,18 @@ pub const SUPPRESSED: &[Suppression] = &[
                  while the application runs aren't picked up, which the engine doesn't use.",
     },
 ];
+
+/// The target `event` is classified and reported by: its own, or, for a
+/// record from the `log` crate, the record's. `tracing-subscriber` turns
+/// those records into events whose own target is `log`, with the record's
+/// target in a field, so without this no [`SUPPRESSED`] entry could match a
+/// dependency's message through `log`.
+pub fn target_of(event: &Event<'_>) -> String {
+    match event.normalized_metadata() {
+        Some(metadata) => metadata.target().to_owned(),
+        None => event.metadata().target().to_owned(),
+    }
+}
 
 /// Classifies an event by its level, target, message ID and message. Pure.
 pub fn classify(level: Level, target: &str, message_id: Option<&str>, message: &str) -> Class {
@@ -471,7 +484,7 @@ where
         let level = *metadata.level();
         let class = classify(
             level,
-            metadata.target(),
+            &target_of(event),
             fields.message_id.as_deref(),
             &fields.message,
         );
@@ -871,5 +884,38 @@ mod tests {
         });
         assert_eq!(counter.errors(), 1);
         assert_eq!(counter.warnings(), 2);
+    }
+
+    /// A record from the `log` crate, which `tracing-log` turns into an
+    /// event whose own target is `log`, is classified by the record's
+    /// target, so that a dependency's message through `log` can be
+    /// suppressed like any other.
+    #[test]
+    fn log_records_are_classified_by_their_own_target() {
+        let counter = DiagnosticCounter::default();
+        let dispatch = Dispatch::new(registry().with(counter.layer()));
+        dispatcher::with_default(&dispatch, || {
+            // On a target and with a message that `SUPPRESSED` lists.
+            tracing_log::format_trace(
+                &log::Record::builder()
+                    .level(log::Level::Warn)
+                    .target("winit::platform_impl::linux::x11::xdisplay")
+                    .args(format_args!(
+                        "error setting XSETTINGS; Xft options won't reload automatically"
+                    ))
+                    .build(),
+            )
+            .unwrap();
+            // Not suppressed, so counted: the record does reach the counter.
+            tracing_log::format_trace(
+                &log::Record::builder()
+                    .level(log::Level::Warn)
+                    .target("some_dependency")
+                    .args(format_args!("a warning"))
+                    .build(),
+            )
+            .unwrap();
+        });
+        assert_eq!(counter.warnings(), 1);
     }
 }

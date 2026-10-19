@@ -15,7 +15,15 @@ glam = { version = "0.34.1", features = ["bytemuck"] }
 raw-window-handle = "0.6"
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
+# The same version `tracing-subscriber` uses to turn `log` records into
+# events, for their targets (see `diagnostics::target_of`).
+tracing-log = "0.2.0"
 winit = "0.30.13"
+
+[dev-dependencies]
+# For tests that log through the `log` crate, as dependencies such as
+# `sctk-adwaita` do.
+log = "0.4.34"
 
 # The engine is the root package and the only default member, so plain
 # `cargo build`, `run` and `test` act on it alone (ADR 0001). `xtask` holds the
