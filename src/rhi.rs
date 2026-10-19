@@ -104,13 +104,6 @@ pub enum Validation {
     /// continue with what is available.
     Preferred(ValidationFeatures),
     /// Enable these features, or fail to create the backend.
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "only tests require validation until foundations-cli adds --fail-on-warnings"
-        )
-    )]
     Required(ValidationFeatures),
 }
 

@@ -262,6 +262,15 @@ The application takes command-line options (R14), listed by `cargo run -- --help
 | `--device <SUBSTRING>` | Only consider devices whose names contain it, ignoring case | The best device |
 | `--validation <FEATURES>` | `off`, or a comma-separated list of the features in "`CLOCKWORK_VALIDATION`" above. Used if the validation layer is available; otherwise a warning is logged and the application runs without it. | `sync` in debug builds, `off` in release builds |
 | `--exit-after-frames <N>` | Exit cleanly after rendering N frames, at least 1 | Run until the window is closed |
+| `--fail-on-warnings` | Require validation, unless it's off, and exit with an error if any warning or error was logged | Off |
+
+At exit, the application logs a summary of the warnings and errors it counted, from every subsystem and dependency, at `INFO`:
+
+```text
+INFO clockwork: 0 errors and 2 warnings were logged
+```
+
+They're counted as tests count them (see "Warnings and errors fail tests"): suppressed and best-practices messages don't count, and `RUST_LOG` changes only what's printed. Under `--fail-on-warnings`, any count above zero makes the application exit with an error after the summary, so a run with `--fail-on-warnings` passes only if it logged nothing at `WARN` or above. It also turns validation from preferred to required, so that a missing validation layer fails the run instead of passing it unvalidated. In a release build, validation is still off unless `--validation` asks for it.
 
 Tests can't take options, since `cargo test` can't pass any to them, so they read environment variables instead. The engine itself never reads the environment: each variable has an option to match, parsed by the same function, so the two can't drift apart.
 

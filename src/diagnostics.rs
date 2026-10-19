@@ -441,25 +441,11 @@ impl DiagnosticCounter {
     }
 
     /// The number of counted errors so far.
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "read by the summary at exit, added in foundations-cli"
-        )
-    )]
     pub fn errors(&self) -> u32 {
         self.counts.errors.load(Ordering::Relaxed)
     }
 
     /// The number of counted warnings so far.
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "read by the summary at exit, added in foundations-cli"
-        )
-    )]
     pub fn warnings(&self) -> u32 {
         self.counts.warnings.load(Ordering::Relaxed)
     }
