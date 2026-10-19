@@ -240,7 +240,7 @@ src/rhi/vulkan/gpu_tests.rs          backend T1 tests (R5, R6, R12)
 
 - **`VulkanTestBackend::headless(&TestSession)`** creates a headless backend in the session, with validation `Required`.
 - **The existing T0 check stays in `src/rhi.rs`:** the compile-time check that `ALL_GRAPHICS_APIS` lists every `GraphicsApi`.
-- **Capabilities.** The test-only `Capability` enum (`DescriptorHeap`, `DeviceAddressCommands`, `PresentTiming`, `DedicatedComputeQueue`, `DedicatedTransferQueue`) is derived from `PhysicalDevice`. `0002-rhi` replaces it with the RHI's own capability query.
+- **Capabilities.** The test-only `Capability` enum (`DescriptorHeap`, `DeviceAddressCommands`, `PresentTiming`, `SwapchainMaintenance`, `DedicatedComputeQueue`, `DedicatedTransferQueue`) is derived from `PhysicalDevice`. `0002-rhi` replaces it with the RHI's own capability query.
 
 ### Configuration
 
@@ -672,3 +672,4 @@ None remain. See *Resolved in review* below.
 | 2026-10-19 | Revised during `foundations-validation`: unknown layer settings are caught by the layer's own `VALIDATION-SETTINGS` warning, which is counted, rather than by reading the layer's manifest at creation. The loader doesn't say where it found the manifest, so reading it would mean repeating the loader's search on each platform. An unknown setting therefore fails the test or `--fail-on-warnings` run rather than `rhi::create`. The availability decision (R7) depends on whether the layer is installed and provides `VK_EXT_layer_settings`. |
 | 2026-10-19 | Revised during `foundations-cli`: the X11 smoke run also unsets `WAYLAND_SOCKET`, which makes winit choose Wayland too, and the Wayland smoke run unsets `DISPLAY`, so that each run can only use its own window system (see "Platforms"). |
 | 2026-10-19 | Revised during `foundations-ash-1.4`: `ash-window` is patched to the same commit as `ash`, rather than replaced with our own surface creation, the mitigation the risks named. `ash` `master` breaks `ash-window` 0.13.0 from crates.io, as feared, but `ash`'s repository has `ash-window` at the same version, updated for `master`'s API, so one more line in `[patch.crates-io]` keeps the crate. |
+| 2026-10-19 | Revised during `foundations-ash-1.4`: the test-only `Capability` list gains `SwapchainMaintenance` (`VK_KHR_swapchain_maintenance1`, optional in ADR 0002, like `PresentTiming`), so that a test of the swapchain's present-fence path can skip where it's missing and fail on the reference machines. Lavapipe's expected set, "everything except" three capabilities, now includes it. Whether the pinned lavapipe has it is checked in `foundations-lavapipe`, which leaves it out of the set if not. |
