@@ -53,6 +53,7 @@ Options:
 |---|---|
 | `--gpu` | Run the GPU (T1) tests too, with `CLOCKWORK_REQUIRED_CAPABILITIES=all`: `cargo test --workspace` in place of step 5. Then the smoke runs. Needs a Vulkan 1.4 driver, the validation layer, and a display for each window system. |
 | `--no-window` | With `--gpu`: leave out the smoke runs, on purpose, for example over SSH. |
+| `--virtual-displays` | Linux, with `--gpu`: run the smoke runs on virtual displays, so they work with no desktop session (see "Virtual displays" below). |
 
 Run `cargo xtask check --gpu` before asking for review on a machine with a GPU, in a desktop session, and say in the review which machine and window systems it passed on.
 
@@ -74,7 +75,19 @@ It stops after a number of frames, not a time, so that a slow machine or a virtu
 | Linux | Wayland | `WAYLAND_DISPLAY` | `DISPLAY` |
 | Linux | X11 | `DISPLAY` | `WAYLAND_DISPLAY` and `WAYLAND_SOCKET` |
 
-On Linux, that means a desktop session with both: a Wayland session with Xwayland, or an X11 session running a Wayland compositor. A window system with no display is an error before anything else runs, not a skip, so that a check can't pass having run fewer smoke runs than it should. Use `--no-window` to leave them all out on purpose. The choice is made by `xtask/src/window_systems.rs`.
+On Linux, that means a desktop session with both: a Wayland session with Xwayland, or an X11 session running a Wayland compositor. Otherwise, use `--virtual-displays`. A window system with no display is an error before anything else runs, not a skip, so that a check can't pass having run fewer smoke runs than it should. Use `--no-window` to leave them all out on purpose. The choice is made by `xtask/src/window_systems.rs`.
+
+### Virtual displays
+
+`cargo xtask check --gpu --virtual-displays` runs the Linux smoke runs with no desktop session, as on a CI runner or over SSH. Before the other checks, it starts:
+- **`Xvfb`**, a virtual X server, which chooses a free display number itself (`-displayfd`), so it can't collide with another
+- **Weston**, the reference Wayland compositor, headless (`weston --backend=headless`), on a socket named for the `xtask` process
+
+Both are stopped when the check ends, whether it passes or not. The smoke runs, and nothing else, get their `DISPLAY` and `WAYLAND_DISPLAY`, and an `XDG_RUNTIME_DIR` for Weston's socket: the session's if it's set, otherwise `target/virtual-displays/runtime`. Their logs are in `target/virtual-displays/`, and an error starting either names its log.
+
+They need the `xvfb` and `weston` packages (on Ubuntu and Debian, `sudo apt install xvfb weston`). A missing program is reported when the check starts.
+
+`--virtual-displays` is an error on Windows, which needs no display server, and with `--no-window`. The configuration is in `xtask/src/virtual_displays.rs`.
 
 To reproduce a failing smoke run, run the same command, unsetting the same variables. On Linux, for example, `env -u WAYLAND_DISPLAY -u WAYLAND_SOCKET cargo run -- --exit-after-frames 300 --fail-on-warnings` for X11.
 

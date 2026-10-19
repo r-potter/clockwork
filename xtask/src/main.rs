@@ -12,10 +12,6 @@ mod check;
 mod prerequisites;
 #[path = "../../build/slangc.rs"]
 mod slangc;
-#[expect(
-    dead_code,
-    reason = "used by cargo xtask check --virtual-displays, in the next branch"
-)]
 mod virtual_displays;
 mod window_systems;
 
@@ -48,6 +44,11 @@ enum Command {
         /// With --gpu, leave out the windowed smoke runs.
         #[arg(long, requires = "gpu")]
         no_window: bool,
+        /// Linux, with --gpu: run the smoke runs on virtual displays, Xvfb
+        /// and a headless Weston, started for them and stopped afterwards,
+        /// rather than the desktop session's.
+        #[arg(long, requires = "gpu", conflicts_with = "no_window")]
+        virtual_displays: bool,
     },
 }
 
@@ -59,9 +60,18 @@ enum Command {
 fn main() -> Result<()> {
     let cli = Cli::parse();
     match cli.command {
-        Command::Check { gpu, no_window } => {
-            check::run(&workspace_root(), check::Options { gpu, no_window })
-        }
+        Command::Check {
+            gpu,
+            no_window,
+            virtual_displays,
+        } => check::run(
+            &workspace_root(),
+            check::Options {
+                gpu,
+                no_window,
+                virtual_displays,
+            },
+        ),
     }
 }
 
@@ -97,6 +107,7 @@ mod tests {
             Command::Check {
                 gpu: false,
                 no_window: false,
+                virtual_displays: false,
             }
         );
     }
@@ -110,6 +121,7 @@ mod tests {
             Command::Check {
                 gpu: true,
                 no_window: true,
+                virtual_displays: false,
             }
         );
     }
@@ -119,6 +131,38 @@ mod tests {
     #[test]
     fn no_window_requires_gpu() {
         assert!(Cli::try_parse_from(["xtask", "check", "--no-window"]).is_err());
+    }
+
+    /// `--gpu --virtual-displays` asks for the smoke runs on virtual
+    /// displays.
+    #[test]
+    fn check_gpu_virtual_displays_parses() {
+        let cli = Cli::try_parse_from(["xtask", "check", "--gpu", "--virtual-displays"]).unwrap();
+        assert_eq!(
+            cli.command,
+            Command::Check {
+                gpu: true,
+                no_window: false,
+                virtual_displays: true,
+            }
+        );
+    }
+
+    /// `--virtual-displays` is only for smoke runs, so it's an error without
+    /// `--gpu`, or with `--no-window`.
+    #[test]
+    fn virtual_displays_need_smoke_runs() {
+        assert!(Cli::try_parse_from(["xtask", "check", "--virtual-displays"]).is_err());
+        assert!(
+            Cli::try_parse_from([
+                "xtask",
+                "check",
+                "--gpu",
+                "--no-window",
+                "--virtual-displays"
+            ])
+            .is_err()
+        );
     }
 
     /// A task is required: running with none is an error, not a silent pass.
