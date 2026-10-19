@@ -31,7 +31,7 @@ pub const VALIDATION_LAYER: &CStr = c"VK_LAYER_KHRONOS_validation";
 /// `VK_EXT_layer_settings`.
 ///
 /// The names are the `key`s of the settings in the layer's manifest,
-/// `VkLayer_khronos_validation.json`, as of Vulkan SDK 1.4.341.1. Each is a
+/// `VkLayer_khronos_validation.json`, as of Vulkan SDK 1.4.363.0. Each is a
 /// boolean, and every feature's setting is passed, true or false, so that
 /// what's validated doesn't depend on the layer's defaults.
 ///

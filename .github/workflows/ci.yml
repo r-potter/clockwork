@@ -23,9 +23,9 @@ env:
   # The pinned Vulkan SDK. To update it, change the version and both hashes,
   # which LunarG publishes at
   # https://sdk.lunarg.com/sdk/sha/<version>/<linux|windows>/<file>.json
-  VULKAN_SDK_VERSION: 1.4.341.1
-  VULKAN_SDK_LINUX_SHA256: 3bf0f762afb6c79bc6a9d9fb5998745ccff928800a29619b501ed9de7fd9789b
-  VULKAN_SDK_WINDOWS_SHA256: bcf2d75aa9556889ab974858666e20b3655b6055a0db704ccb47279ff33b5bfe
+  VULKAN_SDK_VERSION: 1.4.363.0
+  VULKAN_SDK_LINUX_SHA256: 197962f5cbf80baf2775a03336a01cee7c8745686c65aaa70d3f751ade4d7e43
+  VULKAN_SDK_WINDOWS_SHA256: 94a82d378f7a5e3e54c9db7d2fb7016af136e14ac0a18dbf0f2f67a36352d141
 
 jobs:
   linux:
