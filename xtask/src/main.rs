@@ -12,6 +12,11 @@ mod check;
 mod prerequisites;
 #[path = "../../build/slangc.rs"]
 mod slangc;
+#[expect(
+    dead_code,
+    reason = "used by cargo xtask check --virtual-displays, in the next branch"
+)]
+mod virtual_displays;
 mod window_systems;
 
 use std::path::{Path, PathBuf};
