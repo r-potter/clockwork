@@ -7,7 +7,7 @@ use std::{mem, ptr};
 
 use anyhow::{Context, Result};
 use ash::vk::TaggedStructure;
-use ash::{Instance, ext, vk};
+use ash::{Instance, ext, khr, vk};
 
 /// A Vulkan physical device and its immutable properties.
 ///
@@ -34,8 +34,8 @@ pub struct PhysicalDevice {
     pub extensions: Vec<vk::ExtensionProperties>,
 }
 
-/// Device properties, including limits, grouped by the Vulkan version that
-/// introduced them.
+/// Device properties, including limits, grouped by the Vulkan version or
+/// extension that introduced them.
 ///
 /// The `p_next` pointers are always null.
 #[derive(Debug, Default)]
@@ -54,6 +54,9 @@ pub struct Properties {
     /// `p_copy_dst_layouts`) are not queried, so their pointers are null,
     /// but their counts are set.
     pub vulkan14: vk::PhysicalDeviceVulkan14Properties<'static>,
+    /// `VK_EXT_descriptor_heap` properties (ADR 0002). Zeroed on devices
+    /// without the extension.
+    pub descriptor_heap: vk::PhysicalDeviceDescriptorHeapPropertiesEXT<'static>,
 }
 
 /// Device features, grouped by the Vulkan version or extension that
@@ -73,8 +76,20 @@ pub struct Features {
     pub vulkan13: vk::PhysicalDeviceVulkan13Features<'static>,
     /// Vulkan 1.4 features. Zeroed on devices older than Vulkan 1.4.
     pub vulkan14: vk::PhysicalDeviceVulkan14Features<'static>,
-    /// `VK_EXT_shader_object` features.
+    /// `VK_EXT_shader_object` features (ADR 0002).
     pub shader_object: vk::PhysicalDeviceShaderObjectFeaturesEXT<'static>,
+    /// `VK_EXT_descriptor_heap` features (ADR 0002). Zeroed on devices
+    /// without the extension.
+    pub descriptor_heap: vk::PhysicalDeviceDescriptorHeapFeaturesEXT<'static>,
+    /// `VK_KHR_device_address_commands` features (ADR 0002). Zeroed on
+    /// devices without the extension.
+    pub device_address_commands: vk::PhysicalDeviceDeviceAddressCommandsFeaturesKHR<'static>,
+    /// `VK_EXT_present_timing` features, optional in ADR 0002. Zeroed on
+    /// devices without the extension.
+    pub present_timing: vk::PhysicalDevicePresentTimingFeaturesEXT<'static>,
+    /// `VK_KHR_swapchain_maintenance1` features, optional in ADR 0002.
+    /// Zeroed on devices without the extension.
+    pub swapchain_maintenance1: vk::PhysicalDeviceSwapchainMaintenance1FeaturesKHR<'static>,
 }
 
 impl PhysicalDevice {
@@ -126,6 +141,7 @@ impl PhysicalDevice {
         if api_version >= vk::API_VERSION_1_2 {
             let include_vulkan13 = api_version >= vk::API_VERSION_1_3;
             let include_vulkan14 = api_version >= vk::API_VERSION_1_4;
+            let supports = |name| extensions_include(&extensions, name);
 
             let mut properties2 = vk::PhysicalDeviceProperties2::default()
                 .push(&mut properties.vulkan11)
@@ -136,8 +152,11 @@ impl PhysicalDevice {
             if include_vulkan14 {
                 properties2 = properties2.push(&mut properties.vulkan14);
             }
+            if supports(ext::descriptor_heap::NAME) {
+                properties2 = properties2.push(&mut properties.descriptor_heap);
+            }
             // SAFETY: as above. The chain only includes structures for
-            // versions the device supports.
+            // versions and extensions the device supports.
             unsafe { instance.get_physical_device_properties2(handle, &mut properties2) };
             // SAFETY: The chain was built with `push`, so every structure in
             // it is borrowed by `properties2`.
@@ -152,8 +171,20 @@ impl PhysicalDevice {
             if include_vulkan14 {
                 features2 = features2.push(&mut features.vulkan14);
             }
-            if extensions_include(&extensions, ext::shader_object::NAME) {
+            if supports(ext::shader_object::NAME) {
                 features2 = features2.push(&mut features.shader_object);
+            }
+            if supports(ext::descriptor_heap::NAME) {
+                features2 = features2.push(&mut features.descriptor_heap);
+            }
+            if supports(khr::device_address_commands::NAME) {
+                features2 = features2.push(&mut features.device_address_commands);
+            }
+            if supports(ext::present_timing::NAME) {
+                features2 = features2.push(&mut features.present_timing);
+            }
+            if supports(khr::swapchain_maintenance1::NAME) {
+                features2 = features2.push(&mut features.swapchain_maintenance1);
             }
             // SAFETY: as above. The chain only includes structures for
             // versions and extensions the device supports.
