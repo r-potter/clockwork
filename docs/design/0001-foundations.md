@@ -269,7 +269,7 @@ Selection gains a phase 0, before requirements. If `BackendOptions::device_filte
   - `properties.vulkan14` and `features.vulkan14`, queried on 1.4 devices
   - feature structures, and properties where they exist, for the three extensions, each chained only when the device supports the extension, following today's pattern
 - **Clearing pointers.** The chain-then-clear-`p_next` code grows from seven structures to about thirteen. It moves into a small helper that clears every chained structure's pointer, so that none can be missed.
-- **Logging.** Selection logs a one-line capability summary for the chosen device at `INFO`, for example `selected NVIDIA GeForce RTX 3090: descriptor heap, device-address commands, present timing`.
+- **Logging.** Selection logs a one-line capability summary for the chosen device at `INFO`, for example `selected NVIDIA GeForce RTX 3090: descriptor heap, device address commands, present timing`.
 - **What becomes unnecessary:** `API_VERSION`'s hand-built version and its comment, and any 1.4 workarounds.
 
 ### Documentation and lints
@@ -618,7 +618,7 @@ Each slice also writes its section of the testing guide (R19).
 | A dependency logs harmless warnings, failing smoke runs | Medium | Noise | Suppress by target with a reason, or file it upstream |
 | `ash` `master` has API changes that break `ash-window` | Medium | Can't pin | `ash-window` is small, and we use only two of its functions: replace them with our own surface creation in `surface.rs` |
 | `ash` `master`'s version stops being 0.38-compatible, so the patch no longer applies | Low | Can't patch | Pin an older commit that still is. Revisit when `ash` releases. |
-| The SDK's validation layer doesn't know `VK_EXT_descriptor_heap` or device-address commands, and reports errors or doesn't validate them | Medium | False failures or blind spots from step 1 | Check the SDK's layer against the extensions in `foundations-ash-1.4`, and record the minimum SDK version in `docs/testing.md`. Update the SDK if it's too old. |
+| The SDK's validation layer doesn't know `VK_EXT_descriptor_heap` or device address commands, and reports errors or doesn't validate them | Medium | False failures or blind spots from step 1 | Check the SDK's layer against the extensions in `foundations-ash-1.4`, and record the minimum SDK version in `docs/testing.md`. Update the SDK if it's too old. |
 | Synchronization validation reports false positives on new extensions | Medium | Noise | Suppress individually with a reason and an upstream issue (R4) |
 | The layer setting names differ between layer versions | Low | Settings silently ignored | The layer reports a setting it doesn't recognise as a `VALIDATION-SETTINGS` warning during instance creation, which is counted, so it fails every T1 test and `--fail-on-warnings` run. (Revised during `foundations-validation`; see the revision history.) |
 | A machine's environment differs from what the checks expect (for example, a missing SDK variable) | Medium | Checks fail, or test a different layer or driver | `cargo xtask check` prints the `slangc` path, the SDK version, and the layers and devices the loader finds, at the start of every run |
