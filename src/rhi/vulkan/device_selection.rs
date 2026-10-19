@@ -1,7 +1,9 @@
 //! Choosing the physical device to render with.
 //!
-//! Selection happens in two phases:
+//! Selection happens in three phases:
 //!
+//! 0. **Filter.** If a device filter is given, only devices whose names
+//!    contain it, ignoring case, are considered (R10). See [`filter`].
 //! 1. **Requirements.** Every device that does not meet all of
 //!    [`REQUIREMENTS`] is rejected, and the reasons are logged.
 //! 2. **Comparison.** The remaining devices are compared in pairs with
@@ -118,14 +120,15 @@ const REQUIREMENTS: &[Requirement] = &[
     },
 ];
 
-/// Chooses the best of `candidates` that meets every requirement, and the
-/// queue families to use on it.
+/// Chooses the best of `candidates` that matches `device_filter` (if any)
+/// and meets every requirement, and the queue families to use on it.
 ///
 /// # Errors
 ///
-/// Returns an error if no device meets every requirement.
-pub fn select(candidates: Vec<Candidate>) -> Result<Selection> {
-    let selected = candidates
+/// Returns an error if no device matches the filter, listing every device,
+/// or if no matching device meets every requirement.
+pub fn select(candidates: Vec<Candidate>, device_filter: Option<&str>) -> Result<Selection> {
+    let selected = filter(candidates, device_filter)?
         .into_iter()
         .filter(|candidate| {
             let unmet = unmet_requirements(candidate);
@@ -160,6 +163,44 @@ pub fn select(candidates: Vec<Candidate>) -> Result<Selection> {
         device: selected.device,
         queue_families,
     })
+}
+
+/// Keeps the candidates whose names contain `device_filter`, ignoring case,
+/// or all of them if it's `None`.
+///
+/// # Errors
+///
+/// Returns an error listing every candidate's name if none matches.
+fn filter(candidates: Vec<Candidate>, device_filter: Option<&str>) -> Result<Vec<Candidate>> {
+    let Some(device_filter) = device_filter else {
+        return Ok(candidates);
+    };
+    let wanted = device_filter.to_lowercase();
+    let names: Vec<String> = candidates
+        .iter()
+        .map(|candidate| candidate.device.name().into_owned())
+        .collect();
+    let matching: Vec<_> = candidates
+        .into_iter()
+        .zip(&names)
+        .filter(|(_, name)| name.to_lowercase().contains(&wanted))
+        .map(|(candidate, _)| candidate)
+        .collect();
+    if matching.is_empty() {
+        let available = if names.is_empty() {
+            "there are none".to_owned()
+        } else {
+            format!("the devices are: {}", names.join(", "))
+        };
+        bail!("no Vulkan device's name contains \"{device_filter}\"; {available}");
+    }
+    for name in names
+        .iter()
+        .filter(|name| !name.to_lowercase().contains(&wanted))
+    {
+        info!("ignored {name}: its name doesn't contain \"{device_filter}\"");
+    }
+    Ok(matching)
 }
 
 /// Returns the descriptions of the requirements that `candidate` does not
@@ -337,7 +378,7 @@ mod tests {
     }
 
     fn selected_name(devices: Vec<PhysicalDevice>) -> String {
-        select(headless(devices))
+        select(headless(devices), None)
             .unwrap()
             .device
             .name()
@@ -501,15 +542,15 @@ mod tests {
     fn fails_when_no_device_meets_the_requirements() {
         let mut old = device("old", vk::PhysicalDeviceType::DISCRETE_GPU, 16 * GIB);
         old.properties.core.api_version = vk::API_VERSION_1_3;
-        assert!(select(headless(vec![old])).is_err());
-        assert!(select(Vec::new()).is_err());
+        assert!(select(headless(vec![old]), None).is_err());
+        assert!(select(Vec::new(), None).is_err());
     }
 
     #[test]
     fn headless_selection_does_not_need_presenting() {
         // No swapchain extension and no present support.
         let device = device("headless", vk::PhysicalDeviceType::DISCRETE_GPU, 8 * GIB);
-        let selection = select(headless(vec![device])).unwrap();
+        let selection = select(headless(vec![device]), None).unwrap();
         assert_eq!(
             selection.queue_families,
             QueueFamilies {
@@ -540,7 +581,7 @@ mod tests {
                 &[true],
             ),
         ];
-        assert_eq!(select(candidates).unwrap().device.name(), "swapchain");
+        assert_eq!(select(candidates, None).unwrap().device.name(), "swapchain");
     }
 
     #[test]
@@ -563,7 +604,10 @@ mod tests {
                 &[true],
             ),
         ];
-        assert_eq!(select(candidates).unwrap().device.name(), "can present");
+        assert_eq!(
+            select(candidates, None).unwrap().device.name(),
+            "can present"
+        );
     }
 
     #[test]
@@ -573,7 +617,7 @@ mod tests {
             &[true],
         );
         no_formats.surface_support.as_mut().unwrap().formats.clear();
-        assert!(select(vec![no_formats]).is_err());
+        assert!(select(vec![no_formats], None).is_err());
     }
 
     #[test]
@@ -583,7 +627,7 @@ mod tests {
             device("device", vk::PhysicalDeviceType::DISCRETE_GPU, 8 * GIB),
             vk::QueueFlags::GRAPHICS,
         );
-        let selection = select(vec![windowed(device, &[false, true])]).unwrap();
+        let selection = select(vec![windowed(device, &[false, true])], None).unwrap();
         assert_eq!(
             selection.queue_families,
             QueueFamilies {
@@ -601,7 +645,7 @@ mod tests {
             device("device", vk::PhysicalDeviceType::DISCRETE_GPU, 8 * GIB),
             vk::QueueFlags::COMPUTE,
         );
-        let selection = select(vec![windowed(device, &[false, true])]).unwrap();
+        let selection = select(vec![windowed(device, &[false, true])], None).unwrap();
         assert_eq!(
             selection.queue_families,
             QueueFamilies {
@@ -609,5 +653,83 @@ mod tests {
                 present: Some(1),
             },
         );
+    }
+
+    /// The filter keeps only devices whose names contain it, even when a
+    /// device it excludes would compare better.
+    #[test]
+    fn the_device_filter_keeps_matching_devices() {
+        let devices = vec![
+            device(
+                "NVIDIA GeForce RTX 4090",
+                vk::PhysicalDeviceType::DISCRETE_GPU,
+                24 * GIB,
+            ),
+            device(
+                "Intel(R) UHD Graphics 770",
+                vk::PhysicalDeviceType::INTEGRATED_GPU,
+                8 * GIB,
+            ),
+        ];
+        let selection = select(headless(devices), Some("UHD")).unwrap();
+        assert_eq!(selection.device.name(), "Intel(R) UHD Graphics 770");
+    }
+
+    /// The filter ignores case, in both the filter and the device's name.
+    #[test]
+    fn the_device_filter_ignores_case() {
+        let devices = vec![
+            device(
+                "llvmpipe (LLVM 19.1.7, 256 bits)",
+                vk::PhysicalDeviceType::CPU,
+                8 * GIB,
+            ),
+            device(
+                "NVIDIA GeForce RTX 3090",
+                vk::PhysicalDeviceType::DISCRETE_GPU,
+                24 * GIB,
+            ),
+        ];
+        let selection = select(headless(devices), Some("LLVMpipe")).unwrap();
+        assert_eq!(selection.device.name(), "llvmpipe (LLVM 19.1.7, 256 bits)");
+    }
+
+    /// A filter that matches nothing is an error listing every device, so
+    /// that the user can correct it.
+    #[test]
+    fn a_device_filter_matching_nothing_lists_the_devices() {
+        let devices = vec![
+            device(
+                "NVIDIA GeForce RTX 4090",
+                vk::PhysicalDeviceType::DISCRETE_GPU,
+                24 * GIB,
+            ),
+            device(
+                "Intel(R) UHD Graphics 770",
+                vk::PhysicalDeviceType::INTEGRATED_GPU,
+                8 * GIB,
+            ),
+        ];
+        let Err(err) = select(headless(devices), Some("radeon")) else {
+            panic!("selected a device");
+        };
+        assert_eq!(
+            err.to_string(),
+            "no Vulkan device's name contains \"radeon\"; the devices are: \
+             NVIDIA GeForce RTX 4090, Intel(R) UHD Graphics 770",
+        );
+    }
+
+    /// A device that matches the filter must still meet the requirements:
+    /// the filter never selects a device that would otherwise be rejected.
+    #[test]
+    fn the_device_filter_doesnt_bypass_requirements() {
+        let mut old = device("old", vk::PhysicalDeviceType::DISCRETE_GPU, 16 * GIB);
+        old.properties.core.api_version = vk::API_VERSION_1_3;
+        let devices = vec![
+            old,
+            device("new", vk::PhysicalDeviceType::INTEGRATED_GPU, 8 * GIB),
+        ];
+        assert!(select(headless(devices), Some("old")).is_err());
     }
 }

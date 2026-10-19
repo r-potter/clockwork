@@ -8,27 +8,33 @@
 //! application still starts on systems without Vulkan; creating this backend
 //! fails with an error instead.
 //!
-//! In builds with debug assertions enabled, the Khronos validation layer is
-//! enabled and its messages are emitted as `tracing` events from this module.
-//! See [`ENABLE_VALIDATION`] and [`debug_callback`].
+//! Validation is enabled as [`BackendOptions::validation`] asks, through the
+//! Khronos validation layer, and its messages are emitted as `tracing` events
+//! on [`VALIDATION_TARGET`](crate::diagnostics::VALIDATION_TARGET), attributed
+//! to [`BackendOptions::session`]. See the [`validation`] module.
 
 mod device;
 mod device_selection;
 mod frames;
+#[cfg(test)]
+mod gpu_tests;
 mod physical_device;
 mod shaders;
 mod surface;
 mod swapchain;
+#[cfg(test)]
+pub mod test_support;
+mod validation;
 
-use std::ffi::{CStr, c_void};
+use std::ffi::CStr;
 use std::{fmt, slice};
 
 use anyhow::{Context, Result, bail};
 use ash::{Entry, Instance, ext::debug_utils, vk};
 use raw_window_handle::RawDisplayHandle;
-use tracing::{Level, debug, error, info, trace, warn};
+use tracing::{info, warn};
 
-use super::{GraphicsApi, RenderHardwareInterface, WindowSize, WindowTarget};
+use super::{BackendOptions, GraphicsApi, RenderHardwareInterface, WindowSize, WindowTarget};
 use device::LogicalDevice;
 use device_selection::{Candidate, Selection};
 use frames::Frames;
@@ -36,6 +42,7 @@ use physical_device::PhysicalDevice;
 use shaders::TriangleShaders;
 use surface::Surface;
 use swapchain::Swapchain;
+use validation::{Availability, LayerSettings, VALIDATION_LAYER};
 
 /// Name reported to the Vulkan driver for both the application and the engine.
 const NAME: &CStr = c"clockwork";
@@ -47,16 +54,6 @@ const NAME: &CStr = c"clockwork";
 /// also lack the functions and types added to core in 1.4; use the equivalent
 /// extension bindings instead.
 const API_VERSION: u32 = vk::make_api_version(0, 1, 4, 0);
-
-/// Whether to enable the validation layer and a debug messenger.
-///
-/// On in builds with debug assertions (such as the `dev` profile) and off in
-/// release builds. If the validation layer is not installed, a warning is
-/// logged and the backend is created without it.
-const ENABLE_VALIDATION: bool = cfg!(debug_assertions);
-
-/// Khronos validation layer, shipped with the Vulkan SDK.
-const VALIDATION_LAYER: &CStr = c"VK_LAYER_KHRONOS_validation";
 
 /// The colour each frame is cleared to before drawing, as linear RGBA.
 /// Swapchain images use an sRGB format, so this appears brighter on screen
@@ -136,15 +133,16 @@ impl VulkanRenderHardwareInterface {
     /// # Errors
     ///
     /// Returns an error if instance, surface, device or swapchain creation
-    /// fails, if the physical devices cannot be queried, or if none meets the
-    /// minimum requirements.
-    pub fn new(window: Option<WindowTarget>) -> Result<Self> {
+    /// fails, if the physical devices cannot be queried, if none matches
+    /// `options`' device filter and meets the minimum requirements, or if
+    /// `options` requires validation that isn't available.
+    pub fn new(window: Option<WindowTarget>, options: &BackendOptions) -> Result<Self> {
         let display_handle = window
             .as_ref()
             .map(|target| target.window.display_handle().map(|handle| handle.as_raw()))
             .transpose()
             .context("failed to get the window's display handle")?;
-        let instance = VulkanInstance::new(display_handle)?;
+        let instance = VulkanInstance::new(display_handle, options)?;
 
         let window_size = window.as_ref().map(|target| target.size);
         let surface = window
@@ -173,7 +171,7 @@ impl VulkanRenderHardwareInterface {
         let Selection {
             device: physical_device,
             queue_families,
-        } = device_selection::select(candidates)?;
+        } = device_selection::select(candidates, options.device_filter.as_deref())?;
 
         let device = LogicalDevice::new(&instance.instance, &physical_device, queue_families)?;
         let frames = Frames::new(&device)?;
@@ -426,8 +424,9 @@ unsafe fn record_frame(
 }
 
 impl VulkanInstance {
-    /// Loads the Vulkan loader and creates an instance, with validation if
-    /// [`ENABLE_VALIDATION`] is set.
+    /// Loads the Vulkan loader and creates an instance, with the validation
+    /// `options` asks for (see [`validation::decide`]), and a debug messenger
+    /// whose messages are attributed to `options.session`.
     ///
     /// If `display_handle` is `Some`, the instance extensions needed to create
     /// surfaces for windows on that display are enabled.
@@ -436,9 +435,10 @@ impl VulkanInstance {
     ///
     /// Returns an error if the Vulkan loader cannot be found, if it is older
     /// than [`API_VERSION`], if the display's window system is not supported,
-    /// or if instance or debug messenger creation fails (for example, because
-    /// no Vulkan driver is installed).
-    fn new(display_handle: Option<RawDisplayHandle>) -> Result<Self> {
+    /// if validation is required but not available, or if instance or debug
+    /// messenger creation fails (for example, because no Vulkan driver is
+    /// installed).
+    fn new(display_handle: Option<RawDisplayHandle>, options: &BackendOptions) -> Result<Self> {
         // SAFETY: Loading the Vulkan loader runs its library initialisation
         // code, which we trust to be well behaved.
         let entry = unsafe { Entry::load() }.context("failed to load the Vulkan loader")?;
@@ -458,14 +458,27 @@ impl VulkanInstance {
             );
         }
 
-        let validation = ENABLE_VALIDATION && validation_layer_available(&entry)?;
+        let plan = validation::decide(options.validation, Availability::query(&entry)?)?;
+        if let Some(warning) = &plan.warning {
+            warn!("{warning}");
+        }
+        let validate = !plan.features.is_off();
+        if validate {
+            info!("Vulkan validation: {}", validation::describe(&plan));
+        } else {
+            info!("Vulkan validation: off");
+        }
 
         let mut layers = Vec::new();
         let mut extensions = Vec::new();
-        if validation {
+        if validate {
             layers.push(VALIDATION_LAYER.as_ptr());
             // Provided by the validation layer.
             extensions.push(debug_utils::NAME.as_ptr());
+            if plan.use_settings {
+                // Also provided by the validation layer.
+                extensions.push(vk::EXT_LAYER_SETTINGS_NAME.as_ptr());
+            }
         }
         if let Some(display_handle) = display_handle {
             let surface_extensions = ash_window::enumerate_required_extensions(display_handle)
@@ -473,30 +486,11 @@ impl VulkanInstance {
             extensions.extend_from_slice(surface_extensions);
         }
 
-        // Only ask Vulkan for messages at levels `tracing` will record, using
-        // the same mapping as `debug_callback`. Errors are always requested, as
-        // the severity mask must not be empty.
-        let mut message_severity = vk::DebugUtilsMessageSeverityFlagsEXT::ERROR;
-        if tracing::enabled!(Level::WARN) {
-            message_severity |= vk::DebugUtilsMessageSeverityFlagsEXT::WARNING;
-        }
-        if tracing::enabled!(Level::DEBUG) {
-            message_severity |= vk::DebugUtilsMessageSeverityFlagsEXT::INFO;
-        }
-        if tracing::enabled!(Level::TRACE) {
-            message_severity |= vk::DebugUtilsMessageSeverityFlagsEXT::VERBOSE;
-        }
-
-        // Which messages the debug messenger reports, and the callback that
-        // reports them.
-        let mut messenger_info = vk::DebugUtilsMessengerCreateInfoEXT::default()
-            .message_severity(message_severity)
-            .message_type(
-                vk::DebugUtilsMessageTypeFlagsEXT::GENERAL
-                    | vk::DebugUtilsMessageTypeFlagsEXT::VALIDATION
-                    | vk::DebugUtilsMessageTypeFlagsEXT::PERFORMANCE,
-            )
-            .pfn_user_callback(Some(debug_callback));
+        let mut messenger_create_info = validation::messenger_create_info(options.session);
+        let layer_settings = LayerSettings::new(plan.features);
+        let settings = layer_settings.settings();
+        let mut layer_settings_create_info =
+            vk::LayerSettingsCreateInfoEXT::default().settings(&settings);
 
         let application_info = vk::ApplicationInfo::default()
             .application_name(NAME)
@@ -507,10 +501,13 @@ impl VulkanInstance {
             .application_info(&application_info)
             .enabled_layer_names(&layers)
             .enabled_extension_names(&extensions);
-        if validation {
+        if validate {
             // Also report problems in instance creation and destruction, which
             // the messenger created below cannot cover.
-            create_info = create_info.push_next(&mut messenger_info);
+            create_info = create_info.push_next(&mut messenger_create_info);
+        }
+        if plan.use_settings {
+            create_info = create_info.push_next(&mut layer_settings_create_info);
         }
 
         // SAFETY: `create_info` and the structures it points to are valid for
@@ -526,13 +523,13 @@ impl VulkanInstance {
             debug_messenger: None,
             supports_surfaces: display_handle.is_some(),
         };
-        if validation {
+        if validate {
             let debug_utils =
                 debug_utils::Instance::new(&vulkan_instance.entry, &vulkan_instance.instance);
-            // SAFETY: `messenger_info` is valid, and `VK_EXT_debug_utils` was
-            // enabled on the instance.
+            // SAFETY: `messenger_create_info` is valid, and `VK_EXT_debug_utils`
+            // was enabled on the instance.
             let messenger =
-                unsafe { debug_utils.create_debug_utils_messenger(&messenger_info, None) }
+                unsafe { debug_utils.create_debug_utils_messenger(&messenger_create_info, None) }
                     .context("failed to create Vulkan debug messenger")?;
             vulkan_instance.debug_messenger = Some(DebugMessenger {
                 debug_utils,
@@ -542,70 +539,6 @@ impl VulkanInstance {
 
         Ok(vulkan_instance)
     }
-}
-
-/// Returns whether the validation layer is installed, logging a warning if
-/// it is not.
-fn validation_layer_available(entry: &Entry) -> Result<bool> {
-    // SAFETY: `entry` holds a valid, loaded Vulkan loader.
-    let layers = unsafe { entry.enumerate_instance_layer_properties() }
-        .context("failed to enumerate Vulkan instance layers")?;
-    let available = layers
-        .iter()
-        .any(|layer| layer.layer_name_as_c_str() == Ok(VALIDATION_LAYER));
-    if !available {
-        warn!(
-            "{} is not installed; continuing without Vulkan validation",
-            VALIDATION_LAYER.to_string_lossy(),
-        );
-    }
-    Ok(available)
-}
-
-/// Emits messages from the Vulkan debug messenger as `tracing` events.
-///
-/// Vulkan severities map to `tracing` levels as follows:
-///
-/// | Vulkan    | `tracing` |
-/// |-----------|-----------|
-/// | `ERROR`   | `ERROR`   |
-/// | `WARNING` | `WARN`    |
-/// | `INFO`    | `DEBUG`   |
-/// | `VERBOSE` | `TRACE`   |
-///
-/// Vulkan's `INFO` messages are mostly loader and layer diagnostics, so they
-/// are logged at `DEBUG` to keep them out of the default `INFO` output.
-///
-/// # Safety
-///
-/// Called only by the Vulkan implementation, which guarantees that
-/// `callback_data` is null or points to valid data for the duration of the
-/// call.
-unsafe extern "system" fn debug_callback(
-    severity: vk::DebugUtilsMessageSeverityFlagsEXT,
-    types: vk::DebugUtilsMessageTypeFlagsEXT,
-    callback_data: *const vk::DebugUtilsMessengerCallbackDataEXT<'_>,
-    _user_data: *mut c_void,
-) -> vk::Bool32 {
-    // SAFETY: Guaranteed by the caller; see the function's safety section.
-    let message = unsafe {
-        callback_data
-            .as_ref()
-            .and_then(|data| data.message_as_c_str())
-    };
-    let message = message.map_or("<no message>".into(), CStr::to_string_lossy);
-    if severity.contains(vk::DebugUtilsMessageSeverityFlagsEXT::ERROR) {
-        error!(?types, "{message}");
-    } else if severity.contains(vk::DebugUtilsMessageSeverityFlagsEXT::WARNING) {
-        warn!(?types, "{message}");
-    } else if severity.contains(vk::DebugUtilsMessageSeverityFlagsEXT::INFO) {
-        debug!(?types, "{message}");
-    } else {
-        trace!(?types, "{message}");
-    }
-    // Returning `FALSE` lets the Vulkan call that triggered the message
-    // continue, as the specification requires.
-    vk::FALSE
 }
 
 /// Formats a Vulkan version number as `major.minor.patch`.

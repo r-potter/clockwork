@@ -77,12 +77,12 @@ impl Frame {
     /// Creates one frame's resources on `device`. If a later step fails, the
     /// resources already created are destroyed.
     fn new(device: &ash::Device, graphics_family: u32) -> Result<Self> {
-        let pool_info = vk::CommandPoolCreateInfo::default()
+        let pool_create_info = vk::CommandPoolCreateInfo::default()
             .flags(vk::CommandPoolCreateFlags::TRANSIENT)
             .queue_family_index(graphics_family);
-        // SAFETY: `device` is a valid logical device, and `pool_info` is valid
-        // for the duration of the call.
-        let command_pool = unsafe { device.create_command_pool(&pool_info, None) }
+        // SAFETY: `device` is a valid logical device, and `pool_create_info` is
+        // valid for the duration of the call.
+        let command_pool = unsafe { device.create_command_pool(&pool_create_info, None) }
             .context("failed to create Vulkan command pool")?;
         let mut frame = Self {
             command_pool,
@@ -112,10 +112,11 @@ impl Frame {
         self.image_acquired =
             unsafe { device.create_semaphore(&vk::SemaphoreCreateInfo::default(), None) }
                 .context("failed to create Vulkan semaphore")?;
-        let fence_info = vk::FenceCreateInfo::default().flags(vk::FenceCreateFlags::SIGNALED);
-        // SAFETY: `device` is a valid logical device, and `fence_info` is
-        // valid for the call.
-        self.in_flight = unsafe { device.create_fence(&fence_info, None) }
+        let fence_create_info =
+            vk::FenceCreateInfo::default().flags(vk::FenceCreateFlags::SIGNALED);
+        // SAFETY: `device` is a valid logical device, and
+        // `fence_create_info` is valid for the call.
+        self.in_flight = unsafe { device.create_fence(&fence_create_info, None) }
             .context("failed to create Vulkan fence")?;
         Ok(())
     }

@@ -52,7 +52,7 @@ impl LogicalDevice {
             families.push(present);
         }
         let priorities = [1.0];
-        let queue_infos: Vec<_> = families
+        let queue_create_infos: Vec<_> = families
             .iter()
             .map(|&family| {
                 vk::DeviceQueueCreateInfo::default()
@@ -76,7 +76,7 @@ impl LogicalDevice {
         let mut shader_object_features =
             vk::PhysicalDeviceShaderObjectFeaturesEXT::default().shader_object(true);
         let create_info = vk::DeviceCreateInfo::default()
-            .queue_create_infos(&queue_infos)
+            .queue_create_infos(&queue_create_infos)
             .enabled_extension_names(&extensions)
             .push_next(&mut vulkan11_features)
             .push_next(&mut vulkan13_features)

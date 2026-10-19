@@ -11,7 +11,10 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use diagnostics::{DiagnosticCounter, Session, SessionLayer, is_session_span};
-use rhi::{GraphicsApi, RenderHardwareInterface, WindowSize, WindowTarget};
+use rhi::{
+    BackendOptions, GraphicsApi, RenderHardwareInterface, Validation, ValidationFeatures,
+    WindowSize, WindowTarget,
+};
 use tracing::level_filters::LevelFilter;
 use tracing::{info, trace};
 use tracing_subscriber::filter::{FilterExt, filter_fn};
@@ -64,16 +67,32 @@ fn main() -> Result<()> {
     // engine can pace frames itself.
     event_loop.set_control_flow(ControlFlow::Poll);
 
-    let mut app = App::default();
+    let mut app = App::new(BackendOptions {
+        session: session.id(),
+        device_filter: None,
+        validation: default_validation(),
+    });
     event_loop
         .run_app(&mut app)
         .context("failed to run event loop")?;
     app.error.map_or(Ok(()), Err)
 }
 
+/// The validation the application asks for (design 0001, "Validation"):
+/// synchronization validation in debug builds if it's available, and none in
+/// release builds.
+fn default_validation() -> Validation {
+    if cfg!(debug_assertions) {
+        Validation::Preferred(ValidationFeatures::SYNC)
+    } else {
+        Validation::Off
+    }
+}
+
 /// Application state driven by the `winit` event loop.
-#[derive(Default)]
 struct App {
+    /// How to create the renderer backend.
+    options: BackendOptions,
     /// Created when the application is first resumed.
     window: Option<Arc<Window>>,
     /// Renders to `window`. Created along with it.
@@ -88,6 +107,19 @@ struct App {
 }
 
 impl App {
+    /// An application that will create its backend with `options`, once the
+    /// event loop first resumes it.
+    fn new(options: BackendOptions) -> Self {
+        Self {
+            options,
+            window: None,
+            rhi: None,
+            last_frame_start: None,
+            frame_count: 0,
+            error: None,
+        }
+    }
+
     /// Creates the window and the renderer backend that renders to it.
     fn init(&mut self, event_loop: &ActiveEventLoop) -> Result<()> {
         let attributes = Window::default_attributes().with_title(WINDOW_TITLE);
@@ -98,7 +130,11 @@ impl App {
         );
 
         // Only Vulkan is available for now.
-        let rhi = rhi::create(GraphicsApi::Vulkan, Some(window_target(&window)))?;
+        let rhi = rhi::create(
+            GraphicsApi::Vulkan,
+            Some(window_target(&window)),
+            &self.options,
+        )?;
         info!("using {:?} backend", rhi.api());
 
         self.window = Some(window);

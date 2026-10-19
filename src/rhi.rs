@@ -13,19 +13,29 @@
 //! backend can be suspended, releasing its window, and later resumed with a
 //! window again, without recreating the backend.
 //!
+//! Backends are configured with [`BackendOptions`]: the session their events
+//! are attributed to, which devices to consider, and whether to validate
+//! (design 0001, "Validation" and "Configuration"). The application and the
+//! tests configure them the same way; only where the values come from
+//! differs.
+//!
 //! To add a backend:
 //! 1. add a variant to [`GraphicsApi`],
 //! 2. add a submodule with a type implementing [`RenderHardwareInterface`],
 //! 3. add a match arm for it in [`create`].
 
+#[cfg(test)]
+mod gpu_tests;
 mod vulkan;
 
-use std::fmt::Debug;
+use std::fmt::{self, Debug};
+use std::str::FromStr;
 use std::sync::Arc;
 
-use anyhow::Result;
+use anyhow::{Result, bail};
 use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
 
+use crate::diagnostics::SessionId;
 use vulkan::VulkanRenderHardwareInterface;
 
 /// A window a backend can render to.
@@ -65,6 +75,190 @@ pub struct WindowTarget {
 pub enum GraphicsApi {
     /// The Vulkan API, implemented by [`VulkanRenderHardwareInterface`].
     Vulkan,
+}
+
+/// Options for creating a backend.
+#[derive(Debug, Clone)]
+pub struct BackendOptions {
+    /// The session the backend's events are attributed to, including those the
+    /// graphics API reports from its own threads.
+    pub session: SessionId,
+    /// Only consider devices whose name contains this, ignoring case. `None`
+    /// considers every device.
+    pub device_filter: Option<String>,
+    /// Whether to validate, and with which features.
+    pub validation: Validation,
+}
+
+/// Whether validation must, may or mustn't be enabled.
+///
+/// The guarantee comes from [`create`] succeeding: there's deliberately no
+/// way to ask a backend afterwards whether it validates, since an answer
+/// that's never checked fails open, and zero messages would look the same as
+/// no validation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Validation {
+    /// Don't validate.
+    Off,
+    /// Enable these features if available. Otherwise log a warning, and
+    /// continue with what is available.
+    Preferred(ValidationFeatures),
+    /// Enable these features, or fail to create the backend.
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "only tests require validation until foundations-cli adds --fail-on-warnings"
+        )
+    )]
+    Required(ValidationFeatures),
+}
+
+/// One validation feature, enabled as part of [`ValidationFeatures`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ValidationFeature {
+    /// Checks API usage against the specification's valid usage rules. Every
+    /// other feature implies it.
+    Core,
+    /// Synchronization validation: hazards between commands, such as two
+    /// writes with no barrier between them.
+    Sync,
+    /// GPU-assisted validation: checks inside shaders, such as out-of-bounds
+    /// accesses. Slow, so off by default.
+    Gpu,
+    /// Best-practices validation: advice, which is logged but never counted
+    /// or failing (see [`Class::Advisory`](crate::diagnostics::Class::Advisory)).
+    BestPractices,
+}
+
+impl ValidationFeature {
+    /// Every feature, in the order they're listed in.
+    pub const ALL: [Self; 4] = [Self::Core, Self::Sync, Self::Gpu, Self::BestPractices];
+
+    /// The feature's name, as written in `--validation` and
+    /// `CLOCKWORK_VALIDATION`.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Core => "core",
+            Self::Sync => "sync",
+            Self::Gpu => "gpu",
+            Self::BestPractices => "best-practices",
+        }
+    }
+}
+
+/// A set of validation features.
+///
+/// Parsed from `off`, or a comma-separated list of `core`, `sync`, `gpu` and
+/// `best-practices` (see [`ValidationFeature::name`]), and displayed the same
+/// way.
+///
+/// Invariant: any feature implies [`ValidationFeature::Core`], so the set is
+/// either empty ([`OFF`](Self::OFF)) or contains `Core`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ValidationFeatures {
+    /// Whether [`ValidationFeature::Core`] is enabled.
+    core: bool,
+    /// Whether [`ValidationFeature::Sync`] is enabled.
+    sync: bool,
+    /// Whether [`ValidationFeature::Gpu`] is enabled.
+    gpu: bool,
+    /// Whether [`ValidationFeature::BestPractices`] is enabled.
+    best_practices: bool,
+}
+
+impl ValidationFeatures {
+    /// No validation at all.
+    pub const OFF: Self = Self {
+        core: false,
+        sync: false,
+        gpu: false,
+        best_practices: false,
+    };
+
+    /// Core and synchronization validation: the default in debug builds and
+    /// tests (R6).
+    pub const SYNC: Self = Self::OFF.with(ValidationFeature::Sync);
+
+    /// This set with `feature` added, and [`ValidationFeature::Core`], which
+    /// every feature implies.
+    pub const fn with(mut self, feature: ValidationFeature) -> Self {
+        self.core = true;
+        match feature {
+            ValidationFeature::Core => {}
+            ValidationFeature::Sync => self.sync = true,
+            ValidationFeature::Gpu => self.gpu = true,
+            ValidationFeature::BestPractices => self.best_practices = true,
+        }
+        self
+    }
+
+    /// Whether `feature` is in the set.
+    pub const fn contains(self, feature: ValidationFeature) -> bool {
+        match feature {
+            ValidationFeature::Core => self.core,
+            ValidationFeature::Sync => self.sync,
+            ValidationFeature::Gpu => self.gpu,
+            ValidationFeature::BestPractices => self.best_practices,
+        }
+    }
+
+    /// Whether the set is empty, meaning no validation.
+    pub const fn is_off(self) -> bool {
+        !self.core
+    }
+
+    /// The features in the set, in [`ValidationFeature::ALL`]'s order.
+    pub fn iter(self) -> impl Iterator<Item = ValidationFeature> {
+        ValidationFeature::ALL
+            .into_iter()
+            .filter(move |&feature| self.contains(feature))
+    }
+}
+
+impl fmt::Display for ValidationFeatures {
+    /// Formats the set as it's parsed: `off`, or the features' names,
+    /// separated by commas.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if self.is_off() {
+            return f.write_str("off");
+        }
+        let names: Vec<_> = self.iter().map(ValidationFeature::name).collect();
+        f.write_str(&names.join(","))
+    }
+}
+
+impl FromStr for ValidationFeatures {
+    type Err = anyhow::Error;
+
+    /// Parses `off`, or a comma-separated list of feature names. Spaces
+    /// around names are ignored.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for an empty value or list item, an unknown feature
+    /// name, or `off` combined with features.
+    fn from_str(value: &str) -> Result<Self> {
+        if value.trim() == "off" {
+            return Ok(Self::OFF);
+        }
+        let mut features = Self::OFF;
+        for name in value.split(',').map(str::trim) {
+            let Some(feature) = ValidationFeature::ALL
+                .into_iter()
+                .find(|feature| feature.name() == name)
+            else {
+                let expected: Vec<_> = ValidationFeature::ALL.map(ValidationFeature::name).into();
+                bail!(
+                    "invalid validation features \"{value}\": expected off, or a comma-separated \
+                     list of {}",
+                    expected.join(", "),
+                );
+            };
+            features = features.with(feature);
+        }
+        Ok(features)
+    }
 }
 
 /// Operations every graphics API backend must provide.
@@ -133,17 +327,20 @@ pub trait RenderHardwareInterface: Debug {
 ///
 /// If `window` is `Some`, the backend renders to it, and keeps it alive until
 /// it is suspended or dropped. If it is `None`, the backend runs headless.
+/// `options` sets its session, device filter and validation.
 ///
 /// # Errors
 ///
 /// Returns an error if the backend fails to initialise, for example because
-/// the graphics API is not supported on this system.
+/// the graphics API is not supported on this system, if no device matches
+/// the device filter, or if validation is required but not available.
 pub fn create(
     api: GraphicsApi,
     window: Option<WindowTarget>,
+    options: &BackendOptions,
 ) -> Result<Box<dyn RenderHardwareInterface>> {
     Ok(match api {
-        GraphicsApi::Vulkan => Box::new(VulkanRenderHardwareInterface::new(window)?),
+        GraphicsApi::Vulkan => Box::new(VulkanRenderHardwareInterface::new(window, options)?),
     })
 }
 
@@ -161,73 +358,85 @@ mod tests {
     const _: () = match GraphicsApi::Vulkan {
         GraphicsApi::Vulkan => (),
     };
-}
 
-#[cfg(test)]
-mod gpu_tests {
-    //! T1 tests of creating backends. They create real graphics API
-    //! instances, so they need a driver, and `cargo xtask check` skips them by
-    //! this module's name. `foundations-validation` (design 0001) moves them
-    //! to `src/rhi/gpu_tests.rs`.
+    /// Parses `value`, panicking with the error if it's invalid.
+    fn parse(value: &str) -> ValidationFeatures {
+        value
+            .parse()
+            .unwrap_or_else(|err| panic!("{value:?}: {err:?}"))
+    }
 
-    use super::tests::ALL_GRAPHICS_APIS;
-    use super::*;
-
-    /// Every graphics API's backend can be created headless, so it needs no
-    /// display, and reports itself as headless and not suspended.
+    /// `off` is the empty set.
     #[test]
-    fn create_succeeds_for_every_graphics_api() {
-        for &api in ALL_GRAPHICS_APIS {
-            let rhi = create(api, None)
-                .unwrap_or_else(|err| panic!("failed to create {api:?} backend: {err:?}"));
-            assert_eq!(rhi.api(), api);
-            assert!(rhi.is_headless());
-            assert!(!rhi.is_suspended());
-        }
+    fn off_parses_as_no_features() {
+        assert_eq!(parse("off"), ValidationFeatures::OFF);
+        assert!(parse("off").is_off());
     }
 
-    /// A window whose handles are never available. Enough to check that a
-    /// headless backend rejects windows without using them.
-    struct UnavailableWindow;
-
-    impl HasDisplayHandle for UnavailableWindow {
-        fn display_handle(
-            &self,
-        ) -> Result<raw_window_handle::DisplayHandle<'_>, raw_window_handle::HandleError> {
-            Err(raw_window_handle::HandleError::Unavailable)
-        }
-    }
-
-    impl HasWindowHandle for UnavailableWindow {
-        fn window_handle(
-            &self,
-        ) -> Result<raw_window_handle::WindowHandle<'_>, raw_window_handle::HandleError> {
-            Err(raw_window_handle::HandleError::Unavailable)
-        }
-    }
-
-    /// A headless backend has no window to suspend, resize or resume, so it
-    /// ignores the first two and rejects the third, staying headless.
+    /// Every feature implies core validation, so `sync` alone means core and
+    /// sync, the same as listing both.
     #[test]
-    fn headless_backends_ignore_suspend_and_resize_and_reject_resume() {
-        let size = WindowSize {
-            width: 640,
-            height: 480,
-        };
-        for &api in ALL_GRAPHICS_APIS {
-            let mut rhi = create(api, None)
-                .unwrap_or_else(|err| panic!("failed to create {api:?} backend: {err:?}"));
-            rhi.suspend();
-            assert!(rhi.is_headless());
-            assert!(!rhi.is_suspended());
-            rhi.resize(size);
-            assert!(rhi.render_frame().is_ok());
-            let target = WindowTarget {
-                window: Arc::new(UnavailableWindow),
-                size,
-            };
-            assert!(rhi.resume(target).is_err());
-            assert!(rhi.is_headless());
+    fn every_feature_implies_core() {
+        for feature in ValidationFeature::ALL {
+            let features = parse(feature.name());
+            assert!(features.contains(ValidationFeature::Core), "{feature:?}");
+            assert!(features.contains(feature), "{feature:?}");
+        }
+        assert_eq!(parse("sync"), parse("core,sync"));
+        assert_eq!(parse("sync"), ValidationFeatures::SYNC);
+    }
+
+    /// A list enables each feature it names and no other, ignoring spaces
+    /// and order.
+    #[test]
+    fn lists_enable_exactly_their_features() {
+        let features = parse("best-practices, gpu");
+        assert_eq!(
+            features.iter().collect::<Vec<_>>(),
+            [
+                ValidationFeature::Core,
+                ValidationFeature::Gpu,
+                ValidationFeature::BestPractices,
+            ],
+        );
+    }
+
+    /// Unknown names, empty values and items, and `off` mixed with features
+    /// are errors, rather than being ignored.
+    #[test]
+    fn invalid_features_are_errors() {
+        for value in [
+            "",
+            "fast",
+            "sync,",
+            "sync,,gpu",
+            "off,sync",
+            "Sync",
+            "best_practices",
+        ] {
+            assert!(
+                value.parse::<ValidationFeatures>().is_err(),
+                "{value:?} parsed"
+            );
+        }
+    }
+
+    /// The error names the value and lists what's valid.
+    #[test]
+    fn invalid_feature_errors_list_the_valid_names() {
+        let err = "fast".parse::<ValidationFeatures>().unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "invalid validation features \"fast\": expected off, or a comma-separated list of \
+             core, sync, gpu, best-practices",
+        );
+    }
+
+    /// Displaying a set gives a value that parses back to it.
+    #[test]
+    fn features_display_as_they_parse() {
+        for value in ["off", "core", "core,sync", "core,sync,gpu,best-practices"] {
+            assert_eq!(parse(value).to_string(), value);
         }
     }
 }
