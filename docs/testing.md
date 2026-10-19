@@ -153,7 +153,7 @@ Each expectation is met by one event, so a warning that's expected twice is decl
   ```
 
   A banner means some test isn't in a session, or a thread didn't enter the span. Find it and fix it.
-- **Suppression.** A message that's harmless and can't be fixed here, such as a false positive in the validation layer, can be suppressed: add an entry to `SUPPRESSED` in `src/diagnostics.rs`, with the message's target, its message ID (for validation, the VUID), and a reason, linking an upstream issue where there is one. A test checks that every entry has a reason. Suppressed messages are still logged at their level. Best-practices validation messages (IDs beginning `BestPractices-`) are only logged, never counted.
+- **Suppression.** A message that's harmless and can't be fixed here, such as a false positive in the validation layer, can be suppressed: add an entry to `SUPPRESSED` in `src/diagnostics.rs`, with the message's target, how to recognise the message, and a reason, linking an upstream issue where there is one. Recognise it by its message ID (`MessageMatch::Id`; for validation, the VUID) whenever it has one. Messages without an ID, such as a dependency's warnings through the `log` crate or the Vulkan loader's, are recognised by the start of their text (`MessageMatch::Prefix`): make the prefix long enough to identify one message, and leave out parts that vary, such as version numbers. A test checks that every entry has a target, a non-empty ID or prefix, and a reason. Suppressed messages are still logged at their level. Best-practices validation messages (IDs beginning `BestPractices-`) are only logged, never counted.
 
 ### How it works
 

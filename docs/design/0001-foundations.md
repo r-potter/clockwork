@@ -55,7 +55,7 @@ Clockwork draws a hardcoded triangle through a Vulkan 1.4 backend (`src/rhi/vulk
 | R1 | The design process, template and ADR format exist, with ADRs 0001 and 0002 | Reviewed and merged on this design's branch |
 | R2 | Every log event is attributed to a session: by an explicit `session` field if the event has one, otherwise by the nearest enclosing session span | T0 tests: an event in a session span; in a nested span; with an explicit field overriding the span; on another thread with the span propagated; and with no session |
 | R3 | `TestSession` fails its test if an unexpected warning or error is attributed to it. Expected messages can be declared. | T0: a `#[should_panic]` test that logs a warning; a test that declares an expected warning and passes; a test that declares one that never comes and fails |
-| R4 | Only individually listed messages can be suppressed, each with a reason | `SUPPRESSED` lists each message by target and message ID, with a reason. A T0 test checks that every entry has a non-empty reason. |
+| R4 | Only individually listed messages can be suppressed, each with a reason | `SUPPRESSED` lists each message by target and either its message ID or, for messages without one, the start of its text, with a reason. A T0 test checks that every entry has a non-empty ID or prefix and a non-empty reason. |
 | R5 | Validation messages are events on the `clockwork::validation` target, carrying the backend's session explicitly | T1 `validation_errors_are_counted` triggers a known error on purpose and sees it attributed to the test's session |
 | R6 | Synchronization validation is on by default in debug builds and tests | T1 `sync_hazards_are_reported` records a write-after-write hazard and sees it reported |
 | R7 | When validation is *required*, creating a backend fails if the layer is missing or a requested feature is unsupported. When it's only *preferred*, a warning is logged and creation continues. T1 tests always require it. | The decision is a pure function of the requested validation and the available layers and settings, with T0 tests for each case |
@@ -152,7 +152,7 @@ flowchart TD
 | Class | When | Effect |
 |---|---|---|
 | Counted | `WARN` or `ERROR`, and not one of the classes below | Fails tests; counted by the application |
-| Suppressed | Listed in `SUPPRESSED` by target and message ID (for validation, the VUID), with a reason | Logged at its level, but neither counted nor failing |
+| Suppressed | Listed in `SUPPRESSED` by target and message ID (for validation, the VUID), or by target and the start of the message for messages without an ID, with a reason | Logged at its level, but neither counted nor failing |
 | Advisory | A best-practices validation message (ID beginning `BestPractices-`) | Logged, but neither counted nor failing |
 | Ignored | `INFO` and below | Logged only |
 
@@ -162,7 +162,7 @@ flowchart TD
 
 This matters because `tracing` disables a call site entirely when no layer wants it. With one global filter, `RUST_LOG=error` would turn off every `warn!`, and warnings would go uncounted. For the same reason, the Vulkan callback always requests `ERROR` and `WARNING` from the layer when validation is on, whatever the log level. Only `INFO` and `VERBOSE` still follow `tracing::enabled!`.
 
-**Dependencies.** `tracing-subscriber`'s `tracing-log` feature, already enabled by default, routes the `log` crate's records (winit uses it) into `tracing`. They count like engine events, as agreed in review. A dependency's warning that turns out to be harmless gets a `SUPPRESSED` entry, keyed by its target, with a reason.
+**Dependencies.** `tracing-subscriber`'s `tracing-log` feature, already enabled by default, routes the `log` crate's records (winit uses it) into `tracing`. They count like engine events, as agreed in review. A dependency's warning that turns out to be harmless gets a `SUPPRESSED` entry, keyed by its target and the start of its message (records from `log` have no message ID), with a reason.
 
 ### The application
 
@@ -668,3 +668,4 @@ None remain. See *Resolved in review* below.
 | 2026-10-15 | Revised after review: Windows (Win32), X11 and Wayland supported from the start (new ADR 0003). `cargo xtask` replaced the shell script. A pinned lavapipe built from Mesa source replaced the self-hosted GPU runner in CI, with Linux and Windows CI jobs and hardware checks before review. Added R20 and R21, the `foundations-lavapipe` slice, and `CLOCKWORK_REQUIRED_CAPABILITIES` in place of `CLOCKWORK_REQUIRE_ALL_CAPABILITIES`. |
 | 2026-10-15 | Revised after review: the Windows hardware checks run on the Windows desktop with an RTX 4090, closing the last open question |
 | 2026-10-19 | Accepted |
+| 2026-10-19 | Revised during `foundations-diagnostics`: a `SUPPRESSED` entry matches its message by ID or, for messages without one (dependencies through `log`, and the Vulkan loader), by the start of its text (R4). Matching on target alone would have suppressed everything on that target. |

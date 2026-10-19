@@ -9,8 +9,8 @@
 //!   [`SessionLayer`] records which spans belong to which session, so that each
 //!   event can be *attributed* to a session: by the event's own `session`
 //!   field if it has one, otherwise by the nearest enclosing session span.
-//! - [`classify`] decides, from an event's level, target and message ID,
-//!   whether it is [`Class::Counted`] (and so fails tests), or one of the
+//! - [`classify`] decides, from an event's level, target, message ID and
+//!   message, whether it is [`Class::Counted`] (and so fails tests), or one of the
 //!   classes that are only logged.
 //! - [`DiagnosticCounter`] counts counted events for the application. Tests
 //!   use `TestCapture` and `TestSession` instead, in the test-only `capture`
@@ -60,7 +60,7 @@ use tracing_subscriber::registry::LookupSpan;
 pub const SESSION_FIELD: &str = "session";
 
 /// The field holding an event's message ID, such as a validation message's
-/// VUID, which [`SUPPRESSED`] entries are keyed by.
+/// VUID, which [`SUPPRESSED`] entries match with [`MessageMatch::Id`].
 pub const MESSAGE_ID_FIELD: &str = "message_id";
 
 /// The target of the graphics API's validation messages. Its best-practices
@@ -171,9 +171,8 @@ pub enum Class {
 pub struct Suppression {
     /// The event's target, matched exactly.
     pub target: &'static str,
-    /// The event's [`MESSAGE_ID_FIELD`] (for validation, the VUID), matched
-    /// exactly.
-    pub message_id: &'static str,
+    /// Which message on that target is suppressed.
+    pub message: MessageMatch,
     /// Why the message is harmless, with a link to an upstream issue where
     /// there is one. Never empty.
     #[cfg_attr(
@@ -186,16 +185,60 @@ pub struct Suppression {
     pub reason: &'static str,
 }
 
+impl Suppression {
+    /// Returns whether this entry matches an event with this target, message
+    /// ID and message.
+    fn matches(&self, target: &str, message_id: Option<&str>, message: &str) -> bool {
+        self.target == target
+            && match self.message {
+                MessageMatch::Id(id) => message_id == Some(id),
+                MessageMatch::Prefix(prefix) => message.starts_with(prefix),
+            }
+    }
+}
+
+/// How a [`Suppression`] identifies its message on its target.
+#[derive(Debug)]
+pub enum MessageMatch {
+    /// The event's [`MESSAGE_ID_FIELD`] (for validation, the VUID), matched
+    /// exactly. Use it whenever the message has an ID.
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "no message with an ID is suppressed yet; validation messages get IDs in foundations-validation"
+        )
+    )]
+    Id(&'static str),
+    /// The start of the event's message, for messages with no ID, such as a
+    /// dependency's warnings through the `log` crate, or the Vulkan loader's.
+    /// Make it long enough to identify one message, and leave out parts that
+    /// vary, such as version numbers.
+    Prefix(&'static str),
+}
+
 /// The individually listed messages that are suppressed (R4).
 ///
 /// Add an entry only for a message that is harmless and can't be fixed here,
 /// such as a false positive in the validation layer. A normal condition logged
 /// at `WARN` is fixed by changing its level instead.
-pub const SUPPRESSED: &[Suppression] = &[];
+pub const SUPPRESSED: &[Suppression] = &[
+    // Logged by the Vulkan loader through the debug messenger, which logs on
+    // `clockwork::rhi::vulkan` until foundations-validation moves its messages
+    // to `VALIDATION_TARGET`. Move this entry's target with them.
+    Suppression {
+        target: "clockwork::rhi::vulkan",
+        message: MessageMatch::Prefix("Layer VK_LAYER_OBS_HOOK uses API version "),
+        reason: "OBS Studio's implicit capture layer declares an older Vulkan version than the \
+                 engine requests, so the loader warns about it on every instance. The layer \
+                 still works, and uninstalling or disabling it would stop OBS from capturing \
+                 the engine.",
+    },
+];
 
-/// Classifies an event by its level, target and message ID. Pure.
-pub fn classify(level: Level, target: &str, message_id: Option<&str>) -> Class {
-    classify_with(level, target, message_id, SUPPRESSED)
+/// Classifies an event by its level, target, message ID and message. Pure.
+pub fn classify(level: Level, target: &str, message_id: Option<&str>, message: &str) -> Class {
+    classify_with(level, target, message_id, message, SUPPRESSED)
 }
 
 /// Classifies an event as [`classify`] does, with `suppressed` in place of
@@ -204,20 +247,19 @@ fn classify_with(
     level: Level,
     target: &str,
     message_id: Option<&str>,
+    message: &str,
     suppressed: &[Suppression],
 ) -> Class {
     // More verbose levels compare greater in `tracing`.
     if level > Level::WARN {
         return Class::Ignored;
     }
-    let Some(message_id) = message_id else {
-        return Class::Counted;
-    };
-    if target == VALIDATION_TARGET && message_id.starts_with(BEST_PRACTICES_PREFIX) {
+    let is_best_practices = message_id.is_some_and(|id| id.starts_with(BEST_PRACTICES_PREFIX));
+    if target == VALIDATION_TARGET && is_best_practices {
         Class::Advisory
     } else if suppressed
         .iter()
-        .any(|entry| entry.target == target && entry.message_id == message_id)
+        .any(|entry| entry.matches(target, message_id, message))
     {
         Class::Suppressed
     } else {
@@ -439,7 +481,13 @@ where
         let metadata = event.metadata();
         let fields = EventFields::of(event);
         let level = *metadata.level();
-        if classify(level, metadata.target(), fields.message_id.as_deref()) != Class::Counted {
+        let class = classify(
+            level,
+            metadata.target(),
+            fields.message_id.as_deref(),
+            &fields.message,
+        );
+        if class != Class::Counted {
             return;
         }
         let count = if level == Level::ERROR {
@@ -621,19 +669,27 @@ mod tests {
         assert_ne!(first, second);
     }
 
-    /// A suppression list for the classification tests.
-    const TEST_SUPPRESSED: &[Suppression] = &[Suppression {
-        target: "clockwork::test",
-        message_id: "VUID-harmless",
-        reason: "a test entry",
-    }];
+    /// A suppression list for the classification tests, with one entry of
+    /// each kind.
+    const TEST_SUPPRESSED: &[Suppression] = &[
+        Suppression {
+            target: "clockwork::test",
+            message: MessageMatch::Id("VUID-harmless"),
+            reason: "a test entry",
+        },
+        Suppression {
+            target: "clockwork::test",
+            message: MessageMatch::Prefix("A harmless message"),
+            reason: "a test entry",
+        },
+    ];
 
     /// Warnings and errors with no special handling are counted.
     #[test]
     fn warnings_and_errors_are_counted() {
         for level in [Level::WARN, Level::ERROR] {
             assert_eq!(
-                classify_with(level, "clockwork::test", None, TEST_SUPPRESSED),
+                classify_with(level, "clockwork::test", None, "a message", TEST_SUPPRESSED),
                 Class::Counted,
             );
             assert_eq!(
@@ -641,7 +697,8 @@ mod tests {
                     level,
                     "clockwork::test",
                     Some("VUID-other"),
-                    TEST_SUPPRESSED
+                    "a message",
+                    TEST_SUPPRESSED,
                 ),
                 Class::Counted,
             );
@@ -653,20 +710,21 @@ mod tests {
     fn info_and_below_are_ignored() {
         for level in [Level::INFO, Level::DEBUG, Level::TRACE] {
             assert_eq!(
-                classify_with(level, "clockwork::test", None, TEST_SUPPRESSED),
+                classify_with(level, "clockwork::test", None, "a message", TEST_SUPPRESSED),
                 Class::Ignored,
             );
         }
     }
 
-    /// A listed message is suppressed, but only on its own target.
+    /// A message listed by ID is suppressed, but only on its own target.
     #[test]
-    fn listed_messages_are_suppressed_on_their_target_only() {
+    fn messages_listed_by_id_are_suppressed_on_their_target_only() {
         assert_eq!(
             classify_with(
                 Level::ERROR,
                 "clockwork::test",
                 Some("VUID-harmless"),
+                "a message",
                 TEST_SUPPRESSED,
             ),
             Class::Suppressed,
@@ -676,6 +734,50 @@ mod tests {
                 Level::ERROR,
                 "clockwork::other",
                 Some("VUID-harmless"),
+                "a message",
+                TEST_SUPPRESSED,
+            ),
+            Class::Counted,
+        );
+    }
+
+    /// A message listed by prefix is suppressed whether or not it has an ID,
+    /// but only on its own target.
+    #[test]
+    fn messages_listed_by_prefix_are_suppressed_on_their_target_only() {
+        for message_id in [None, Some("VUID-other")] {
+            assert_eq!(
+                classify_with(
+                    Level::WARN,
+                    "clockwork::test",
+                    message_id,
+                    "A harmless message, with details",
+                    TEST_SUPPRESSED,
+                ),
+                Class::Suppressed,
+            );
+        }
+        assert_eq!(
+            classify_with(
+                Level::WARN,
+                "clockwork::other",
+                None,
+                "A harmless message, with details",
+                TEST_SUPPRESSED,
+            ),
+            Class::Counted,
+        );
+    }
+
+    /// A prefix matches only at the start of the message.
+    #[test]
+    fn prefixes_match_only_at_the_start() {
+        assert_eq!(
+            classify_with(
+                Level::WARN,
+                "clockwork::test",
+                None,
+                "Not A harmless message",
                 TEST_SUPPRESSED,
             ),
             Class::Counted,
@@ -688,22 +790,52 @@ mod tests {
     fn best_practices_validation_messages_are_advisory() {
         let id = Some("BestPractices-vkCreateDevice-physical-device-features-not-retrieved");
         assert_eq!(
-            classify_with(Level::WARN, VALIDATION_TARGET, id, TEST_SUPPRESSED),
+            classify_with(
+                Level::WARN,
+                VALIDATION_TARGET,
+                id,
+                "a message",
+                TEST_SUPPRESSED
+            ),
             Class::Advisory,
         );
         assert_eq!(
-            classify_with(Level::WARN, "clockwork::test", id, TEST_SUPPRESSED),
+            classify_with(
+                Level::WARN,
+                "clockwork::test",
+                id,
+                "a message",
+                TEST_SUPPRESSED
+            ),
             Class::Counted,
         );
     }
 
     /// Every suppression says what it suppresses and why (R4).
     #[test]
-    fn every_suppression_has_a_target_id_and_reason() {
+    fn every_suppression_has_a_target_message_and_reason() {
         for entry in SUPPRESSED {
             assert!(!entry.target.is_empty(), "{entry:?} has no target");
-            assert!(!entry.message_id.is_empty(), "{entry:?} has no message ID");
+            let (MessageMatch::Id(text) | MessageMatch::Prefix(text)) = entry.message;
+            assert!(!text.is_empty(), "{entry:?} matches every message");
             assert!(!entry.reason.trim().is_empty(), "{entry:?} has no reason");
+        }
+    }
+
+    /// The OBS capture layer's loader warning, as logged on the Windows
+    /// development machine, is suppressed for any pair of versions.
+    #[test]
+    fn the_obs_layer_version_warning_is_suppressed() {
+        for message in [
+            "Layer VK_LAYER_OBS_HOOK uses API version 1.3 which is older than the application \
+             specified API version of 1.4. May cause issues.",
+            "Layer VK_LAYER_OBS_HOOK uses API version 1.4 which is older than the application \
+             specified API version of 1.5. May cause issues.",
+        ] {
+            assert_eq!(
+                classify(Level::WARN, "clockwork::rhi::vulkan", None, message),
+                Class::Suppressed,
+            );
         }
     }
 
