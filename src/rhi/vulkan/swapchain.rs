@@ -1,7 +1,7 @@
 //! Swapchains, which hold the images presented to a window.
 
 use anyhow::{Context, Result, bail};
-use ash::prelude::VkResult;
+use ash::VkResult;
 use ash::{Instance, khr, vk};
 use tracing::info;
 
@@ -169,7 +169,7 @@ impl Swapchain {
                 .queue_family_indices(&shared_families);
         }
 
-        let swapchain_fn = khr::swapchain::Device::new(instance, device.handle());
+        let swapchain_fn = khr::swapchain::Device::load(instance, device.handle());
         // SAFETY: `create_info` and the structures it points to are valid for
         // the duration of the call, and its surface and old swapchain belong to
         // this device's instance and device.

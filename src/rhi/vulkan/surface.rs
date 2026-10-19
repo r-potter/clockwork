@@ -56,16 +56,17 @@ impl Surface {
             .context("failed to get the window's window handle")?
             .as_raw();
 
+        let factory = ash_window::SurfaceFactory::new(entry, instance, display_handle)
+            .context("failed to create Vulkan surface")?;
         // SAFETY: The handles are valid for as long as `window` exists, and
         // `self` keeps it alive for as long as the surface exists. The caller
-        // guarantees that the required extensions are enabled on `instance`.
-        let surface = unsafe {
-            ash_window::create_surface(entry, instance, display_handle, window_handle, None)
-        }
-        .context("failed to create Vulkan surface")?;
+        // guarantees that the required extensions are enabled on `instance`,
+        // and `window_handle` belongs to the display `factory` was made for.
+        let surface = unsafe { factory.create_surface(window_handle, None) }
+            .context("failed to create Vulkan surface")?;
 
         Ok(Self {
-            surface_fn: khr::surface::Instance::new(entry, instance),
+            surface_fn: khr::surface::Instance::load(entry, instance),
             surface,
             _window: window,
         })

@@ -6,6 +6,7 @@ use std::ffi::CStr;
 use std::ptr;
 
 use anyhow::{Context, Result};
+use ash::vk::TaggedStructure;
 use ash::{Instance, ext, vk};
 
 /// A Vulkan physical device and its immutable properties.
@@ -121,23 +122,23 @@ impl PhysicalDevice {
             let include_vulkan13 = api_version >= vk::API_VERSION_1_3;
 
             let mut properties2 = vk::PhysicalDeviceProperties2::default()
-                .push_next(&mut properties.vulkan11)
-                .push_next(&mut properties.vulkan12);
+                .push(&mut properties.vulkan11)
+                .push(&mut properties.vulkan12);
             if include_vulkan13 {
-                properties2 = properties2.push_next(&mut properties.vulkan13);
+                properties2 = properties2.push(&mut properties.vulkan13);
             }
             // SAFETY: as above. The chain only includes structures for
             // versions the device supports.
             unsafe { instance.get_physical_device_properties2(handle, &mut properties2) };
 
             let mut features2 = vk::PhysicalDeviceFeatures2::default()
-                .push_next(&mut features.vulkan11)
-                .push_next(&mut features.vulkan12);
+                .push(&mut features.vulkan11)
+                .push(&mut features.vulkan12);
             if include_vulkan13 {
-                features2 = features2.push_next(&mut features.vulkan13);
+                features2 = features2.push(&mut features.vulkan13);
             }
             if extensions_include(&extensions, ext::shader_object::NAME) {
-                features2 = features2.push_next(&mut features.shader_object);
+                features2 = features2.push(&mut features.shader_object);
             }
             // SAFETY: as above. The chain only includes structures for
             // versions and extensions the device supports.

@@ -1,6 +1,7 @@
 //! The Vulkan logical device and its queues.
 
 use anyhow::{Context, Result};
+use ash::vk::TaggedStructure;
 use ash::{Instance, ext, khr, vk};
 
 use super::device_selection::QueueFamilies;
@@ -78,9 +79,9 @@ impl LogicalDevice {
         let create_info = vk::DeviceCreateInfo::default()
             .queue_create_infos(&queue_create_infos)
             .enabled_extension_names(&extensions)
-            .push_next(&mut vulkan11_features)
-            .push_next(&mut vulkan13_features)
-            .push_next(&mut shader_object_features);
+            .push(&mut vulkan11_features)
+            .push(&mut vulkan13_features)
+            .push(&mut shader_object_features);
         // SAFETY: `physical_device` was enumerated from `instance`, and
         // `create_info` and the structures it points to are valid for the
         // duration of the call. Selection checked that the queue families and
@@ -96,7 +97,7 @@ impl LogicalDevice {
             .map(|family| unsafe { device.get_device_queue(family, 0) });
 
         Ok(Self {
-            shader_object: ext::shader_object::Device::new(instance, &device),
+            shader_object: ext::shader_object::Device::load(instance, &device),
             device,
             queue_families,
             graphics_queue,

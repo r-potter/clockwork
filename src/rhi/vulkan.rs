@@ -30,6 +30,7 @@ use std::ffi::CStr;
 use std::{fmt, slice};
 
 use anyhow::{Context, Result, bail};
+use ash::vk::TaggedStructure;
 use ash::{Entry, Instance, ext::debug_utils, vk};
 use raw_window_handle::RawDisplayHandle;
 use tracing::{info, warn};
@@ -504,10 +505,10 @@ impl VulkanInstance {
         if validate {
             // Also report problems in instance creation and destruction, which
             // the messenger created below cannot cover.
-            create_info = create_info.push_next(&mut messenger_create_info);
+            create_info = create_info.push(&mut messenger_create_info);
         }
         if plan.use_settings {
-            create_info = create_info.push_next(&mut layer_settings_create_info);
+            create_info = create_info.push(&mut layer_settings_create_info);
         }
 
         // SAFETY: `create_info` and the structures it points to are valid for
@@ -525,7 +526,7 @@ impl VulkanInstance {
         };
         if validate {
             let debug_utils =
-                debug_utils::Instance::new(&vulkan_instance.entry, &vulkan_instance.instance);
+                debug_utils::Instance::load(&vulkan_instance.entry, &vulkan_instance.instance);
             // SAFETY: `messenger_create_info` is valid, and `VK_EXT_debug_utils`
             // was enabled on the instance.
             let messenger =
