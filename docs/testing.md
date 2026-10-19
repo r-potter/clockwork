@@ -45,15 +45,38 @@ If none has it, the build fails with a message naming all three. Changing `SLANG
 3. **Clippy**, in debug and release: `cargo clippy --workspace --all-targets -- -D warnings`, so every warning, including the lints below, fails the check.
 4. **Rustdoc:** `cargo doc --workspace --no-deps --document-private-items`, with `RUSTDOCFLAGS=-D warnings`, so broken intra-doc links fail the check.
 5. **Tests that need no GPU:** `cargo test --workspace -- --skip gpu_tests`. With `--gpu`, every tier instead (see "GPU tests" below).
+6. **Smoke runs**, with `--gpu` only: the application in a window under each window system (see "Smoke runs" below).
 
 Options:
 
 | Option | Effect |
 |---|---|
-| `--gpu` | Run the GPU (T1) tests too, with `CLOCKWORK_REQUIRED_CAPABILITIES=all`: `cargo test --workspace` in place of step 5. Needs a Vulkan 1.4 driver and the validation layer. |
-| `--no-window` | With `--gpu`: leave out the windowed smoke runs. |
+| `--gpu` | Run the GPU (T1) tests too, with `CLOCKWORK_REQUIRED_CAPABILITIES=all`: `cargo test --workspace` in place of step 5. Then the smoke runs. Needs a Vulkan 1.4 driver, the validation layer, and a display for each window system. |
+| `--no-window` | With `--gpu`: leave out the smoke runs, on purpose, for example over SSH. |
 
-The windowed smoke runs arrive in a later slice of design 0001. Until then, `--gpu` must be given with `--no-window`, and is an error without it, so that asking for smoke runs can't quietly run fewer checks. Run `cargo xtask check --gpu --no-window` before asking for review on a machine with a GPU, and say in the review which machine it passed on.
+Run `cargo xtask check --gpu` before asking for review on a machine with a GPU, in a desktop session, and say in the review which machine and window systems it passed on.
+
+### Smoke runs
+
+A smoke run starts the application in a window, and checks that it renders and exits cleanly, with nothing logged at `WARN` or above:
+
+```sh
+cargo run -- --exit-after-frames 300 --fail-on-warnings
+```
+
+It stops after a number of frames, not a time, so that a slow machine or a virtual display can't make it flaky. `--fail-on-warnings` requires validation, and fails the run on any counted warning or error, from any subsystem or dependency (see "The application's options" below).
+
+`--gpu` runs one for each window system the platform supports (ADR 0003), each with the variables that would let `winit` choose another window system unset:
+
+| Platform | Window system | Needs | Unsets |
+|---|---|---|---|
+| Windows | Win32 | Nothing | Nothing |
+| Linux | Wayland | `WAYLAND_DISPLAY` | `DISPLAY` |
+| Linux | X11 | `DISPLAY` | `WAYLAND_DISPLAY` and `WAYLAND_SOCKET` |
+
+On Linux, that means a desktop session with both: a Wayland session with Xwayland, or an X11 session running a Wayland compositor. A window system with no display is an error before anything else runs, not a skip, so that a check can't pass having run fewer smoke runs than it should. Use `--no-window` to leave them all out on purpose. The choice is made by `xtask/src/window_systems.rs`.
+
+To reproduce a failing smoke run, run the same command, unsetting the same variables. On Linux, for example, `env -u WAYLAND_DISPLAY -u WAYLAND_SOCKET cargo run -- --exit-after-frames 300 --fail-on-warnings` for X11.
 
 `cargo xtask` is an alias (in `.cargo/config.toml`) for running the `xtask` crate, the repository's developer tooling. The repository is a Cargo workspace of the engine and `xtask`, with the engine as its only default member, so plain `cargo build`, `cargo run` and `cargo test` act on the engine alone.
 
@@ -75,7 +98,7 @@ Tests are unit tests inside the crate they test (ADR 0001). There's no `tests/` 
 | Tier | Kind | Needs | How to run |
 |---|---|---|---|
 | T0 | Unit: pure logic, such as device selection and the `slangc` lookup | Nothing beyond the prerequisites | `cargo test --workspace -- --skip gpu_tests`, or `cargo xtask check` |
-| T1 | GPU: real Vulkan work, headless, with validation required | A Vulkan 1.4 driver and the validation layer | `cargo test`, which runs every tier, or `cargo xtask check --gpu --no-window` |
+| T1 | GPU: real Vulkan work, headless, with validation required | A Vulkan 1.4 driver and the validation layer | `cargo test`, which runs every tier, or `cargo xtask check --gpu` |
 
 How tests are told apart:
 - **T1 tests live in modules named `gpu_tests`**, so `--skip gpu_tests` leaves them out. Don't use `gpu_tests` anywhere else in a test's path, or it will be skipped too.

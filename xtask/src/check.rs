@@ -4,47 +4,47 @@
 //! 1. the prerequisites check (see [`crate::prerequisites`])
 //! 2. the commands from [`steps`]: formatting, clippy in debug and release,
 //!    rustdoc, and the tests: those that need no GPU, or, with `--gpu`, every
-//!    tier
+//!    tier, followed by a smoke run under each window system
 //!
 //! The list of commands is built by a pure function, so it's tested without
 //! running anything.
 
 use std::path::Path;
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result};
 use xshell::Shell;
 
 use crate::prerequisites;
+use crate::slangc::Platform;
+use crate::window_systems::{self, SmokeRun, WindowSystem};
 
 /// What `cargo xtask check` was asked to check.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Options {
     /// Also run the T1 tests, which need a GPU, with every capability
-    /// required.
+    /// required, and the smoke runs.
     pub gpu: bool,
     /// With `gpu`, leave out the windowed smoke runs, on purpose.
     pub no_window: bool,
 }
 
 impl Options {
-    /// Checks that these options ask for something this version can do.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error for `--gpu` without `--no-window`: the smoke runs
-    /// arrive with the application's command-line options, in
-    /// `foundations-cli`, and running fewer checks than were asked for
-    /// mustn't look like a pass.
-    pub fn validate(self) -> Result<()> {
-        if self.gpu && !self.no_window {
-            bail!(
-                "the windowed smoke runs that --gpu includes aren't implemented yet (they arrive \
-                 in foundations-cli); run `cargo xtask check --gpu --no-window` to leave them out"
-            );
-        }
-        Ok(())
+    /// Whether these options ask for the smoke runs.
+    fn smoke_runs(self) -> bool {
+        self.gpu && !self.no_window
     }
 }
+
+/// The arguments to `cargo` for a smoke run: the application, in a window,
+/// for a fixed number of frames rather than a fixed time, failing on any
+/// warning or error (R16 in design 0001).
+const SMOKE_RUN_ARGS: [&str; 5] = [
+    "run",
+    "--",
+    "--exit-after-frames",
+    "300",
+    "--fail-on-warnings",
+];
 
 /// One command that `cargo xtask check` runs.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -55,22 +55,38 @@ pub struct Step {
     pub args: Vec<&'static str>,
     /// Environment variables set for this command only.
     pub env: Vec<(&'static str, &'static str)>,
+    /// Environment variables unset for this command only.
+    pub unset: Vec<&'static str>,
 }
 
 impl Step {
-    /// A step running `cargo` with `args`, and no extra environment.
+    /// A step running `cargo` with `args`, and no change to the environment.
     fn cargo(name: &'static str, args: &[&'static str]) -> Self {
         Self {
             name,
             args: args.to_vec(),
             env: Vec::new(),
+            unset: Vec::new(),
+        }
+    }
+
+    /// The step for `run`: the application under its window system.
+    fn smoke_run(run: &SmokeRun) -> Self {
+        let name = match run.window_system {
+            WindowSystem::Win32 => "smoke run under Win32",
+            WindowSystem::Wayland => "smoke run under Wayland",
+            WindowSystem::X11 => "smoke run under X11",
+        };
+        Self {
+            unset: run.unset.to_vec(),
+            ..Self::cargo(name, &SMOKE_RUN_ARGS)
         }
     }
 }
 
 /// The commands `cargo xtask check` runs after the prerequisites check, in
-/// order.
-pub fn steps(options: Options) -> Vec<Step> {
+/// order. `smoke_runs` are added after the tests, if `options` asks for them.
+pub fn steps(options: Options, smoke_runs: &[SmokeRun]) -> Vec<Step> {
     let tests = if options.gpu {
         // Every tier, and every capability required, so that no T1 test is
         // skipped on the machines that run this.
@@ -86,7 +102,7 @@ pub fn steps(options: Options) -> Vec<Step> {
             &["test", "--workspace", "--", "--skip", "gpu_tests"],
         )
     };
-    vec![
+    let mut steps = vec![
         Step::cargo("formatting", &["fmt", "--all", "--check"]),
         Step::cargo(
             "clippy (debug)",
@@ -125,28 +141,43 @@ pub fn steps(options: Options) -> Vec<Step> {
             )
         },
         tests,
-    ]
+    ];
+    if options.smoke_runs() {
+        steps.extend(smoke_runs.iter().map(Step::smoke_run));
+    }
+    steps
 }
 
 /// Runs every check `options` asks for in the workspace at `root`.
 ///
 /// # Errors
 ///
-/// Returns an error if the options ask for something not implemented, if a
-/// prerequisite is missing, or if any check fails, naming the check.
+/// Returns an error if a window system has no display for its smoke run, if
+/// a prerequisite is missing, or if any check fails, naming the check.
 pub fn run(root: &Path, options: Options) -> Result<()> {
-    options.validate()?;
+    // Decided first, so that a missing display fails at once, not after the
+    // tests.
+    let smoke_runs = if options.smoke_runs() {
+        window_systems::smoke_runs(Platform::current(), |name| {
+            std::env::var_os(name).is_some_and(|value| !value.is_empty())
+        })?
+    } else {
+        Vec::new()
+    };
     let sh = Shell::new()?;
     sh.change_dir(root);
 
     prerequisites::check(&sh, options.gpu)?;
 
     let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
-    for step in steps(options) {
+    for step in steps(options, &smoke_runs) {
         eprintln!("\n==> {}", step.name);
         let mut cmd = sh.cmd(&cargo).args(&step.args);
         for (key, value) in &step.env {
             cmd = cmd.env(key, value);
+        }
+        for key in &step.unset {
+            cmd = cmd.env_remove(key);
         }
         cmd.run()
             .with_context(|| format!("check failed: {}", step.name))?;
@@ -161,15 +192,36 @@ mod tests {
 
     use super::*;
 
-    /// `--gpu --no-window`.
+    /// `--gpu`, with smoke runs.
     const GPU: Options = Options {
+        gpu: true,
+        no_window: false,
+    };
+
+    /// `--gpu --no-window`.
+    const GPU_NO_WINDOW: Options = Options {
         gpu: true,
         no_window: true,
     };
 
+    /// The smoke runs for a Linux desktop session, with both window systems.
+    fn linux_smoke_runs() -> Vec<SmokeRun> {
+        window_systems::smoke_runs(Platform::Linux, |_| true).unwrap()
+    }
+
+    /// The steps for `options`, on a Linux desktop.
+    fn steps_for(options: Options) -> Vec<Step> {
+        steps(options, &linux_smoke_runs())
+    }
+
+    /// The names of the steps for `options`, on a Linux desktop.
+    fn names_for(options: Options) -> Vec<&'static str> {
+        steps_for(options).iter().map(|step| step.name).collect()
+    }
+
     /// Finds the step called `name`, in the steps for `options`.
     fn step_for(options: Options, name: &str) -> Step {
-        steps(options)
+        steps_for(options)
             .into_iter()
             .find(|step| step.name == name)
             .unwrap_or_else(|| panic!("no step called {name}"))
@@ -183,12 +235,8 @@ mod tests {
     /// The design's order: cheap checks first, tests last.
     #[test]
     fn steps_run_in_the_designed_order() {
-        let names: Vec<_> = steps(Options::default())
-            .iter()
-            .map(|step| step.name)
-            .collect();
         assert_eq!(
-            names,
+            names_for(Options::default()),
             [
                 "formatting",
                 "clippy (debug)",
@@ -234,32 +282,79 @@ mod tests {
     /// than skip.
     #[test]
     fn the_gpu_option_runs_every_tier_with_all_capabilities_required() {
-        let names: Vec<_> = steps(GPU).iter().map(|step| step.name).collect();
+        let names = names_for(GPU_NO_WINDOW);
         assert!(!names.contains(&"tests without a GPU"), "{names:?}");
-        let tests = step_for(GPU, "tests, including GPU tests");
+        let tests = step_for(GPU_NO_WINDOW, "tests, including GPU tests");
         assert_eq!(tests.args, ["test", "--workspace"]);
         assert_eq!(tests.env, [("CLOCKWORK_REQUIRED_CAPABILITIES", "all")]);
     }
 
-    /// `--gpu` changes only the test step: the other checks are the same.
+    /// `--gpu --no-window` changes only the test step: the other checks are
+    /// the same.
     #[test]
     fn gpu_keeps_the_other_checks() {
-        let default = steps(Options::default());
-        let gpu = steps(GPU);
+        let default = steps_for(Options::default());
+        let gpu = steps_for(GPU_NO_WINDOW);
         assert_eq!(default.len(), gpu.len());
         assert_eq!(default[..default.len() - 1], gpu[..gpu.len() - 1]);
     }
 
-    /// `--gpu` without `--no-window` asks for smoke runs, which don't exist
-    /// yet, so it's an error rather than a quieter pass.
+    /// `--gpu` adds a smoke run for each window system after the tests, so
+    /// that a broken test fails before a window opens.
     #[test]
-    fn gpu_without_no_window_is_an_error() {
-        let options = Options {
-            gpu: true,
-            no_window: false,
-        };
-        assert!(options.validate().is_err());
-        assert!(GPU.validate().is_ok());
-        assert!(Options::default().validate().is_ok());
+    fn gpu_ends_with_a_smoke_run_per_window_system() {
+        let names = names_for(GPU);
+        assert_eq!(
+            names[names.len() - 3..],
+            [
+                "tests, including GPU tests",
+                "smoke run under Wayland",
+                "smoke run under X11",
+            ]
+        );
+    }
+
+    /// Each smoke run renders a fixed number of frames, failing on any
+    /// warning, and unsets what its window system needs unset.
+    #[test]
+    fn smoke_runs_fail_on_warnings_under_their_window_system() {
+        let x11 = step_for(GPU, "smoke run under X11");
+        assert_eq!(
+            x11.args,
+            [
+                "run",
+                "--",
+                "--exit-after-frames",
+                "300",
+                "--fail-on-warnings"
+            ]
+        );
+        assert_eq!(x11.unset, ["WAYLAND_DISPLAY", "WAYLAND_SOCKET"]);
+        assert!(x11.env.is_empty());
+    }
+
+    /// Windows has a single smoke run, under Win32.
+    #[test]
+    fn windows_smoke_runs_under_win32() {
+        let runs = window_systems::smoke_runs(Platform::Windows, |_| false).unwrap();
+        let names: Vec<_> = steps(GPU, &runs).iter().map(|step| step.name).collect();
+        assert_eq!(names.last(), Some(&"smoke run under Win32"));
+        assert_eq!(
+            names.iter().filter(|name| name.contains("smoke")).count(),
+            1
+        );
+    }
+
+    /// `--no-window` leaves the smoke runs out, and without `--gpu` there
+    /// are none.
+    #[test]
+    fn smoke_runs_need_gpu_and_a_window() {
+        for options in [Options::default(), GPU_NO_WINDOW] {
+            let names = names_for(options);
+            assert!(
+                !names.iter().any(|name| name.contains("smoke")),
+                "{options:?}: {names:?}"
+            );
+        }
     }
 }
