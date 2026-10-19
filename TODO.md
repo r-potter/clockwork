@@ -4,18 +4,12 @@ Outstanding tasks and future work.
 
 ## Vulkan
 
-- [ ] **Update to the Vulkan 1.4 bindings.** The backend already requests
-      Vulkan 1.4, but `ash` 0.38 (the latest crates.io release) only has
-      bindings for Vulkan 1.3.281. Newer bindings are only on `ash`'s `master`
-      branch, so this requires switching `ash` to a git dependency pinned to a
-      commit (`rev = "..."`). Once switched:
-  - replace `vk::make_api_version(0, 1, 4, 0)` with `vk::API_VERSION_1_4` in
-    `src/rhi/vulkan.rs`
-  - add the Vulkan 1.4 features and properties to `PhysicalDevice` in
-    `src/rhi/vulkan/physical_device.rs`
-  - update any API changes between 0.38 and `master`
-
-  This is the `foundations-ash-1.4` slice of design 0001.
+- [x] **Update to the Vulkan 1.4 bindings.** Done in the
+      `foundations-ash-1.4` slice of design 0001: `Cargo.toml` patches `ash`
+      and `ash-window` to a commit on `ash`'s `master` branch, generated from
+      the Vulkan 1.4.352 headers. `API_VERSION` is `vk::API_VERSION_1_4`, and
+      `PhysicalDevice` has the Vulkan 1.4 features and properties. Remove the
+      patch once `ash` releases these bindings.
 - [x] **Choose a physical device to render with.** Done in
       `src/rhi/vulkan/device_selection.rs`: devices are filtered by
       `REQUIREMENTS` (Vulkan 1.4, `VK_EXT_shader_object`, shader draw
