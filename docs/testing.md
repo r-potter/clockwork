@@ -393,7 +393,10 @@ Tests can't take options, since `cargo test` can't pass any to them, so they rea
 |---|---|---|
 | `linux` | `ubuntu-latest` | `cargo xtask check` |
 | `windows` | `windows-latest` | `cargo xtask check` |
+| `linux-lavapipe` | `ubuntu-latest` | `cargo xtask lavapipe`, then `cargo xtask check --gpu --lavapipe --virtual-displays` |
 
-Each job installs the pinned Vulkan SDK (checking the download's SHA-256), for `slangc`. Neither runner has a Vulkan driver, which proves that T0 tests need none. To move to a new SDK, change `VULKAN_SDK_VERSION` and both hashes at the top of the workflow; LunarG publishes the hashes at `https://sdk.lunarg.com/sdk/sha/<version>/<linux|windows>/<file>.json`.
+Each job installs the pinned Vulkan SDK (checking the download's SHA-256), for `slangc`, and in `linux-lavapipe` for the validation layer too. The runners have no Vulkan driver, which proves that T0 tests need none. To move to a new SDK, change `VULKAN_SDK_VERSION` and both hashes at the top of the workflow; LunarG publishes the hashes at `https://sdk.lunarg.com/sdk/sha/<version>/<linux|windows>/<file>.json`.
 
-A failure in CI should reproduce with `cargo xtask check` on the same operating system.
+`linux-lavapipe` installs the packages "Lavapipe" and "Virtual displays" list, `libxkbcommon-x11-0` for the X11 smoke run, and Meson from PyPI at `MESON_VERSION`, since Ubuntu's is too old. Its lavapipe build is cached, keyed on the runner's image and on `xtask/src/lavapipe.rs`, which holds the pin and the build's options, so it's rebuilt only when one of them changes. It's saved as soon as it's built, so a failing check doesn't throw it away. An uncached build takes several minutes. A package added to the build's prerequisites must be added to the job too.
+
+A failure in CI should reproduce with the same command on the same operating system: `cargo xtask check`, or for `linux-lavapipe`, `cargo xtask lavapipe` and then `cargo xtask check --gpu --lavapipe --virtual-displays`.
