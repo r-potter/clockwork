@@ -3,7 +3,7 @@
 
 use std::borrow::Cow;
 use std::ffi::CStr;
-use std::ptr;
+use std::{mem, ptr};
 
 use anyhow::{Context, Result};
 use ash::vk::TaggedStructure;
@@ -130,6 +130,9 @@ impl PhysicalDevice {
             // SAFETY: as above. The chain only includes structures for
             // versions the device supports.
             unsafe { instance.get_physical_device_properties2(handle, &mut properties2) };
+            // SAFETY: The chain was built with `push`, so every structure in
+            // it is borrowed by `properties2`.
+            unsafe { unchain(&mut properties2) };
 
             let mut features2 = vk::PhysicalDeviceFeatures2::default()
                 .push(&mut features.vulkan11)
@@ -143,16 +146,8 @@ impl PhysicalDevice {
             // SAFETY: as above. The chain only includes structures for
             // versions and extensions the device supports.
             unsafe { instance.get_physical_device_features2(handle, &mut features2) };
-
-            // The chained structures point at each other; clear the pointers
-            // so that none dangle once they are moved into `self`.
-            properties.vulkan11.p_next = ptr::null_mut();
-            properties.vulkan12.p_next = ptr::null_mut();
-            properties.vulkan13.p_next = ptr::null_mut();
-            features.vulkan11.p_next = ptr::null_mut();
-            features.vulkan12.p_next = ptr::null_mut();
-            features.vulkan13.p_next = ptr::null_mut();
-            features.shader_object.p_next = ptr::null_mut();
+            // SAFETY: as for `properties2`.
+            unsafe { unchain(&mut features2) };
         }
 
         // SAFETY: as above.
@@ -214,9 +209,57 @@ impl PhysicalDevice {
     }
 }
 
+/// Clears the `p_next` pointer of `root` and of every structure chained to
+/// it.
+///
+/// Chained structures point at each other, so their pointers would dangle
+/// once the structures are moved. Walking the chain, rather than clearing
+/// each structure's pointer by name, means that none can be missed.
+///
+/// # Safety
+///
+/// Every structure in the chain must be valid and borrowed by `root`, as
+/// [`TaggedStructure::push`] makes it.
+unsafe fn unchain<'a, T: TaggedStructure<'a>>(root: &mut T) {
+    let mut structure = ptr::from_mut(root).cast::<vk::BaseOutStructure<'_>>();
+    while !structure.is_null() {
+        // SAFETY: `structure` is either `root`, which `TaggedStructure`
+        // guarantees has the layout of `BaseOutStructure`, or a structure in
+        // its chain, which the caller guarantees is valid and not otherwise
+        // borrowed.
+        structure = unsafe { mem::replace(&mut (*structure).p_next, ptr::null_mut()) };
+    }
+}
+
 /// Whether `extensions` includes the extension `name`.
 fn extensions_include(extensions: &[vk::ExtensionProperties], name: &CStr) -> bool {
     extensions
         .iter()
         .any(|extension| extension.extension_name_as_c_str() == Ok(name))
+}
+
+#[cfg(test)]
+mod tests {
+    //! T0 tests of the structure-chain helpers.
+
+    use super::*;
+
+    /// `unchain` clears the pointer of the root and of every structure
+    /// chained to it, so that none dangles once they're moved.
+    #[test]
+    fn unchain_clears_every_pointer_in_the_chain() {
+        let mut vulkan11 = vk::PhysicalDeviceVulkan11Features::default();
+        let mut vulkan12 = vk::PhysicalDeviceVulkan12Features::default();
+        let mut vulkan13 = vk::PhysicalDeviceVulkan13Features::default();
+        let mut features2 = vk::PhysicalDeviceFeatures2::default()
+            .push(&mut vulkan11)
+            .push(&mut vulkan12)
+            .push(&mut vulkan13);
+        // SAFETY: The chain was built with `push`.
+        unsafe { unchain(&mut features2) };
+        assert!(features2.p_next.is_null());
+        assert!(vulkan11.p_next.is_null());
+        assert!(vulkan12.p_next.is_null());
+        assert!(vulkan13.p_next.is_null());
+    }
 }
