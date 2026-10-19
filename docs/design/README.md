@@ -31,4 +31,4 @@ Small cross-cutting decisions that don't need a full design are recorded as [ADR
 | Number | Design | Status |
 |---|---|---|
 | 0000 | [Template](0000-template.md) | n/a |
-| 0001 | [Foundations](0001-foundations.md) | Proposed |
+| 0001 | [Foundations](0001-foundations.md) | Accepted |

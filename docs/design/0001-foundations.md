@@ -1,9 +1,9 @@
 # 0001: Foundations
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Author:** Ralph Potter, with Claude
 - **Created:** 2026-10-15
-- **Accepted:**
+- **Accepted:** 2026-10-19
 - **Depends on:** ADRs [0001](../decisions/0001-single-binary-crate.md), [0002](../decisions/0002-vulkan-feature-baseline.md) and [0003](../decisions/0003-supported-platforms.md)
 
 ## Context
@@ -667,3 +667,4 @@ None remain. See *Resolved in review* below.
 | 2026-10-15 | Revised after review: moved the architecture overview and the ADRs for steps 4 and 7 to a separate design branch, and the testing guide into the implementation slices. Added the test tier definitions and the guide's plan (R19). |
 | 2026-10-15 | Revised after review: Windows (Win32), X11 and Wayland supported from the start (new ADR 0003). `cargo xtask` replaced the shell script. A pinned lavapipe built from Mesa source replaced the self-hosted GPU runner in CI, with Linux and Windows CI jobs and hardware checks before review. Added R20 and R21, the `foundations-lavapipe` slice, and `CLOCKWORK_REQUIRED_CAPABILITIES` in place of `CLOCKWORK_REQUIRE_ALL_CAPABILITIES`. |
 | 2026-10-15 | Revised after review: the Windows hardware checks run on the Windows desktop with an RTX 4090, closing the last open question |
+| 2026-10-19 | Accepted |
