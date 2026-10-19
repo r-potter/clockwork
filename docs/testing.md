@@ -6,7 +6,7 @@ How to set up a machine, run the checks, and write tests. This guide describes o
 
 Every machine needs:
 - **Rust**, stable, with `clippy` and `rustfmt` (`rustup component add clippy rustfmt`)
-- **The Vulkan SDK** from [LunarG](https://vulkan.lunarg.com/sdk/home), which provides the Slang shader compiler (`slangc`) that `build.rs` runs, and the Khronos validation layer that GPU tests need. CI uses 1.4.341.1 (see `VULKAN_SDK_VERSION` in `.github/workflows/ci.yml`).
+- **The Vulkan SDK** from [LunarG](https://vulkan.lunarg.com/sdk/home), which provides the Slang shader compiler (`slangc`) that `build.rs` runs, and the Khronos validation layer that GPU tests need. CI uses 1.4.363.0 (see `VULKAN_SDK_VERSION` in `.github/workflows/ci.yml`).
 
 GPU tests also need a Vulkan 1.4 driver. The checks below don't.
 
@@ -16,29 +16,29 @@ The engine targets the extensions [ADR 0002](decisions/0002-vulkan-feature-basel
 
 | What | Minimum | Why |
 |---|---|---|
-| Vulkan SDK | 1.4.350.0 | The first SDK whose validation layer knows `VK_KHR_device_address_commands`, which arrived in the 1.4.346 headers. An older layer can't validate code that uses it. 1.4.341.1, which CI still uses, knows `VK_EXT_descriptor_heap` and `VK_EXT_present_timing`, but not `VK_KHR_device_address_commands`. |
+| Vulkan SDK | 1.4.350.0 | The first SDK whose validation layer knows `VK_KHR_device_address_commands`, which arrived in the 1.4.346 headers. An older layer can't validate code that uses it. 1.4.341.1 knows `VK_EXT_descriptor_heap` and `VK_EXT_present_timing`, but not `VK_KHR_device_address_commands`. CI uses 1.4.363.0. |
 | NVIDIA driver, Windows | 617.42 | Checked on the RTX 4090 on 2026-10-19 with `vulkaninfo`: it has every ADR 0002 extension, required and optional. 610.88 lacks `VK_KHR_device_address_commands`. |
 | NVIDIA driver, Linux | 615.71.09 | Checked on the RTX 3090 on 2026-10-15 with `vulkaninfo` (ADR 0002). |
 
 `reference_device_reports_required_extensions`, in `src/rhi/vulkan/gpu_tests.rs`, fails under `cargo xtask check --gpu` on a device without the required extensions. The application logs the optional ones the selected device has and lacks, at `INFO`, when it starts.
 
-Nothing enables these extensions yet, so until the RHI uses them, GPU tests also pass with SDK 1.4.341.1.
+Nothing enables these extensions yet, so until the RHI uses them, GPU tests also pass with an older SDK, such as 1.4.341.1.
 
 ### Linux
 
-1. Download the Linux tarball and extract it, for example into `~/vulkan`, giving `~/vulkan/1.4.341.1/`.
+1. Download the Linux tarball and extract it, for example into `~/vulkan`, giving `~/vulkan/1.4.363.0/`.
 2. Set up its environment in every shell that builds the engine, for example from `~/.profile`:
 
    ```sh
-   source ~/vulkan/1.4.341.1/setup-env.sh
+   source ~/vulkan/1.4.363.0/setup-env.sh
    ```
 
-   This sets `VULKAN_SDK` (to `~/vulkan/1.4.341.1/x86_64`), and adds the SDK to `PATH`, `LD_LIBRARY_PATH` and the Vulkan loader's layer search path.
+   This sets `VULKAN_SDK` (to `~/vulkan/1.4.363.0/x86_64`), and adds the SDK to `PATH`, `LD_LIBRARY_PATH` and the Vulkan loader's layer search path.
 
 ### Windows
 
 1. Run the SDK installer. The defaults are enough.
-2. Open a new terminal. The installer sets `VULKAN_SDK` (for example `C:\VulkanSDK\1.4.341.1`) and adds its `Bin` directory to `PATH`, and registers the validation layer in the registry, so there's nothing else to set up.
+2. Open a new terminal. The installer sets `VULKAN_SDK` (for example `C:\VulkanSDK\1.4.363.0`) and adds its `Bin` directory to `PATH`, and registers the validation layer in the registry, so there's nothing else to set up.
 
 Check out the repository with Git's defaults: `.gitattributes` keeps every text file, shaders included, with LF line endings on both operating systems, so `cargo fmt --check` and diffs agree.
 
