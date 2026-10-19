@@ -14,6 +14,8 @@ Outstanding tasks and future work.
   - add the Vulkan 1.4 features and properties to `PhysicalDevice` in
     `src/rhi/vulkan/physical_device.rs`
   - update any API changes between 0.38 and `master`
+
+  This is the `foundations-ash-1.4` slice of design 0001.
 - [x] **Choose a physical device to render with.** Done in
       `src/rhi/vulkan/device_selection.rs`: devices are filtered by
       `REQUIREMENTS` (Vulkan 1.4, `VK_EXT_shader_object`, shader draw
@@ -54,21 +56,17 @@ Outstanding tasks and future work.
       SPIR-V with `slangc`, and the backend embeds them. Vulkan 1.1's
       `shaderDrawParameters` is enabled and required, because Slang compiles
       `SV_VertexID` using the base vertex.
-- [ ] **Decide what to do on drivers without `VK_EXT_shader_object`.**
-      Device selection requires it, so a device whose driver does not support
-      it is rejected. Most current desktop drivers do, but older drivers and
-      some mobile ones do not. Options: accept that, enable the Khronos
-      emulation layer (`VK_LAYER_KHRONOS_shader_object`, shipped with the
-      Vulkan SDK) when the extension is missing, or add a pipeline fallback.
+- [x] **Decide what to do on drivers without `VK_EXT_shader_object`.**
+      Decided in ADR 0002: it's required, with no emulation layer or
+      pipeline fallback. Devices without it are rejected at start-up.
 - [ ] **Add a rendering API to the RHI.** The triangle is hardcoded in the
       Vulkan backend (`record_frame` in `src/rhi/vulkan.rs`). Expose
       pipelines, shaders, buffers and descriptors through
       `RenderHardwareInterface` as opaque handles, so that the application
       decides what to draw.
-- [ ] **Compile shaders for other backends.** `build.rs` only targets
-      SPIR-V. Slang can also target Metal and DXIL, so when another backend
-      is added, compile each shader for it too, rather than writing the
-      shaders again.
+- [x] **Compile shaders for other backends.** Not needed: ADR 0003 keeps
+      Vulkan as the only graphics API on every planned platform, so SPIR-V
+      stays the only shader target.
 - [ ] **Use `VK_EXT_swapchain_maintenance1` when available.** Without it,
       there is no way to know when
       the presentation engine has finished with a swapchain's images, so
@@ -94,17 +92,22 @@ Outstanding tasks and future work.
 
   `ash` 0.38 has bindings for the EXT extensions. Newer Vulkan headers may
   also define KHR versions; check when updating to the Vulkan 1.4 bindings.
-- [ ] **Support Android.** The app already handles `suspended` and
-      `resumed`, destroying and recreating the surface, but it cannot be built
-      for Android yet. This needs an `android_main` entry point (with the app
-      in a library crate), one of `winit`'s `android-native-activity` or
-      `android-game-activity` features, and a packaging tool such as
-      `cargo-apk` or `xbuild`. Suspend and resume have only been tested on
-      desktop, by calling the handlers manually.
-- [ ] **Support macOS via MoltenVK.** This needs the
-      `VK_KHR_portability_enumeration` instance extension and the
-      `ENUMERATE_PORTABILITY_KHR` instance creation flag, and enabling
-      `VK_KHR_portability_subset` on devices that report it.
+- [ ] **Support Android.** Planned in ADR 0003, on Adreno GPUs only,
+      using Mesa's Turnip driver bundled with the app. It's waiting for
+      Turnip to support `VK_EXT_shader_object`, `VK_EXT_descriptor_heap` and
+      `VK_KHR_device_address_commands` (ADR 0002). The app already handles
+      `suspended` and `resumed`, destroying and recreating the surface, but
+      it cannot be built for Android yet. This needs an `android_main` entry
+      point, with the app in a library crate (which ADR 0001 allows), one of
+      `winit`'s `android-native-activity` or `android-game-activity`
+      features, and a packaging tool such as `cargo-apk` or `xbuild`. Suspend
+      and resume have only been tested on desktop, by calling the handlers
+      manually.
+- [ ] **Support macOS and iOS via KosmicKrisp.** Planned in ADR 0003, using
+      Mesa's KosmicKrisp (Vulkan on Metal). It's waiting for KosmicKrisp to
+      support Vulkan 1.4, `VK_EXT_shader_object`, `VK_EXT_descriptor_heap`
+      and `VK_KHR_device_address_commands`. MoltenVK isn't planned, because
+      it implements a more limited subset of Vulkan (ADR 0002).
 - [ ] **Decide whether `PhysicalDevice` needs to be `Send`/`Sync`.** It is
       neither, because `ash`'s structures contain `p_next` raw pointers, even
       though they are always null. If the RHI needs to be used across threads,
@@ -147,8 +150,10 @@ Outstanding tasks and future work.
       need a display, but it still creates a real Vulkan instance, so it fails
       on machines (such as CI runners) with no Vulkan driver. Options include
       installing a software driver such as lavapipe on CI, or marking the test
-      `#[ignore]` and running it separately.
+      `#[ignore]` and running it separately. The `foundations-validation`
+      slice of design 0001 closes this, by splitting the tests into tiers.
 - [ ] **Install `slangc` on CI.** Building now runs the Slang shader
       compiler, so CI machines need it, for example from the
       `slang-compiler` package or the Vulkan SDK. `build.rs` finds it on
-      `PATH`, or at the path in the `SLANGC` environment variable.
+      `PATH`, or at the path in the `SLANGC` environment variable. The
+      `foundations-lavapipe` slice of design 0001 closes this.
