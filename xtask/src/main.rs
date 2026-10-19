@@ -12,10 +12,6 @@ mod check;
 mod prerequisites;
 #[path = "../../build/slangc.rs"]
 mod slangc;
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "used by the smoke runs, in the next branch")
-)]
 mod window_systems;
 
 use std::path::{Path, PathBuf};
@@ -38,8 +34,10 @@ enum Command {
     /// Run every check a branch must pass: prerequisites, formatting, clippy
     /// (debug and release), rustdoc, and the tests that need no GPU.
     Check {
-        /// Also run the GPU (T1) tests, with every capability required. Needs
-        /// a Vulkan driver and the validation layer.
+        /// Also run the GPU (T1) tests, with every capability required, then
+        /// a smoke run of the application under each window system the
+        /// platform supports. Needs a Vulkan driver, the validation layer,
+        /// and a display for each window system.
         #[arg(long)]
         gpu: bool,
         /// With --gpu, leave out the windowed smoke runs.
