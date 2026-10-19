@@ -98,7 +98,7 @@ On Linux, that means a desktop session with both: a Wayland session with Xwaylan
 - **`Xvfb`**, a virtual X server, which chooses a free display number itself (`-displayfd`), so it can't collide with another. It listens only on Linux's abstract socket, not in `/tmp/.X11-unix`, which under WSL is WSLg's, and where other users can't create sockets.
 - **Weston**, the reference Wayland compositor, headless (`weston --backend=headless`), on a socket named for the `xtask` process
 
-Both are stopped when the check ends, whether it passes or not. The smoke runs, and nothing else, get their `DISPLAY` and `WAYLAND_DISPLAY`, and an `XDG_RUNTIME_DIR` for Weston's socket: the session's if it's set, otherwise `target/virtual-displays/runtime`. Their logs are in `target/virtual-displays/`, and an error starting either names its log.
+Both are stopped when the check ends, whether it passes or not. The smoke runs, and nothing else, get their `DISPLAY` and `WAYLAND_DISPLAY`, an `XDG_RUNTIME_DIR` for Weston's socket: the session's if it's set, otherwise `target/virtual-displays/runtime`; and `WINIT_X11_SCALE_FACTOR=1`, since `Xvfb`'s display reports no physical size, from which `winit` would otherwise derive the scale factor, warning that it can't. Their logs are in `target/virtual-displays/`, and an error starting either names its log.
 
 They need the `xvfb` and `weston` packages (on Ubuntu and Debian, `sudo apt install xvfb weston`; on Fedora, `sudo dnf install xorg-x11-server-Xvfb weston`). A missing program is reported when the check starts.
 
