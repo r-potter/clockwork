@@ -1,10 +1,12 @@
 # Continuous integration (R17 in design 0001). See "CI jobs" in
 # docs/testing.md.
 #
-# Both jobs run `cargo xtask check` on a hosted runner with no Vulkan driver,
-# which proves that the GPU-free (T0) tests need none (R8). Each installs a
-# pinned Vulkan SDK for `slangc`. GPU (T1) tests in CI arrive with the
-# `linux-lavapipe` job, in the `foundations-lavapipe` slice.
+# The `linux` and `windows` jobs run `cargo xtask check` on a hosted runner
+# with no Vulkan driver, which proves that the GPU-free (T0) tests need none
+# (R8). The `linux-lavapipe` job runs the GPU (T1) tests and the smoke runs
+# on lavapipe, Mesa's CPU Vulkan driver, built from a pinned commit (R20).
+# Each job installs a pinned Vulkan SDK, for `slangc` and, in
+# `linux-lavapipe`, the validation layer.
 #
 # No secrets and no self-hosted runners, so pull requests from forks are safe
 # to run.
@@ -32,6 +34,10 @@ env:
   VULKAN_SDK_VERSION: 1.4.363.0
   VULKAN_SDK_LINUX_SHA256: 197962f5cbf80baf2775a03336a01cee7c8745686c65aaa70d3f751ade4d7e43
   VULKAN_SDK_WINDOWS_SHA256: 94a82d378f7a5e3e54c9db7d2fb7016af136e14ac0a18dbf0f2f67a36352d141
+  # The Meson that builds lavapipe. Mesa needs 1.4 or later, newer than
+  # Ubuntu 24.04's, so it's installed from PyPI, at a pinned version so the
+  # build is reproducible.
+  MESON_VERSION: 1.12.1
 
 jobs:
   linux:
@@ -67,11 +73,98 @@ jobs:
           sdk="$HOME/vulkan/$VULKAN_SDK_VERSION/x86_64"
           echo "VULKAN_SDK=$sdk" >> "$GITHUB_ENV"
           echo "$sdk/bin" >> "$GITHUB_PATH"
-          echo "LD_LIBRARY_PATH=$sdk/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" >> "$GITHUB_ENV"
+          # The SDK's Vulkan loader, ahead of the runner's older one.
+          echo "LD_LIBRARY_PATH=$sdk/lib/VulkanLoader/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" >> "$GITHUB_ENV"
           echo "VK_ADD_LAYER_PATH=$sdk/share/vulkan/explicit_layer.d" >> "$GITHUB_ENV"
 
       - name: cargo xtask check
         run: cargo xtask check
+
+  linux-lavapipe:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install Rust
+        run: |
+          rustup toolchain install stable --profile minimal --component clippy,rustfmt
+          rustup default stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      # The same as in the `linux` job.
+      - name: Cache the Vulkan SDK download
+        uses: actions/cache@v4
+        with:
+          path: ~/vulkan-sdk-download
+          key: vulkan-sdk-linux-${{ env.VULKAN_SDK_VERSION }}
+
+      # The same as in the `linux` job.
+      - name: Install the Vulkan SDK
+        run: |
+          file="vulkansdk-linux-x86_64-$VULKAN_SDK_VERSION.tar.xz"
+          mkdir -p ~/vulkan-sdk-download ~/vulkan
+          if [ ! -f ~/vulkan-sdk-download/"$file" ]; then
+            curl --fail --location --silent --show-error \
+              --output ~/vulkan-sdk-download/"$file" \
+              "https://sdk.lunarg.com/sdk/download/$VULKAN_SDK_VERSION/linux/$file"
+          fi
+          echo "$VULKAN_SDK_LINUX_SHA256  $HOME/vulkan-sdk-download/$file" | sha256sum --check
+          tar --extract --xz --file ~/vulkan-sdk-download/"$file" --directory ~/vulkan
+          # What the SDK's `setup-env.sh` sets, for this and later steps.
+          sdk="$HOME/vulkan/$VULKAN_SDK_VERSION/x86_64"
+          echo "VULKAN_SDK=$sdk" >> "$GITHUB_ENV"
+          echo "$sdk/bin" >> "$GITHUB_PATH"
+          # The SDK's Vulkan loader, ahead of the runner's older one.
+          echo "LD_LIBRARY_PATH=$sdk/lib/VulkanLoader/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" >> "$GITHUB_ENV"
+          echo "VK_ADD_LAYER_PATH=$sdk/share/vulkan/explicit_layer.d" >> "$GITHUB_ENV"
+
+      # The packages "Lavapipe" in docs/testing.md lists, those "Virtual
+      # displays" lists, and `libxkbcommon-x11-0`, which the X11 smoke run
+      # needs ("Smoke runs").
+      - name: Install lavapipe's build dependencies and the virtual displays
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends \
+            git ninja-build pkg-config g++ llvm-dev bison flex \
+            python3-mako python3-packaging python3-yaml \
+            libexpat1-dev zlib1g-dev libdrm-dev libx11-dev libx11-xcb-dev libxcb1-dev \
+            libxcb-dri3-dev libxcb-present-dev libxcb-randr0-dev libxcb-shm0-dev \
+            libxcb-xfixes0-dev libxrandr-dev libxshmfence-dev libwayland-dev wayland-protocols \
+            xvfb weston libxkbcommon-x11-0
+          pipx install "meson==$MESON_VERSION"
+
+      # The runner sets these in its environment, which the `env` context in
+      # expressions doesn't include.
+      - name: Read the runner's image
+        id: image
+        run: echo "image=$ImageOS-$ImageVersion" >> "$GITHUB_OUTPUT"
+
+      # Rebuilt only when the pin or the build's options change, which are
+      # in `xtask/src/lavapipe.rs`, or the runner's image does, since the
+      # build links the image's libraries. An uncached build takes several
+      # minutes.
+      - name: Restore lavapipe
+        id: lavapipe-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: target/lavapipe
+          key: lavapipe-${{ steps.image.outputs.image }}-${{ hashFiles('xtask/src/lavapipe.rs') }}
+
+      - name: cargo xtask lavapipe
+        run: cargo xtask lavapipe
+
+      # Saved as soon as it's built, rather than at the end of the job, which
+      # would save nothing if the checks failed.
+      - name: Save lavapipe
+        if: steps.lavapipe-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: target/lavapipe
+          key: ${{ steps.lavapipe-cache.outputs.cache-primary-key }}
+
+      - name: cargo xtask check --gpu --lavapipe --virtual-displays
+        run: cargo xtask check --gpu --lavapipe --virtual-displays
 
   windows:
     runs-on: windows-latest
