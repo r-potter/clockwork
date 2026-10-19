@@ -27,7 +27,9 @@ use tracing_subscriber::Layer;
 use tracing_subscriber::layer::Context;
 use tracing_subscriber::registry::LookupSpan;
 
-use super::{Class, EventFields, Session, SessionId, attribute, attribution_filter, classify};
+use super::{
+    Class, EventFields, Session, SessionId, attribute, attribution_filter, classify, target_of,
+};
 
 /// The most unexpected events a collector records. Beyond this it only counts
 /// them, so that a broken loop can't grow memory without bound.
@@ -219,9 +221,10 @@ where
         let metadata = event.metadata();
         let fields = EventFields::of(event);
         let level = *metadata.level();
+        let target = target_of(event);
         let class = classify(
             level,
-            metadata.target(),
+            &target,
             fields.message_id.as_deref(),
             &fields.message,
         );
@@ -231,7 +234,7 @@ where
         let session = attribute(fields.session, event, &ctx);
         let captured = CapturedEvent {
             level,
-            target: metadata.target().to_owned(),
+            target,
             message_id: fields.message_id,
             message: fields.message,
         };

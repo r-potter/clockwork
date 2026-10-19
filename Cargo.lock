@@ -321,8 +321,10 @@ dependencies = [
  "ash-window",
  "clap",
  "glam",
+ "log",
  "raw-window-handle",
  "tracing",
+ "tracing-log",
  "tracing-subscriber",
  "winit",
 ]
