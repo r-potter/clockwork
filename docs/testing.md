@@ -10,6 +10,20 @@ Every machine needs:
 
 GPU tests also need a Vulkan 1.4 driver. The checks below don't.
 
+### Minimum versions for GPU tests
+
+The engine targets the extensions [ADR 0002](decisions/0002-vulkan-feature-baseline.md) lists, so GPU tests need a driver that has them and a validation layer that knows them:
+
+| What | Minimum | Why |
+|---|---|---|
+| Vulkan SDK | 1.4.350.0 | The first SDK whose validation layer knows `VK_KHR_device_address_commands`, which arrived in the 1.4.346 headers. An older layer can't validate code that uses it. 1.4.341.1, which CI still uses, knows `VK_EXT_descriptor_heap` and `VK_EXT_present_timing`, but not `VK_KHR_device_address_commands`. |
+| NVIDIA driver, Windows | 617.42 | Checked on the RTX 4090 on 2026-10-19 with `vulkaninfo`: it has every ADR 0002 extension, required and optional. 610.88 lacks `VK_KHR_device_address_commands`. |
+| NVIDIA driver, Linux | 615.71.09 | Checked on the RTX 3090 on 2026-10-15 with `vulkaninfo` (ADR 0002). |
+
+`reference_device_reports_required_extensions`, in `src/rhi/vulkan/gpu_tests.rs`, fails under `cargo xtask check --gpu` on a device without the required extensions. The application logs the optional ones the selected device has and lacks, at `INFO`, when it starts.
+
+Nothing enables these extensions yet, so until the RHI uses them, GPU tests also pass with SDK 1.4.341.1.
+
 ### Linux
 
 1. Download the Linux tarball and extract it, for example into `~/vulkan`, giving `~/vulkan/1.4.341.1/`.
