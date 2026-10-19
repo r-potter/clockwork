@@ -9,6 +9,7 @@
 //! See `docs/testing.md` for how to use it.
 
 mod check;
+mod lavapipe;
 mod prerequisites;
 #[path = "../../build/slangc.rs"]
 mod slangc;
@@ -50,6 +51,9 @@ enum Command {
         #[arg(long, requires = "gpu", conflicts_with = "no_window")]
         virtual_displays: bool,
     },
+    /// Linux: build lavapipe, Mesa's CPU Vulkan driver, from the pinned
+    /// commit, in target/lavapipe/. Does nothing if it's already built.
+    Lavapipe,
 }
 
 /// Runs the task named on the command line.
@@ -72,6 +76,7 @@ fn main() -> Result<()> {
                 virtual_displays,
             },
         ),
+        Command::Lavapipe => lavapipe::build(&workspace_root()),
     }
 }
 
@@ -163,6 +168,14 @@ mod tests {
             ])
             .is_err()
         );
+    }
+
+    /// `cargo xtask lavapipe` selects the lavapipe build, which takes no
+    /// options.
+    #[test]
+    fn lavapipe_parses() {
+        let cli = Cli::try_parse_from(["xtask", "lavapipe"]).unwrap();
+        assert_eq!(cli.command, Command::Lavapipe);
     }
 
     /// A task is required: running with none is an error, not a silent pass.

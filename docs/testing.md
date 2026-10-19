@@ -105,6 +105,44 @@ They need the `xvfb` and `weston` packages (on Ubuntu and Debian, `sudo apt inst
 
 To reproduce a failing smoke run, run the same command, unsetting the same variables. On Linux, for example, `env -u WAYLAND_DISPLAY -u WAYLAND_SOCKET cargo run -- --exit-after-frames 300 --fail-on-warnings` for X11.
 
+### Lavapipe
+
+Lavapipe is Mesa's Vulkan driver for the CPU. CI has no GPU, so it runs the GPU tests on lavapipe. No Mesa release has every extension [ADR 0002](decisions/0002-vulkan-feature-baseline.md) requires on lavapipe yet, so it's built from a pinned commit on Mesa's `main` branch, the same way in CI and locally. Linux only.
+
+`cargo xtask lavapipe` builds it:
+1. It checks the build's prerequisites (below), and names every one that's missing.
+2. It fetches the pinned commit alone, without Mesa's history, and builds lavapipe with Meson, with the X11 and Wayland presentation the smoke runs need, and nothing else Mesa can build. The first build takes several minutes.
+3. It installs it in `target/lavapipe/<commit>/install/`, removes the source and build directories, and prints the path to the driver's manifest, `share/vulkan/icd.d/lvp_icd.x86_64.json`, which points the Vulkan loader at the driver.
+
+Running it again does nothing, unless the pin or the build options have changed since, in which case it builds again from scratch. Builds for different pins coexist, and `cargo clean` removes them all. The pin and the options are in `xtask/src/lavapipe.rs`.
+
+The build needs Git, Meson 1.4 or later, Ninja, pkg-config, C and C++ compilers, LLVM with its development files, Bison and Flex, Python 3 with the `mako`, `packaging` and `yaml` modules, and the development files of the libraries Mesa uses to present to X11 and Wayland. On Ubuntu and Debian:
+
+```sh
+sudo apt install git ninja-build pkg-config g++ llvm-dev bison flex \
+  python3-mako python3-packaging python3-yaml \
+  libexpat1-dev zlib1g-dev libdrm-dev libx11-dev libx11-xcb-dev libxcb1-dev \
+  libxcb-dri3-dev libxcb-present-dev libxcb-randr0-dev libxcb-shm0-dev \
+  libxcb-xfixes0-dev libxrandr-dev libxshmfence-dev libwayland-dev wayland-protocols
+pipx install meson
+```
+
+Ubuntu 24.04's own Meson is too old, hence `pipx`. On Fedora:
+
+```sh
+sudo dnf install git meson ninja-build pkgconf-pkg-config gcc gcc-c++ llvm-devel bison flex \
+  python3-mako python3-packaging python3-pyyaml \
+  expat-devel zlib-ng-compat-devel libdrm-devel libX11-devel libxcb-devel \
+  libXrandr-devel libxshmfence-devel wayland-devel wayland-protocols-devel
+```
+
+#### Moving the pin
+
+The pin is `PIN` in `xtask/src/lavapipe.rs`: a full commit hash, its date, and, in its documentation, why that commit was chosen. Move it like any other reviewed change, to pick up a fix, or a feature the engine starts to need:
+- Choose a commit on Mesa's `main` branch. Every merge to `main` has passed Mesa's own CI.
+- Once a Mesa release has `VK_EXT_descriptor_heap` and `VK_KHR_device_address_commands` on lavapipe (see lavapipe's entries in Mesa's `docs/features.txt`), pin that release's tagged commit instead, and say so in `PIN`'s documentation.
+- Run `cargo xtask lavapipe`, and check that the new build works before asking for review.
+
 `cargo xtask` is an alias (in `.cargo/config.toml`) for running the `xtask` crate, the repository's developer tooling. The repository is a Cargo workspace of the engine and `xtask`, with the engine as its only default member, so plain `cargo build`, `cargo run` and `cargo test` act on the engine alone.
 
 ### Lints
