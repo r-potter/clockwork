@@ -33,13 +33,13 @@ impl<'a> TestBuffer<'a> {
     /// Panics if any Vulkan call fails.
     fn new(backend: &'a VulkanTestBackend, size: vk::DeviceSize) -> Self {
         let device = backend.device.handle();
-        let buffer_info = vk::BufferCreateInfo::default()
+        let buffer_create_info = vk::BufferCreateInfo::default()
             .size(size)
             .usage(vk::BufferUsageFlags::TRANSFER_DST)
             .sharing_mode(vk::SharingMode::EXCLUSIVE);
-        // SAFETY: `device` is a valid logical device, and `buffer_info` is
-        // valid for the call.
-        let buffer = unsafe { device.create_buffer(&buffer_info, None) }.unwrap();
+        // SAFETY: `device` is a valid logical device, and
+        // `buffer_create_info` is valid for the call.
+        let buffer = unsafe { device.create_buffer(&buffer_create_info, None) }.unwrap();
         // Construct `Self` first, so that the buffer is destroyed if a later
         // step fails.
         let mut test_buffer = Self {
@@ -95,11 +95,11 @@ impl<'a> TestCommands<'a> {
     /// Panics if any Vulkan call fails.
     fn new(backend: &'a VulkanTestBackend) -> Self {
         let device = backend.device.handle();
-        let pool_info = vk::CommandPoolCreateInfo::default()
+        let pool_create_info = vk::CommandPoolCreateInfo::default()
             .queue_family_index(backend.device.queue_families().graphics);
-        // SAFETY: `device` is a valid logical device, and `pool_info` is
-        // valid for the call.
-        let pool = unsafe { device.create_command_pool(&pool_info, None) }.unwrap();
+        // SAFETY: `device` is a valid logical device, and `pool_create_info`
+        // is valid for the call.
+        let pool = unsafe { device.create_command_pool(&pool_create_info, None) }.unwrap();
         let mut commands = Self {
             device,
             pool,
@@ -138,7 +138,7 @@ fn validation_errors_are_counted() {
 
     let device = backend.device.handle();
     // A buffer's size must be greater than zero.
-    let buffer_info = vk::BufferCreateInfo::default()
+    let buffer_create_info = vk::BufferCreateInfo::default()
         .size(0)
         .usage(vk::BufferUsageFlags::TRANSFER_DST)
         .sharing_mode(vk::SharingMode::EXCLUSIVE);
@@ -146,7 +146,7 @@ fn validation_errors_are_counted() {
     // layer reports. The layer then skips the call rather than passing it to
     // the driver, returning an error, so the driver never sees the invalid
     // parameter.
-    let result = unsafe { device.create_buffer(&buffer_info, None) };
+    let result = unsafe { device.create_buffer(&buffer_create_info, None) };
     if let Ok(buffer) = result {
         // SAFETY: the buffer was created on `device`, and is unused.
         unsafe { device.destroy_buffer(buffer, None) };

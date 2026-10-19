@@ -489,7 +489,8 @@ impl VulkanInstance {
         let mut messenger_create_info = validation::messenger_create_info(options.session);
         let layer_settings = LayerSettings::new(plan.features);
         let settings = layer_settings.settings();
-        let mut layer_settings_info = vk::LayerSettingsCreateInfoEXT::default().settings(&settings);
+        let mut layer_settings_create_info =
+            vk::LayerSettingsCreateInfoEXT::default().settings(&settings);
 
         let application_info = vk::ApplicationInfo::default()
             .application_name(NAME)
@@ -506,7 +507,7 @@ impl VulkanInstance {
             create_info = create_info.push_next(&mut messenger_create_info);
         }
         if plan.use_settings {
-            create_info = create_info.push_next(&mut layer_settings_info);
+            create_info = create_info.push_next(&mut layer_settings_create_info);
         }
 
         // SAFETY: `create_info` and the structures it points to are valid for

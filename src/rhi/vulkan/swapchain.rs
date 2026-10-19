@@ -194,7 +194,7 @@ impl Swapchain {
         this.images = unsafe { this.swapchain_fn.get_swapchain_images(swapchain) }
             .context("failed to get Vulkan swapchain images")?;
         for &image in &this.images {
-            let view_info = vk::ImageViewCreateInfo::default()
+            let view_create_info = vk::ImageViewCreateInfo::default()
                 .image(image)
                 .view_type(vk::ImageViewType::TYPE_2D)
                 .format(format.format)
@@ -206,9 +206,9 @@ impl Swapchain {
                     layer_count: 1,
                 });
             // SAFETY: `image` belongs to the swapchain, which was created on
-            // this device, and `view_info` is valid for the duration of the
-            // call.
-            let view = unsafe { this.device.create_image_view(&view_info, None) }
+            // this device, and `view_create_info` is valid for the duration of
+            // the call.
+            let view = unsafe { this.device.create_image_view(&view_create_info, None) }
                 .context("failed to create Vulkan swapchain image view")?;
             this.image_views.push(view);
 
