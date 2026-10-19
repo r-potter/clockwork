@@ -486,7 +486,7 @@ impl VulkanInstance {
             extensions.extend_from_slice(surface_extensions);
         }
 
-        let mut messenger_info = validation::messenger_info(options.session);
+        let mut messenger_create_info = validation::messenger_create_info(options.session);
         let layer_settings = LayerSettings::new(plan.features);
         let settings = layer_settings.settings();
         let mut layer_settings_info = vk::LayerSettingsCreateInfoEXT::default().settings(&settings);
@@ -503,7 +503,7 @@ impl VulkanInstance {
         if validate {
             // Also report problems in instance creation and destruction, which
             // the messenger created below cannot cover.
-            create_info = create_info.push_next(&mut messenger_info);
+            create_info = create_info.push_next(&mut messenger_create_info);
         }
         if plan.use_settings {
             create_info = create_info.push_next(&mut layer_settings_info);
@@ -525,10 +525,10 @@ impl VulkanInstance {
         if validate {
             let debug_utils =
                 debug_utils::Instance::new(&vulkan_instance.entry, &vulkan_instance.instance);
-            // SAFETY: `messenger_info` is valid, and `VK_EXT_debug_utils` was
-            // enabled on the instance.
+            // SAFETY: `messenger_create_info` is valid, and `VK_EXT_debug_utils`
+            // was enabled on the instance.
             let messenger =
-                unsafe { debug_utils.create_debug_utils_messenger(&messenger_info, None) }
+                unsafe { debug_utils.create_debug_utils_messenger(&messenger_create_info, None) }
                     .context("failed to create Vulkan debug messenger")?;
             vulkan_instance.debug_messenger = Some(DebugMessenger {
                 debug_utils,

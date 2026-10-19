@@ -227,7 +227,7 @@ impl LayerSettings {
 /// Errors and warnings are always requested, whatever the log level, since
 /// they're counted and fail tests whatever `RUST_LOG` says. Vulkan's `INFO`
 /// and `VERBOSE` messages are requested only if they would be logged.
-pub fn messenger_info(session: SessionId) -> vk::DebugUtilsMessengerCreateInfoEXT<'static> {
+pub fn messenger_create_info(session: SessionId) -> vk::DebugUtilsMessengerCreateInfoEXT<'static> {
     let mut message_severity = vk::DebugUtilsMessageSeverityFlagsEXT::ERROR
         | vk::DebugUtilsMessageSeverityFlagsEXT::WARNING;
     if tracing::enabled!(target: VALIDATION_TARGET, Level::DEBUG) {
@@ -277,8 +277,9 @@ fn session_from_user_data(user_data: *mut c_void) -> u64 {
 /// are logged at `DEBUG` to keep them out of the default `INFO` output.
 ///
 /// The event's fields are `session` (from `user_data`, see
-/// [`messenger_info`]), `message_id` (`pMessageIdName`, such as a VUID, when
-/// there is one) and `types`, and its message is the message's text.
+/// [`messenger_create_info`]), `message_id` (`pMessageIdName`, such as a
+/// VUID, when there is one) and `types`, and its message is the message's
+/// text.
 ///
 /// It never fails or panics: it's called from C, on any thread.
 ///
