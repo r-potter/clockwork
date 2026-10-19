@@ -275,7 +275,7 @@ let backend = VulkanTestBackend::headless(&session);
 require_capabilities!(backend, Capability::DescriptorHeap);
 ```
 
-The capabilities are listed in `Capability`, in `src/rhi/vulkan/test_support.rs`, with the names used below: `descriptor-heap`, `device-address-commands`, `present-timing`, `dedicated-compute-queue` and `dedicated-transfer-queue`. The list is for tests only, until the RHI has its own capability query. A device has an extension's capability when it has both the extension and the extension's main feature.
+The capabilities are listed in `Capability`, in `src/rhi/vulkan/test_support.rs`, with the names used below: `descriptor-heap`, `device-address-commands`, `present-timing`, `swapchain-maintenance`, `dedicated-compute-queue` and `dedicated-transfer-queue`. The list is for tests only, until the RHI has its own capability query. A device has an extension's capability when it has both the extension and the extension's main feature.
 
 A skipped test passes, but prints a banner to stderr, even when the test passes, so skips are visible:
 

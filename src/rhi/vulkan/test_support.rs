@@ -24,6 +24,8 @@ pub enum Capability {
     DeviceAddressCommands,
     /// `VK_EXT_present_timing` (ADR 0002).
     PresentTiming,
+    /// `VK_KHR_swapchain_maintenance1` (ADR 0002).
+    SwapchainMaintenance,
     /// A queue family that supports compute but not graphics.
     DedicatedComputeQueue,
     /// A queue family that supports transfers, but neither graphics nor
@@ -33,10 +35,11 @@ pub enum Capability {
 
 impl Capability {
     /// Every capability.
-    pub const ALL: [Self; 5] = [
+    pub const ALL: [Self; 6] = [
         Self::DescriptorHeap,
         Self::DeviceAddressCommands,
         Self::PresentTiming,
+        Self::SwapchainMaintenance,
         Self::DedicatedComputeQueue,
         Self::DedicatedTransferQueue,
     ];
@@ -48,6 +51,7 @@ impl Capability {
             Self::DescriptorHeap => "descriptor-heap",
             Self::DeviceAddressCommands => "device-address-commands",
             Self::PresentTiming => "present-timing",
+            Self::SwapchainMaintenance => "swapchain-maintenance",
             Self::DedicatedComputeQueue => "dedicated-compute-queue",
             Self::DedicatedTransferQueue => "dedicated-transfer-queue",
         }
@@ -76,6 +80,10 @@ impl Capability {
             Self::PresentTiming => {
                 device.supports_extension(ext::present_timing::NAME)
                     && features.present_timing.present_timing == vk::TRUE
+            }
+            Self::SwapchainMaintenance => {
+                device.supports_extension(khr::swapchain_maintenance1::NAME)
+                    && features.swapchain_maintenance1.swapchain_maintenance1 == vk::TRUE
             }
             Self::DedicatedComputeQueue => {
                 has_family(vk::QueueFlags::COMPUTE, vk::QueueFlags::GRAPHICS)
@@ -203,6 +211,7 @@ mod tests {
         features.descriptor_heap.descriptor_heap = vk::TRUE;
         features.device_address_commands.device_address_commands = vk::TRUE;
         features.present_timing.present_timing = vk::TRUE;
+        features.swapchain_maintenance1.swapchain_maintenance1 = vk::TRUE;
         PhysicalDevice {
             handle: vk::PhysicalDevice::null(),
             properties: Properties::default(),
@@ -221,13 +230,17 @@ mod tests {
     }
 
     /// The capabilities each extension provides, with its name.
-    const EXTENSION_CAPABILITIES: [(Capability, &CStr); 3] = [
+    const EXTENSION_CAPABILITIES: [(Capability, &CStr); 4] = [
         (Capability::DescriptorHeap, ext::descriptor_heap::NAME),
         (
             Capability::DeviceAddressCommands,
             khr::device_address_commands::NAME,
         ),
         (Capability::PresentTiming, ext::present_timing::NAME),
+        (
+            Capability::SwapchainMaintenance,
+            khr::swapchain_maintenance1::NAME,
+        ),
     ];
 
     /// A device with an extension and its feature has the capability, and
