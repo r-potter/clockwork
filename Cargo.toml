@@ -26,6 +26,22 @@ default-members = ["."]
 
 # Lints for every crate in the workspace (R13 in design 0001). `cargo xtask
 # check` runs clippy with `-D warnings`, so each of these fails the check.
+# `ash` 0.38, the latest release, has bindings only up to Vulkan 1.3.281. This
+# replaces it everywhere in the dependency graph with a commit on its `master`
+# branch: f4c2ca3 (2026-07-27), generated from the Vulkan 1.4.352 headers. It's
+# the newest commit, and has the Vulkan 1.4 bindings and those for
+# `VK_EXT_descriptor_heap`, `VK_KHR_device_address_commands` and
+# `VK_EXT_present_timing` (ADR 0002). Its version, 0.38.0+1.4.352, is still
+# semver-compatible with 0.38, so the patch applies.
+#
+# `ash-window` 0.13.0 from crates.io doesn't build against it, so it comes from
+# the same commit, where it's also 0.13.0 but uses `master`'s API.
+#
+# Remove both once `ash` and `ash-window` release these changes.
+[patch.crates-io]
+ash = { git = "https://github.com/ash-rs/ash", rev = "f4c2ca3e4f6b998d5254ad101a32f024d87cdec2" }
+ash-window = { git = "https://github.com/ash-rs/ash", rev = "f4c2ca3e4f6b998d5254ad101a32f024d87cdec2" }
+
 [workspace.lints.rust]
 # Already the 2024 edition's default, made explicit.
 unsafe_op_in_unsafe_fn = "warn"
