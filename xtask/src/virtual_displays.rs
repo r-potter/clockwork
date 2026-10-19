@@ -77,6 +77,10 @@ fn x11_display(line: &str) -> Result<String> {
 }
 
 /// The environment variables pointing a smoke run at the virtual displays.
+///
+/// `WINIT_X11_SCALE_FACTOR` sets the X11 window's scale factor. Without it,
+/// `winit` derives one from the display's physical size, which `Xvfb`
+/// reports as 0 mm, and warns about it, failing the smoke run.
 fn display_env(
     x11_display: &str,
     wayland_socket: &str,
@@ -86,6 +90,7 @@ fn display_env(
         ("DISPLAY", x11_display.to_owned()),
         ("WAYLAND_DISPLAY", wayland_socket.to_owned()),
         ("XDG_RUNTIME_DIR", runtime_dir.display().to_string()),
+        ("WINIT_X11_SCALE_FACTOR", "1".to_owned()),
     ]
 }
 
@@ -318,10 +323,11 @@ mod tests {
         assert_ne!(weston_socket(1), weston_socket(2));
     }
 
-    /// The smoke runs get both displays, and the runtime directory where
-    /// Weston's socket is.
+    /// The smoke runs get both displays, the runtime directory where
+    /// Weston's socket is, and an X11 scale factor, since `Xvfb`'s display
+    /// has no physical size to derive one from.
     #[test]
-    fn env_names_both_displays_and_the_runtime_dir() {
+    fn env_names_both_displays_the_runtime_dir_and_the_x11_scale() {
         let runtime_dir = Path::new("run").join("user");
         let env = display_env(":99", "clockwork-wayland-42", &runtime_dir);
         assert_eq!(
@@ -330,6 +336,7 @@ mod tests {
                 ("DISPLAY", ":99".to_owned()),
                 ("WAYLAND_DISPLAY", "clockwork-wayland-42".to_owned()),
                 ("XDG_RUNTIME_DIR", runtime_dir.display().to_string()),
+                ("WINIT_X11_SCALE_FACTOR", "1".to_owned()),
             ]
         );
     }
