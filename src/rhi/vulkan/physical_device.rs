@@ -94,10 +94,9 @@ impl PhysicalDevice {
     ///
     /// Returns an error if the device's extensions cannot be enumerated.
     pub fn new(instance: &Instance, handle: vk::PhysicalDevice) -> Result<Self> {
-        // Every `unsafe` block below calls a query on `handle`, which was
-        // enumerated from `instance`, and every structure passed in is valid
-        // for the call.
-        // SAFETY: as above.
+        // SAFETY: `handle` was enumerated from `instance`. The same holds for
+        // every query on `handle` below, and every structure passed to them is
+        // valid for the call.
         let core_properties = unsafe { instance.get_physical_device_properties(handle) };
         let api_version = core_properties.api_version;
         // Queried first, as extension feature structures may only be chained
