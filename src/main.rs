@@ -9,7 +9,7 @@ use std::io::IsTerminal;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use clap::Parser;
 use diagnostics::{DiagnosticCounter, Session, SessionLayer, is_session_span};
 use rhi::{
@@ -45,23 +45,31 @@ struct Options {
     device: Option<String>,
     /// Validation features: off, or a comma-separated list of core, sync,
     /// gpu and best-practices (each implies core). Used if the validation
-    /// layer is available. [default: sync in debug builds, off in release
-    /// builds]
+    /// layer is available, unless --fail-on-warnings is given. [default:
+    /// sync in debug builds, off in release builds]
     #[arg(long, value_name = "FEATURES")]
     validation: Option<ValidationFeatures>,
     /// Exit cleanly after rendering N frames. [default: run until the window
     /// is closed]
     #[arg(long, value_name = "N", value_parser = clap::value_parser!(u64).range(1..))]
     exit_after_frames: Option<u64>,
+    /// Require validation, unless --validation is off, and exit with an error
+    /// if any warning or error was logged.
+    #[arg(long)]
+    fail_on_warnings: bool,
 }
 
 impl Options {
     /// The validation the application asks for (design 0001, "Validation"):
     /// the `--validation` features, or by default synchronization validation
-    /// in debug builds and none in release builds, each used if it's
-    /// available.
+    /// in debug builds and none in release builds. They're required under
+    /// `--fail-on-warnings`, and otherwise used if they're available.
     fn validation(&self) -> Validation {
-        validation(self.validation, cfg!(debug_assertions))
+        validation(
+            self.validation,
+            self.fail_on_warnings,
+            cfg!(debug_assertions),
+        )
     }
 }
 
@@ -77,9 +85,18 @@ fn parse_device(value: &str) -> Result<String, &'static str> {
 }
 
 /// The validation for the requested features, `None` if `--validation`
-/// wasn't given, in a debug build if `debug` is set. Pure, so that both kinds
-/// of build are tested in either.
-fn validation(requested: Option<ValidationFeatures>, debug: bool) -> Validation {
+/// wasn't given, under `--fail-on-warnings` if `fail_on_warnings` is set, in
+/// a debug build if `debug` is set. Pure, so that both kinds of build are
+/// tested in either.
+///
+/// `--fail-on-warnings` requires validation, so that a run with no warnings
+/// can't be one that wasn't validated, unless the features are `off`: then it
+/// fails only on what the engine itself logs.
+fn validation(
+    requested: Option<ValidationFeatures>,
+    fail_on_warnings: bool,
+    debug: bool,
+) -> Validation {
     let default = if debug {
         ValidationFeatures::SYNC
     } else {
@@ -88,6 +105,8 @@ fn validation(requested: Option<ValidationFeatures>, debug: bool) -> Validation 
     let features = requested.unwrap_or(default);
     if features.is_off() {
         Validation::Off
+    } else if fail_on_warnings {
+        Validation::Required(features)
     } else {
         Validation::Preferred(features)
     }
@@ -128,6 +147,23 @@ fn main() -> Result<()> {
     let session = Session::new();
     let _entered = session.span().enter();
 
+    // The summary is logged however the run ended, so that the warnings
+    // leading up to an error are counted too.
+    let result = run(&options, &session);
+    let (errors, warnings) = (counter.errors(), counter.warnings());
+    info!("{}", summary(errors, warnings));
+    result?;
+    check_warnings(errors, warnings, options.fail_on_warnings)
+}
+
+/// Runs the application in `session` until its window is closed, or it has
+/// run the frames `--exit-after-frames` asked for.
+///
+/// # Errors
+///
+/// Returns an error if the event loop, the window or the renderer backend
+/// can't be created, or if rendering fails.
+fn run(options: &Options, session: &Session) -> Result<()> {
     let event_loop = EventLoop::new().context("failed to create event loop")?;
     // Run the loop continuously rather than waiting for events, so that the
     // engine can pace frames itself.
@@ -143,6 +179,42 @@ fn main() -> Result<()> {
         .run_app(&mut app)
         .context("failed to run event loop")?;
     app.error.map_or(Ok(()), Err)
+}
+
+/// The summary logged at exit (R15), such as `0 errors and 2 warnings were
+/// logged`. Suppressed and advisory messages aren't counted.
+fn summary(errors: u32, warnings: u32) -> String {
+    format!(
+        "{} and {} were logged",
+        count(errors, "error"),
+        count(warnings, "warning")
+    )
+}
+
+/// `n` followed by `noun`, made plural unless `n` is 1.
+fn count(n: u32, noun: &str) -> String {
+    if n == 1 {
+        format!("1 {noun}")
+    } else {
+        format!("{n} {noun}s")
+    }
+}
+
+/// Checks the counts at exit, under `--fail-on-warnings` if
+/// `fail_on_warnings` is set.
+///
+/// # Errors
+///
+/// Returns an error under `--fail-on-warnings` if any error or warning was
+/// counted.
+fn check_warnings(errors: u32, warnings: u32, fail_on_warnings: bool) -> Result<()> {
+    if fail_on_warnings && errors + warnings > 0 {
+        bail!(
+            "failing because of --fail-on-warnings: {}",
+            summary(errors, warnings)
+        );
+    }
+    Ok(())
 }
 
 /// Application state driven by the `winit` event loop.
@@ -363,6 +435,7 @@ mod tests {
                 device: None,
                 validation: None,
                 exit_after_frames: None,
+                fail_on_warnings: false,
             }
         );
     }
@@ -380,7 +453,12 @@ mod tests {
     #[test]
     fn help_lists_every_option() {
         let help = Options::command().render_long_help().to_string();
-        for option in ["--device", "--validation", "--exit-after-frames"] {
+        for option in [
+            "--device",
+            "--validation",
+            "--exit-after-frames",
+            "--fail-on-warnings",
+        ] {
             assert!(help.contains(option), "{option} missing from:\n{help}");
         }
     }
@@ -461,10 +539,10 @@ mod tests {
     #[test]
     fn default_validation_depends_on_the_build() {
         assert_eq!(
-            validation(None, true),
+            validation(None, false, true),
             Validation::Preferred(ValidationFeatures::SYNC)
         );
-        assert_eq!(validation(None, false), Validation::Off);
+        assert_eq!(validation(None, false, false), Validation::Off);
     }
 
     /// `--validation` is preferred in either kind of build, so release
@@ -474,7 +552,7 @@ mod tests {
         let features = ValidationFeatures::SYNC.with(rhi::ValidationFeature::BestPractices);
         for debug in [true, false] {
             assert_eq!(
-                validation(Some(features), debug),
+                validation(Some(features), false, debug),
                 Validation::Preferred(features)
             );
         }
@@ -484,8 +562,69 @@ mod tests {
     #[test]
     fn validation_off_turns_it_off() {
         assert_eq!(
-            validation(Some(ValidationFeatures::OFF), true),
+            validation(Some(ValidationFeatures::OFF), false, true),
             Validation::Off
         );
+    }
+
+    /// `--fail-on-warnings` is a flag.
+    #[test]
+    fn fail_on_warnings_parses() {
+        assert!(parse(&["--fail-on-warnings"]).unwrap().fail_on_warnings);
+    }
+
+    /// `--fail-on-warnings` requires validation, with the default features
+    /// or the requested ones, in either kind of build.
+    #[test]
+    fn fail_on_warnings_requires_validation() {
+        assert_eq!(
+            validation(None, true, true),
+            Validation::Required(ValidationFeatures::SYNC)
+        );
+        let features = ValidationFeatures::SYNC.with(rhi::ValidationFeature::Gpu);
+        for debug in [true, false] {
+            assert_eq!(
+                validation(Some(features), true, debug),
+                Validation::Required(features)
+            );
+        }
+    }
+
+    /// `--fail-on-warnings` doesn't turn validation on where it would be off:
+    /// in release builds by default, or with `--validation off`. The run then
+    /// fails only on what the engine itself logs.
+    #[test]
+    fn fail_on_warnings_keeps_validation_off() {
+        assert_eq!(validation(None, true, false), Validation::Off);
+        assert_eq!(
+            validation(Some(ValidationFeatures::OFF), true, true),
+            Validation::Off
+        );
+    }
+
+    /// The summary counts each kind, in the singular for one.
+    #[test]
+    fn summary_counts_errors_and_warnings() {
+        assert_eq!(summary(0, 2), "0 errors and 2 warnings were logged");
+        assert_eq!(summary(1, 1), "1 error and 1 warning were logged");
+    }
+
+    /// Without `--fail-on-warnings`, warnings and errors are only summarised.
+    #[test]
+    fn counts_pass_without_fail_on_warnings() {
+        assert!(check_warnings(3, 4, false).is_ok());
+    }
+
+    /// Under `--fail-on-warnings`, a single warning or error fails the run,
+    /// and the message gives the counts.
+    #[test]
+    fn fail_on_warnings_fails_on_any_count() {
+        assert!(check_warnings(0, 0, true).is_ok());
+        let err = check_warnings(0, 1, true).unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "failing because of --fail-on-warnings: 0 errors and 1 warning were logged"
+        );
+        assert!(check_warnings(1, 0, true).is_err());
     }
 }
