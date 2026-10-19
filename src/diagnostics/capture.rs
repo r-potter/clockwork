@@ -219,7 +219,13 @@ where
         let metadata = event.metadata();
         let fields = EventFields::of(event);
         let level = *metadata.level();
-        if classify(level, metadata.target(), fields.message_id.as_deref()) != Class::Counted {
+        let class = classify(
+            level,
+            metadata.target(),
+            fields.message_id.as_deref(),
+            &fields.message,
+        );
+        if class != Class::Counted {
             return;
         }
         let session = attribute(fields.session, event, &ctx);

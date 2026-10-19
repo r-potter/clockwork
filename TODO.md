@@ -157,22 +157,14 @@ Outstanding tasks and future work.
       design 0001: the `linux` and `windows` jobs in
       `.github/workflows/ci.yml` install a pinned Vulkan SDK, and `build.rs`
       finds `slangc` in it (see `build/slangc.rs`).
-- [ ] **Decide how to suppress messages that have no message ID.** Every
-      `SUPPRESSED` entry in `src/diagnostics.rs` needs a target and a message
-      ID. Design 0001 (R4) also says a dependency's warnings are suppressed
-      "keyed by its target", but warnings from dependencies through the `log`
-      crate, and Vulkan loader messages, have no message ID. Matching on
-      target alone would suppress everything on that target. Options include
-      matching on the target and the message text, or on a message prefix.
-      Decide before the first such suppression is needed, and record the
-      decision as a revision of design 0001.
-- [ ] **Stop the OBS Vulkan layer failing tests on the Windows machine.**
-      OBS's implicit layer, `VK_LAYER_OBS_HOOK`, logs a warning on every
-      instance creation ("Layer VK_LAYER_OBS_HOOK uses API version 1.3…").
-      It's unattributed today, but once `foundations-validation` runs the GPU
-      tests in a `TestSession`, it will fail them, and `--fail-on-warnings`
-      smoke runs, on that machine. It has no message ID, so `SUPPRESSED`
-      can't take it until the item above is decided. Options: disable the
-      layer for the engine with `VK_LOADER_LAYERS_DISABLE`, uninstall OBS's
-      capture hook, or suppress the message once suppression can match it.
-      Settle this before `foundations-validation`.
+- [x] **Decide how to suppress messages that have no message ID.** A
+      `SUPPRESSED` entry in `src/diagnostics.rs` now matches its message by
+      ID (`MessageMatch::Id`) or, for messages without one, by the start of
+      its text (`MessageMatch::Prefix`). Recorded as a revision of design
+      0001 (R4).
+- [x] **Stop the OBS Vulkan layer failing tests on the Windows machine.**
+      The loader's warning about OBS's implicit layer, `VK_LAYER_OBS_HOOK`,
+      is suppressed by prefix, so OBS can still capture the engine. Its
+      entry's target is `clockwork::rhi::vulkan`, where the debug messenger
+      logs today: `foundations-validation` must move it to
+      `clockwork::validation` along with the messenger's messages.
