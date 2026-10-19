@@ -27,7 +27,12 @@ const WESTON_TIMEOUT: Duration = Duration::from_secs(10);
 /// The arguments to `Xvfb`. `-displayfd 1` makes it choose a free display
 /// number, and write it to its standard output once it's ready for clients,
 /// so there's no fixed number to collide with, and no polling.
-const XVFB_ARGS: [&str; 7] = [
+///
+/// It listens only on Linux's abstract socket, which clients try first, and
+/// not on a socket in `/tmp/.X11-unix`. Under WSL, that directory is WSLg's,
+/// and other users can't create sockets in it, so `Xvfb` would find no
+/// display number it could use.
+const XVFB_ARGS: [&str; 9] = [
     "-displayfd",
     "1",
     "-screen",
@@ -35,6 +40,8 @@ const XVFB_ARGS: [&str; 7] = [
     "1280x720x24",
     "-nolisten",
     "tcp",
+    "-nolisten",
+    "unix",
 ];
 
 /// The arguments to Weston, listening on `socket` in `XDG_RUNTIME_DIR`.
@@ -270,11 +277,12 @@ mod tests {
     use super::*;
 
     /// `Xvfb` chooses its own display number, reports it on its standard
-    /// output when ready, and accepts only local connections.
+    /// output when ready, and accepts only local connections, through the
+    /// abstract socket alone.
     #[test]
     fn xvfb_reports_a_local_display() {
         assert!(XVFB_ARGS.starts_with(&["-displayfd", "1"]));
-        assert!(XVFB_ARGS.ends_with(&["-nolisten", "tcp"]));
+        assert!(XVFB_ARGS.ends_with(&["-nolisten", "tcp", "-nolisten", "unix"]));
     }
 
     /// The number `Xvfb` writes becomes an X11 display name.
