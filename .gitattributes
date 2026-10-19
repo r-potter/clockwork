@@ -1,0 +1,2 @@
+# Text files use LF line endings on every platform (ADR 0003).
+* text=auto eol=lf

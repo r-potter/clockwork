@@ -31,6 +31,6 @@ What becomes easier, what becomes harder, and what would make us revisit this.
 
 | Number | Decision | Status |
 |---|---|---|
-| 0001 | [Keep the engine a single binary crate](0001-single-binary-crate.md) | Proposed |
-| 0002 | [Target a bleeding-edge Vulkan feature set with no fallbacks](0002-vulkan-feature-baseline.md) | Proposed |
-| 0003 | [Support Windows, X11 and Wayland from the start](0003-supported-platforms.md) | Proposed |
+| 0001 | [Keep the engine a single binary crate](0001-single-binary-crate.md) | Accepted |
+| 0002 | [Target a bleeding-edge Vulkan feature set with no fallbacks](0002-vulkan-feature-baseline.md) | Accepted |
+| 0003 | [Support Windows, X11 and Wayland from the start](0003-supported-platforms.md) | Accepted |

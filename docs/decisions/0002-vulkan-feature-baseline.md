@@ -1,6 +1,6 @@
 # 0002: Target a bleeding-edge Vulkan feature set with no fallbacks
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-10-15
 
 ## Context

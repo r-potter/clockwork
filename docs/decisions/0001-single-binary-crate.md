@@ -1,6 +1,6 @@
 # 0001: Keep the engine a single binary crate
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-10-15
 
 ## Context

@@ -1,6 +1,6 @@
 # 0003: Support Windows, X11 and Wayland from the start
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-10-15
 
 ## Context
