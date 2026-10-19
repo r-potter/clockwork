@@ -5,3 +5,10 @@ edition = "2024"
 
 [dependencies]
 anyhow = "1.0.104"
+ash = "0.38.0"
+ash-window = "0.13.0"
+glam = { version = "0.34.1", features = ["bytemuck"] }
+raw-window-handle = "0.6"
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
+winit = "0.30.13"
