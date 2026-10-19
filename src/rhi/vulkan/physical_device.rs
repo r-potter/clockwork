@@ -12,14 +12,11 @@ use ash::{Instance, ext, vk};
 /// A Vulkan physical device and its immutable properties.
 ///
 /// Everything is queried once, on creation. The version-specific structures
-/// (`vulkan11`, `vulkan12`, `vulkan13`) are only queried if the device
-/// supports that Vulkan version, and extension structures only if it supports
-/// the extension. Otherwise they are left zeroed; check
+/// (`vulkan11` to `vulkan14`) are only queried if the device supports that
+/// Vulkan version, and extension structures only if it supports the
+/// extension. Otherwise they are left zeroed; check
 /// [`PhysicalDevice::api_version`] or
 /// [`PhysicalDevice::supports_extension`] before relying on them.
-///
-/// `ash` 0.38 has no Vulkan 1.4 structures, so 1.4 features and properties are
-/// not included.
 #[derive(Debug)]
 pub struct PhysicalDevice {
     /// The device's handle, valid for as long as the instance it was
@@ -51,6 +48,12 @@ pub struct Properties {
     pub vulkan12: vk::PhysicalDeviceVulkan12Properties<'static>,
     /// Vulkan 1.3 properties. Zeroed on devices older than Vulkan 1.3.
     pub vulkan13: vk::PhysicalDeviceVulkan13Properties<'static>,
+    /// Vulkan 1.4 properties. Zeroed on devices older than Vulkan 1.4.
+    ///
+    /// The image layout lists (`p_copy_src_layouts` and
+    /// `p_copy_dst_layouts`) are not queried, so their pointers are null,
+    /// but their counts are set.
+    pub vulkan14: vk::PhysicalDeviceVulkan14Properties<'static>,
 }
 
 /// Device features, grouped by the Vulkan version or extension that
@@ -68,6 +71,8 @@ pub struct Features {
     pub vulkan12: vk::PhysicalDeviceVulkan12Features<'static>,
     /// Vulkan 1.3 features. Zeroed on devices older than Vulkan 1.3.
     pub vulkan13: vk::PhysicalDeviceVulkan13Features<'static>,
+    /// Vulkan 1.4 features. Zeroed on devices older than Vulkan 1.4.
+    pub vulkan14: vk::PhysicalDeviceVulkan14Features<'static>,
     /// `VK_EXT_shader_object` features.
     pub shader_object: vk::PhysicalDeviceShaderObjectFeaturesEXT<'static>,
 }
@@ -120,12 +125,16 @@ impl PhysicalDevice {
         // and may only be chained if the device supports it.
         if api_version >= vk::API_VERSION_1_2 {
             let include_vulkan13 = api_version >= vk::API_VERSION_1_3;
+            let include_vulkan14 = api_version >= vk::API_VERSION_1_4;
 
             let mut properties2 = vk::PhysicalDeviceProperties2::default()
                 .push(&mut properties.vulkan11)
                 .push(&mut properties.vulkan12);
             if include_vulkan13 {
                 properties2 = properties2.push(&mut properties.vulkan13);
+            }
+            if include_vulkan14 {
+                properties2 = properties2.push(&mut properties.vulkan14);
             }
             // SAFETY: as above. The chain only includes structures for
             // versions the device supports.
@@ -139,6 +148,9 @@ impl PhysicalDevice {
                 .push(&mut features.vulkan12);
             if include_vulkan13 {
                 features2 = features2.push(&mut features.vulkan13);
+            }
+            if include_vulkan14 {
+                features2 = features2.push(&mut features.vulkan14);
             }
             if extensions_include(&extensions, ext::shader_object::NAME) {
                 features2 = features2.push(&mut features.shader_object);

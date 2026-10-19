@@ -48,13 +48,8 @@ use validation::{Availability, LayerSettings, VALIDATION_LAYER};
 /// Name reported to the Vulkan driver for both the application and the engine.
 const NAME: &CStr = c"clockwork";
 
-/// Vulkan version the backend targets.
-///
-/// `ash` 0.38 was generated from the Vulkan 1.3 headers and has no
-/// `API_VERSION_1_4` constant, so the version is built by hand. Its bindings
-/// also lack the functions and types added to core in 1.4; use the equivalent
-/// extension bindings instead.
-const API_VERSION: u32 = vk::make_api_version(0, 1, 4, 0);
+/// Vulkan version the backend targets (ADR 0002).
+const API_VERSION: u32 = vk::API_VERSION_1_4;
 
 /// The colour each frame is cleared to before drawing, as linear RGBA.
 /// Swapchain images use an sRGB format, so this appears brighter on screen
