@@ -61,31 +61,30 @@ Outstanding tasks and future work.
 - [x] **Compile shaders for other backends.** Not needed: ADR 0003 keeps
       Vulkan as the only graphics API on every planned platform, so SPIR-V
       stays the only shader target.
-- [ ] **Use `VK_EXT_swapchain_maintenance1` when available.** Without it,
-      there is no way to know when
-      the presentation engine has finished with a swapchain's images, so
+- [ ] **Use `VK_KHR_swapchain_maintenance1` when available.** It's
+      optional in ADR 0002. Without it, there is no way to know when the
+      presentation engine has finished with a swapchain's images, so
       `Swapchain::drop` in `src/rhi/vulkan/swapchain.rs` waits for the whole
       device to be idle before destroying it, on every recreation. With it:
-  - pass a fence with each present (`VkSwapchainPresentFenceInfoEXT`), and
+  - pass a fence with each present (`VkSwapchainPresentFenceInfoKHR`), and
     destroy a retired swapchain, and the semaphores used to present its
     images, only once the fences for its presents have signalled, instead
     of calling `device_wait_idle`
   - before recreating, release images that were acquired but not presented
-    (`vkReleaseSwapchainImagesEXT`), so they are not left held by the old
+    (`vkReleaseSwapchainImagesKHR`), so they are not left held by the old
     swapchain
-  - query the `swapchainMaintenance1` feature
-    (`VkPhysicalDeviceSwapchainMaintenance1FeaturesEXT`) in `PhysicalDevice`,
-    and enable the extension and feature when supported. It also needs the
-    `VK_EXT_surface_maintenance1` and `VK_KHR_get_surface_capabilities2`
-    instance extensions. Keep the current `device_wait_idle` path as a
+  - enable the extension and its `swapchainMaintenance1` feature when
+    `PhysicalDevice::features.swapchain_maintenance1` says it's supported.
+    It also needs the `VK_KHR_surface_maintenance1` and
+    `VK_KHR_get_surface_capabilities2` instance extensions. Keep the current `device_wait_idle` path as a
     fallback for devices without it, rather than making it a requirement.
   - consider its other features: switching present modes without
-    recreating the swapchain (`VkSwapchainPresentModesCreateInfoEXT`), which
+    recreating the swapchain (`VkSwapchainPresentModesCreateInfoKHR`), which
     would help the frame pacing work, and controlling how images are scaled
-    while a resize is in progress (`VkSwapchainPresentScalingCreateInfoEXT`)
+    while a resize is in progress (`VkSwapchainPresentScalingCreateInfoKHR`)
 
-  `ash` 0.38 has bindings for the EXT extensions. Newer Vulkan headers may
-  also define KHR versions; check when updating to the Vulkan 1.4 bindings.
+  The KHR extension promoted the EXT ones, and the pinned `ash` has bindings
+  for both.
 - [ ] **Support Android.** Planned in ADR 0003, on Adreno GPUs only,
       using Mesa's Turnip driver bundled with the app. It's waiting for
       Turnip to support `VK_EXT_shader_object`, `VK_EXT_descriptor_heap` and
