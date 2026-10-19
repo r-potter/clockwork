@@ -6,6 +6,9 @@ A small game engine written in Rust, rendering with Vulkan.
 
 - **Designs come first.** Every roadmap step starts as a design in [`docs/design/`](docs/design/README.md), which is reviewed and accepted before implementation starts. Cross-cutting decisions are ADRs in [`docs/decisions/`](docs/decisions/README.md). Follow the accepted designs and ADRs, and when something doesn't fit, say so and record it as a revision rather than silently diverging.
 - **Implementation is in slices, reviewed as small PRs.** A slice a design lists is usually split into several small, focused pull requests rather than one large one. Each PR covers a single concern, builds and passes the checks on its own, and is a few hundred lines at most, tests included. A slice's PRs form a stack: the first branch is cut from the latest `main`, and each later one from the branch before it, so they're reviewed and merged in order.
+- **History is linear.** PRs are merged by rebase, so every commit on a branch lands on `main` as written. Merge commits and squash merges are turned off, and a ruleset requires linear history on `main`. Each commit must make sense on its own, with a message that explains it:
+  - Address review comments with `git commit --fixup=<commit>`, so the reviewer sees exactly what changed. Once the PR is approved, fold the fixups in with `git rebase --autosquash origin/main` (no `-i` needed since Git 2.44), and push with `--force-with-lease`.
+  - When a PR in a stack is merged, GitHub deletes its branch and points the next PR at `main`. Rebase the next branch with `git rebase origin/main`, which drops the commits that were just merged, then check it still passes and push with `--force-with-lease`.
 - **Check before review.** Run `cargo xtask check`, and `cargo xtask check --gpu` for anything that touches the GPU. [`docs/testing.md`](docs/testing.md) describes the test tiers and how to write tests.
 - **Outstanding work** is tracked in [`TODO.md`](TODO.md).
 
