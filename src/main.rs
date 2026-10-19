@@ -1,16 +1,23 @@
 //! Clockwork application entry point.
 
+mod diagnostics;
 mod rhi;
+#[cfg(test)]
+mod test_support;
 
 use std::io::IsTerminal;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
+use diagnostics::{DiagnosticCounter, Session, SessionLayer, is_session_span};
 use rhi::{GraphicsApi, RenderHardwareInterface, WindowSize, WindowTarget};
 use tracing::level_filters::LevelFilter;
 use tracing::{info, trace};
-use tracing_subscriber::EnvFilter;
+use tracing_subscriber::filter::{FilterExt, filter_fn};
+use tracing_subscriber::layer::SubscriberExt;
+use tracing_subscriber::util::SubscriberInitExt;
+use tracing_subscriber::{EnvFilter, Layer};
 use winit::application::ApplicationHandler;
 use winit::dpi::PhysicalSize;
 use winit::event::WindowEvent;
@@ -27,16 +34,30 @@ const WINDOW_TITLE: &str = "Clockwork";
 fn main() -> Result<()> {
     // Log to stderr at `INFO` and above by default. Set `RUST_LOG` to change
     // this, e.g. `RUST_LOG=debug` or `RUST_LOG=clockwork::rhi::vulkan=trace`.
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            EnvFilter::builder()
-                .with_default_directive(LevelFilter::INFO.into())
-                .from_env_lossy(),
-        )
+    // The application has a single session, so its span is left out of the
+    // output rather than prefixing every line.
+    let fmt_filter = EnvFilter::builder()
+        .with_default_directive(LevelFilter::INFO.into())
+        .from_env_lossy()
+        .and(filter_fn(|metadata| !is_session_span(metadata)));
+    let fmt_layer = tracing_subscriber::fmt::layer()
         .with_writer(std::io::stderr)
         // Only colour the output when it is going to a terminal.
         .with_ansi(std::io::stderr().is_terminal())
+        .with_filter(fmt_filter);
+    // Counts warnings and errors whatever `RUST_LOG` says, since it has its
+    // own filter.
+    let counter = DiagnosticCounter::default();
+    tracing_subscriber::registry()
+        .with(SessionLayer::layer())
+        .with(fmt_layer)
+        .with(counter.layer())
         .init();
+
+    // Every event on this thread is attributed to the application's session,
+    // including those from the `log` crate.
+    let session = Session::new();
+    let _entered = session.span().enter();
 
     let event_loop = EventLoop::new().context("failed to create event loop")?;
     // Run the loop continuously rather than waiting for events, so that the
