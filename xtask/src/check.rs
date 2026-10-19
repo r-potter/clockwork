@@ -14,10 +14,10 @@ use std::path::Path;
 use anyhow::{Context, Result, bail};
 use xshell::Shell;
 
-use crate::prerequisites;
 use crate::slangc::Platform;
 use crate::virtual_displays::{self, VirtualDisplays};
 use crate::window_systems::{self, SmokeRun, WindowSystem};
+use crate::{lavapipe, prerequisites};
 
 /// What `cargo xtask check` was asked to check.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -30,6 +30,10 @@ pub struct Options {
     /// With `gpu`, on Linux: run the smoke runs on virtual displays, rather
     /// than the desktop session's.
     pub virtual_displays: bool,
+    /// With `gpu`, on Linux: run the GPU tests and smoke runs on the pinned
+    /// lavapipe alone, requiring the capabilities it has rather than all of
+    /// them.
+    pub lavapipe: bool,
 }
 
 impl Options {
@@ -40,19 +44,40 @@ impl Options {
 
     /// Checks that these options make sense on `platform`. The command line
     /// already rejects `--virtual-displays` without `--gpu`, or with
-    /// `--no-window`.
+    /// `--no-window`, and `--lavapipe` without `--gpu`.
     ///
     /// # Errors
     ///
     /// Returns an error for `--virtual-displays` on Windows, whose one window
-    /// system needs no display server.
+    /// system needs no display server, and for `--lavapipe` on Windows, where
+    /// it isn't built.
     pub fn validate(self, platform: Platform) -> Result<()> {
         if self.virtual_displays && platform != Platform::Linux {
             bail!("--virtual-displays is only for Linux, where Xvfb and Weston provide them");
         }
+        if self.lavapipe && platform != Platform::Linux {
+            bail!("--lavapipe is only for Linux, where `cargo xtask lavapipe` builds it");
+        }
         Ok(())
     }
+
+    /// The capabilities whose absence fails a GPU test, as
+    /// `CLOCKWORK_REQUIRED_CAPABILITIES` takes them: those lavapipe has with
+    /// `--lavapipe`, and otherwise all of them.
+    fn required_capabilities(self) -> String {
+        if self.lavapipe {
+            lavapipe::CAPABILITIES.join(",")
+        } else {
+            "all".to_owned()
+        }
+    }
 }
+
+/// The variables through which the Vulkan loader finds drivers. With
+/// `--lavapipe`, [`run`] sets the first to lavapipe's manifest, so that it's
+/// the only driver, and unsets the others, which would add drivers or be
+/// ignored.
+const DRIVER_VARIABLES: [&str; 3] = ["VK_DRIVER_FILES", "VK_ADD_DRIVER_FILES", "VK_ICD_FILENAMES"];
 
 /// The arguments to `cargo` for a smoke run: the application, in a window,
 /// for a fixed number of frames rather than a fixed time, failing on any
@@ -119,10 +144,13 @@ pub fn steps(
     display_env: &[(&'static str, String)],
 ) -> Vec<Step> {
     let tests = if options.gpu {
-        // Every tier, and every capability required, so that no T1 test is
-        // skipped on the machines that run this.
+        // Every tier, and every capability the device should have required,
+        // so that no T1 test is skipped on the machines that run this.
         Step {
-            env: vec![("CLOCKWORK_REQUIRED_CAPABILITIES", "all".to_owned())],
+            env: vec![(
+                "CLOCKWORK_REQUIRED_CAPABILITIES",
+                options.required_capabilities(),
+            )],
             ..Step::cargo("tests, including GPU tests", &["test", "--workspace"])
         }
     } else {
@@ -194,6 +222,23 @@ pub fn steps(
 pub fn run(root: &Path, options: Options) -> Result<()> {
     let platform = Platform::current();
     options.validate(platform)?;
+    // Set in this process, before anything else runs, so that the loader
+    // queries in the prerequisites check see lavapipe alone too, and every
+    // command inherits it. The caller's environment is unchanged.
+    let driver = if options.lavapipe {
+        let manifest = lavapipe::manifest(&root.join("target"))?;
+        // SAFETY: `xtask` is single-threaded, and has started no threads
+        // yet, so nothing can read the environment while it's changed.
+        unsafe {
+            std::env::set_var(DRIVER_VARIABLES[0], &manifest);
+            for variable in &DRIVER_VARIABLES[1..] {
+                std::env::remove_var(variable);
+            }
+        }
+        Some(manifest)
+    } else {
+        None
+    };
     // Started and decided first, so that a missing display fails at once,
     // not after the tests. The virtual displays are stopped when `displays`
     // is dropped, on return.
@@ -220,7 +265,7 @@ pub fn run(root: &Path, options: Options) -> Result<()> {
     let sh = Shell::new()?;
     sh.change_dir(root);
 
-    prerequisites::check(&sh, options.gpu)?;
+    prerequisites::check(&sh, options.gpu, driver.as_deref())?;
 
     let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
     for step in steps(options, &smoke_runs, &display_env) {
@@ -250,6 +295,7 @@ mod tests {
         gpu: true,
         no_window: false,
         virtual_displays: false,
+        lavapipe: false,
     };
 
     /// `--gpu --no-window`.
@@ -257,6 +303,13 @@ mod tests {
         gpu: true,
         no_window: true,
         virtual_displays: false,
+        lavapipe: false,
+    };
+
+    /// `--gpu --lavapipe`.
+    const GPU_LAVAPIPE: Options = Options {
+        lavapipe: true,
+        ..GPU
     };
 
     /// The smoke runs for a Linux desktop session, with both window systems.
@@ -454,6 +507,37 @@ mod tests {
         let without = steps_for(GPU);
         let count = with.len() - 2;
         assert_eq!(with[..count], without[..count]);
+    }
+
+    /// With `--lavapipe`, a GPU test fails for a missing capability that
+    /// lavapipe has, and skips for one it lacks, rather than failing for all
+    /// of them.
+    #[test]
+    fn lavapipe_requires_the_capabilities_it_has() {
+        let tests = step_for(GPU_LAVAPIPE, "tests, including GPU tests");
+        assert_eq!(
+            tests.env,
+            [(
+                "CLOCKWORK_REQUIRED_CAPABILITIES",
+                "descriptor-heap,device-address-commands,swapchain-maintenance".to_owned()
+            )]
+        );
+    }
+
+    /// `--lavapipe` changes only which capabilities are required: the steps
+    /// are the same, smoke runs included, since the driver is chosen by the
+    /// environment every step inherits.
+    #[test]
+    fn lavapipe_keeps_the_steps() {
+        let names = names_for(GPU_LAVAPIPE);
+        assert_eq!(names, names_for(GPU));
+    }
+
+    /// `--lavapipe` is for Linux only, since it's only built there.
+    #[test]
+    fn lavapipe_is_for_linux() {
+        assert!(GPU_LAVAPIPE.validate(Platform::Linux).is_ok());
+        assert!(GPU_LAVAPIPE.validate(Platform::Windows).is_err());
     }
 
     /// `--virtual-displays` is for Linux only.

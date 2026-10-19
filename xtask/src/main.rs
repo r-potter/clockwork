@@ -50,6 +50,11 @@ enum Command {
         /// rather than the desktop session's.
         #[arg(long, requires = "gpu", conflicts_with = "no_window")]
         virtual_displays: bool,
+        /// Linux, with --gpu: run the GPU tests and smoke runs on lavapipe,
+        /// built by `cargo xtask lavapipe`, as the only Vulkan driver,
+        /// requiring only the capabilities lavapipe has.
+        #[arg(long, requires = "gpu")]
+        lavapipe: bool,
     },
     /// Linux: build lavapipe, Mesa's CPU Vulkan driver, from the pinned
     /// commit, in target/lavapipe/. Does nothing if it's already built.
@@ -68,12 +73,14 @@ fn main() -> Result<()> {
             gpu,
             no_window,
             virtual_displays,
+            lavapipe,
         } => check::run(
             &workspace_root(),
             check::Options {
                 gpu,
                 no_window,
                 virtual_displays,
+                lavapipe,
             },
         ),
         Command::Lavapipe => lavapipe::build(&workspace_root()),
@@ -113,6 +120,7 @@ mod tests {
                 gpu: false,
                 no_window: false,
                 virtual_displays: false,
+                lavapipe: false,
             }
         );
     }
@@ -127,6 +135,7 @@ mod tests {
                 gpu: true,
                 no_window: true,
                 virtual_displays: false,
+                lavapipe: false,
             }
         );
     }
@@ -149,8 +158,38 @@ mod tests {
                 gpu: true,
                 no_window: false,
                 virtual_displays: true,
+                lavapipe: false,
             }
         );
+    }
+
+    /// CI's form: `--gpu --lavapipe --virtual-displays`.
+    #[test]
+    fn check_gpu_lavapipe_virtual_displays_parses() {
+        let cli = Cli::try_parse_from([
+            "xtask",
+            "check",
+            "--gpu",
+            "--lavapipe",
+            "--virtual-displays",
+        ])
+        .unwrap();
+        assert_eq!(
+            cli.command,
+            Command::Check {
+                gpu: true,
+                no_window: false,
+                virtual_displays: true,
+                lavapipe: true,
+            }
+        );
+    }
+
+    /// `--lavapipe` chooses the driver for the GPU tests, so it's an error
+    /// without `--gpu`.
+    #[test]
+    fn lavapipe_requires_gpu() {
+        assert!(Cli::try_parse_from(["xtask", "check", "--lavapipe"]).is_err());
     }
 
     /// `--virtual-displays` is only for smoke runs, so it's an error without
@@ -184,11 +223,11 @@ mod tests {
         assert!(Cli::try_parse_from(["xtask"]).is_err());
     }
 
-    /// Options from later slices, such as `--lavapipe`, must fail until
-    /// they exist, rather than run fewer checks than requested.
+    /// Unknown options, such as a misspelt one, are errors, rather than
+    /// running fewer checks than requested.
     #[test]
     fn unknown_options_are_errors() {
-        assert!(Cli::try_parse_from(["xtask", "check", "--gpu", "--lavapipe"]).is_err());
+        assert!(Cli::try_parse_from(["xtask", "check", "--gpu", "--lavapipes"]).is_err());
     }
 
     /// The workspace root holds the root `Cargo.toml` and this crate.

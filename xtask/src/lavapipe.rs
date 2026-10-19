@@ -57,6 +57,19 @@ pub const PIN: Pin = Pin {
     date: "2026-10-19",
 };
 
+/// The capabilities lavapipe at [`PIN`] has, as `CLOCKWORK_REQUIRED_CAPABILITIES`
+/// names them (see `Capability` in `src/rhi/vulkan/test_support.rs`). With
+/// `--lavapipe`, a GPU test needing one of these fails rather than skipping.
+///
+/// Every capability is either here or in the tests' list of those lavapipe
+/// lacks, which a test checks, so that one added to `Capability` can't
+/// quietly skip in CI.
+pub const CAPABILITIES: &[&str] = &[
+    "descriptor-heap",
+    "device-address-commands",
+    "swapchain-maintenance",
+];
+
 /// Mesa's repository.
 const REPOSITORY: &str = "https://gitlab.freedesktop.org/mesa/mesa.git";
 
@@ -262,6 +275,30 @@ fn check_prerequisites(sh: &Shell) -> Result<()> {
     Ok(())
 }
 
+/// Whether lavapipe at [`PIN`] is completely installed in `layout`, with the
+/// current options.
+fn is_built(layout: &Layout) -> bool {
+    fs::read_to_string(layout.stamp()).is_ok_and(|contents| contents == stamp_contents(PIN))
+}
+
+/// The ICD manifest of lavapipe at [`PIN`], built by [`build`] in the Cargo
+/// target directory `target_dir`, for `--lavapipe`.
+///
+/// # Errors
+///
+/// Returns an error, saying to run `cargo xtask lavapipe`, if this pin isn't
+/// built with the current options.
+pub fn manifest(target_dir: &Path) -> Result<PathBuf> {
+    let layout = Layout::new(target_dir, PIN);
+    if !is_built(&layout) {
+        bail!(
+            "lavapipe at Mesa {} isn't built. Run `cargo xtask lavapipe` first.",
+            PIN.commit
+        );
+    }
+    Ok(layout.manifest(std::env::consts::ARCH))
+}
+
 /// Builds lavapipe at [`PIN`] in the workspace at `root`, unless it's
 /// already built, and prints the path to its ICD manifest.
 ///
@@ -276,7 +313,7 @@ pub fn build(root: &Path) -> Result<()> {
     let layout = Layout::new(&root.join("target"), PIN);
     let manifest = layout.manifest(std::env::consts::ARCH);
     let stamp = stamp_contents(PIN);
-    if fs::read_to_string(layout.stamp()).is_ok_and(|contents| contents == stamp) {
+    if is_built(&layout) {
         eprintln!(
             "lavapipe at Mesa {} ({}) is already built: {}",
             PIN.commit,
@@ -435,6 +472,61 @@ mod tests {
         assert!(stamp.starts_with(PIN.commit), "{stamp}");
         for option in MESON_OPTIONS {
             assert!(stamp.lines().any(|line| line == *option), "{stamp}");
+        }
+    }
+
+    /// The capabilities lavapipe lacks, so tests needing them skip on it
+    /// ("Lavapipe" in design 0001).
+    const LACKS: &[&str] = &[
+        // Lavapipe has a single queue family.
+        "dedicated-compute-queue",
+        "dedicated-transfer-queue",
+        // Lavapipe doesn't support `VK_EXT_present_timing`.
+        "present-timing",
+    ];
+
+    /// The capability names in the engine's `Capability::name`, read from its
+    /// source, since `xtask` can't depend on the engine.
+    fn engine_capabilities() -> Vec<String> {
+        let path = PathBuf::from_iter([
+            crate::workspace_root(),
+            PathBuf::from_iter(["src", "rhi", "vulkan", "test_support.rs"]),
+        ]);
+        let source = fs::read_to_string(&path)
+            .unwrap_or_else(|err| panic!("failed to read {}: {err}", path.display()));
+        source
+            .lines()
+            .filter_map(|line| {
+                let (_, name) = line.trim().strip_prefix("Self::")?.split_once("=> \"")?;
+                Some(name.strip_suffix("\",")?.to_owned())
+            })
+            .collect()
+    }
+
+    /// Every engine capability is either one lavapipe has, and so required
+    /// under `--lavapipe`, or one it lacks, so that a new capability can't
+    /// quietly skip in CI. And no name is in both lists, or unknown to the
+    /// engine, which would fail every GPU test.
+    #[test]
+    fn every_capability_is_classified_for_lavapipe() {
+        let engine = engine_capabilities();
+        assert!(
+            engine.len() >= CAPABILITIES.len() + LACKS.len(),
+            "{engine:?}"
+        );
+        for name in &engine {
+            let has = CAPABILITIES.contains(&name.as_str());
+            let lacks = LACKS.contains(&name.as_str());
+            assert!(
+                has != lacks,
+                "{name} must be in exactly one of CAPABILITIES and LACKS"
+            );
+        }
+        for name in CAPABILITIES.iter().chain(LACKS) {
+            assert!(
+                engine.iter().any(|known| known == name),
+                "{name} is unknown"
+            );
         }
     }
 

@@ -68,6 +68,7 @@ Options:
 | `--gpu` | Run the GPU (T1) tests too, with `CLOCKWORK_REQUIRED_CAPABILITIES=all`: `cargo test --workspace` in place of step 5. Then the smoke runs. Needs a Vulkan 1.4 driver, the validation layer, and a display for each window system. |
 | `--no-window` | With `--gpu`: leave out the smoke runs, on purpose, for example over SSH. |
 | `--virtual-displays` | Linux, with `--gpu`: run the smoke runs on virtual displays, so they work with no desktop session (see "Virtual displays" below). |
+| `--lavapipe` | Linux, with `--gpu`: run the GPU tests and smoke runs on the pinned lavapipe alone, requiring only the capabilities it has (see "Lavapipe" below). This is how CI runs them. |
 
 Run `cargo xtask check --gpu` before asking for review on a machine with a GPU, in a desktop session, and say in the review which machine and window systems it passed on.
 
@@ -136,12 +137,28 @@ sudo dnf install git meson ninja-build pkgconf-pkg-config gcc gcc-c++ llvm-devel
   libXrandr-devel libxshmfence-devel wayland-devel wayland-protocols-devel
 ```
 
+#### Running the checks on it
+
+`cargo xtask check --gpu --lavapipe` runs the GPU tests and smoke runs on lavapipe, as CI does, so a lavapipe failure in CI reproduces with it on any Linux machine. Build lavapipe first: if the pinned build isn't there, the check fails at once, saying so. Add `--virtual-displays` to run the smoke runs with no desktop session, exactly as CI does.
+
+`xtask` points the Vulkan loader at lavapipe's manifest with `VK_DRIVER_FILES`, so it's the only driver, and unsets `VK_ADD_DRIVER_FILES` and `VK_ICD_FILENAMES`, which would add drivers or be ignored. It does this in its own environment, which every command it runs inherits, so the prerequisites check lists lavapipe alone too; your shell's environment is unchanged.
+
+`CLOCKWORK_REQUIRED_CAPABILITIES` becomes the capabilities lavapipe has, rather than `all`: `descriptor-heap`, `device-address-commands` and `swapchain-maintenance`. Tests needing the others skip on it, since it has one queue family and no present timing, so the hardware checks before review cover those. The list is `CAPABILITIES` in `xtask/src/lavapipe.rs`, and a test there fails if a capability added to `Capability` isn't listed either as one lavapipe has or as one it lacks.
+
+To run a single test on lavapipe, set the same variables yourself:
+
+```sh
+VK_DRIVER_FILES=$PWD/target/lavapipe/<commit>/install/share/vulkan/icd.d/lvp_icd.x86_64.json \
+  CLOCKWORK_REQUIRED_CAPABILITIES=descriptor-heap,device-address-commands,swapchain-maintenance \
+  cargo test <test name>
+```
+
 #### Moving the pin
 
 The pin is `PIN` in `xtask/src/lavapipe.rs`: a full commit hash, its date, and, in its documentation, why that commit was chosen. Move it like any other reviewed change, to pick up a fix, or a feature the engine starts to need:
 - Choose a commit on Mesa's `main` branch. Every merge to `main` has passed Mesa's own CI.
 - Once a Mesa release has `VK_EXT_descriptor_heap` and `VK_KHR_device_address_commands` on lavapipe (see lavapipe's entries in Mesa's `docs/features.txt`), pin that release's tagged commit instead, and say so in `PIN`'s documentation.
-- Run `cargo xtask lavapipe`, and check that the new build works before asking for review.
+- Run `cargo xtask lavapipe`, then `cargo xtask check --gpu --lavapipe`. If the new build gains a capability, add it to `CAPABILITIES`, and remove it from the test's list of those lavapipe lacks.
 
 `cargo xtask` is an alias (in `.cargo/config.toml`) for running the `xtask` crate, the repository's developer tooling. The repository is a Cargo workspace of the engine and `xtask`, with the engine as its only default member, so plain `cargo build`, `cargo run` and `cargo test` act on the engine alone.
 
@@ -339,7 +356,7 @@ A skipped test passes, but prints a banner to stderr, even when the test passes,
 
 Skips mustn't hide failures on the machines that have the capability. `CLOCKWORK_REQUIRED_CAPABILITIES` lists the capabilities whose absence fails a test rather than skipping it: `all`, or a comma-separated list of the names above. Unset, nothing is required, and every missing capability skips. An unknown name is an error, so that a typo can't turn a failure into a skip.
 
-`cargo xtask check --gpu` sets it to `all`, so on the reference machines a test needing a capability either runs or fails.
+`cargo xtask check --gpu` sets it to `all`, so on the reference machines a test needing a capability either runs or fails. With `--lavapipe`, it's the capabilities lavapipe has instead (see "Lavapipe").
 
 ## The application's options
 
