@@ -5,7 +5,7 @@ A small game engine written in Rust, rendering with Vulkan.
 ## How work is done
 
 - **Designs come first.** Every roadmap step starts as a design in [`docs/design/`](docs/design/README.md), which is reviewed and accepted before implementation starts. Cross-cutting decisions are ADRs in [`docs/decisions/`](docs/decisions/README.md). Follow the accepted designs and ADRs, and when something doesn't fit, say so and record it as a revision rather than silently diverging.
-- **Implementation is in slices.** Each slice a design lists gets its own branch, cut from the latest `main`, and its own pull request.
+- **Implementation is in slices, reviewed as small PRs.** A slice a design lists is usually split into several small, focused pull requests rather than one large one. Each PR covers a single concern, builds and passes the checks on its own, and is a few hundred lines at most, tests included. A slice's PRs form a stack: the first branch is cut from the latest `main`, and each later one from the branch before it, so they're reviewed and merged in order.
 - **Check before review.** Run `cargo xtask check`, and `cargo xtask check --gpu` for anything that touches the GPU. [`docs/testing.md`](docs/testing.md) describes the test tiers and how to write tests.
 - **Outstanding work** is tracked in [`TODO.md`](TODO.md).
 
