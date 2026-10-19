@@ -332,7 +332,7 @@ Tests can't take options, since `cargo test` can't pass any to them, so they rea
 
 ## CI
 
-`.github/workflows/ci.yml` runs on every push and pull request, on GitHub-hosted runners:
+`.github/workflows/ci.yml` runs on every pull request, whatever its base branch, and on every push to `main`. A branch with no pull request isn't checked: open a draft pull request to run CI on one. The jobs run on GitHub-hosted runners:
 
 | Job | Runner | Runs |
 |---|---|---|

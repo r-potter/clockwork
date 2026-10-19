@@ -32,7 +32,7 @@ Clockwork draws a hardcoded triangle through a Vulkan 1.4 backend (`src/rhi/vulk
 6. Vulkan 1.4 bindings, with the 1.4 features and the ADR 0002 extensions queried and reported. They aren't required yet: the RHI design makes them required as the code that uses them lands.
 7. Command-line options for the application: device, validation, and automated smoke runs that fail on any warning.
 8. One command, `cargo xtask check`, that runs every check a branch must pass, on Linux and Windows.
-9. CI on every push, with no GPU:
+9. CI on every pull request and every push to `main`, with no GPU:
    - build and T0 tests on Linux and Windows
    - on Linux, T1 tests and windowed smoke runs under X11 and Wayland, on a pinned lavapipe built from Mesa source
 10. Hardware checks before review: T1 tests and smoke runs on the RTX 3090 (Linux, X11 and Wayland) and on the Windows desktop with an RTX 4090 (Win32), for what lavapipe can't cover.
@@ -68,7 +68,7 @@ Clockwork draws a hardcoded triangle through a Vulkan 1.4 backend (`src/rhi/vulk
 | R14 | The application takes the command-line options `--device`, `--validation`, `--exit-after-frames` and `--fail-on-warnings`, documented in `--help` | T0 tests of option parsing, including invalid values |
 | R15 | The application counts warnings and errors from every subsystem and dependency, prints a summary at exit, and exits with an error under `--fail-on-warnings` if any were counted | T0 test of the counting layer; the smoke runs (R16) use `--fail-on-warnings` |
 | R16 | `cargo xtask check` runs every per-branch check on Linux and Windows. `--gpu` adds T1 tests and windowed smoke runs under every window system the platform supports. `--lavapipe` uses the pinned lavapipe. `--virtual-displays` (Linux) starts Xvfb and a headless Weston for the smoke runs. | Running each form on the branch that adds it, on both operating systems |
-| R17 | CI runs on every push: `cargo xtask check` on hosted Linux and Windows runners, and `cargo xtask check --gpu --lavapipe --virtual-displays` on a hosted Linux runner | Green runs of all three jobs on the slices that add them |
+| R17 | CI runs on every pull request and every push to `main`: `cargo xtask check` on hosted Linux and Windows runners, and `cargo xtask check --gpu --lavapipe --virtual-displays` on a hosted Linux runner | Green runs of all three jobs on the slices that add them |
 | R18 | `build.rs` finds `slangc` in the Vulkan SDK on Linux and Windows | Lookup order: `SLANGC`, then the SDK's binary directory (`$VULKAN_SDK/bin/slangc` on Linux, `%VULKAN_SDK%\Bin\slangc.exe` on Windows), then `PATH`. A pure function with T0 tests for both platforms on any machine. The build-failure message names all three. |
 | R19 | `docs/testing.md` describes every tool and rule the slices add, written in the slice that adds it | Each slice's review checks its section of the guide (see "Testing guide") |
 | R20 | `cargo xtask lavapipe` builds lavapipe from a pinned Mesa commit, reproducibly, and the T1 tests and smoke runs can use it | The pinned build reports `VK_EXT_descriptor_heap` and `VK_KHR_device_address_commands`, and `reference_device_reports_required_extensions` passes on it |
@@ -346,7 +346,7 @@ Developer tooling is an `xtask` crate: a small Rust binary in `xtask/`, run thro
 
 ### CI
 
-`.github/workflows/ci.yml` runs on every push and on pull requests, on GitHub-hosted runners only:
+`.github/workflows/ci.yml` runs on every pull request and every push to `main`, on GitHub-hosted runners only:
 
 | Job | Runner | Runs |
 |---|---|---|
@@ -673,3 +673,4 @@ None remain. See *Resolved in review* below.
 | 2026-10-19 | Revised during `foundations-cli`: the X11 smoke run also unsets `WAYLAND_SOCKET`, which makes winit choose Wayland too, and the Wayland smoke run unsets `DISPLAY`, so that each run can only use its own window system (see "Platforms"). |
 | 2026-10-19 | Revised during `foundations-ash-1.4`: `ash-window` is patched to the same commit as `ash`, rather than replaced with our own surface creation, the mitigation the risks named. `ash` `master` breaks `ash-window` 0.13.0 from crates.io, as feared, but `ash`'s repository has `ash-window` at the same version, updated for `master`'s API, so one more line in `[patch.crates-io]` keeps the crate. |
 | 2026-10-19 | Revised during `foundations-ash-1.4`: the test-only `Capability` list gains `SwapchainMaintenance` (`VK_KHR_swapchain_maintenance1`, optional in ADR 0002, like `PresentTiming`), so that a test of the swapchain's present-fence path can skip where it's missing and fail on the reference machines. Lavapipe's expected set, "everything except" three capabilities, now includes it. Whether the pinned lavapipe has it is checked in `foundations-lavapipe`, which leaves it out of the set if not. |
+| 2026-10-20 | Revised after `foundations-ash-1.4`: CI runs on every pull request and every push to `main`, rather than on every push and every pull request (goal 9, R17 and "CI"). Running on both checked each pull request's commits twice. Pull requests based on another branch, as later PRs in a stack are, still run. A branch with no pull request doesn't, so it needs a draft pull request to be checked. |

@@ -11,8 +11,14 @@
 
 name: CI
 
+# Every pull request, and pushes to `main`. Running on every push too would
+# check each pull request's commits twice, once for the push and once for
+# the pull request. A pull request based on another branch, as later PRs in a
+# stack are, still runs. A branch with no pull request doesn't; open one,
+# as a draft if it isn't ready, to run CI on it.
 on:
   push:
+    branches: [main]
   pull_request:
 
 permissions:
