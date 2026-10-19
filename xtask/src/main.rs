@@ -12,6 +12,11 @@ mod check;
 mod prerequisites;
 #[path = "../../build/slangc.rs"]
 mod slangc;
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "used by the smoke runs, in the next branch")
+)]
+mod window_systems;
 
 use std::path::{Path, PathBuf};
 
