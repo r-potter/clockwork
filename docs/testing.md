@@ -84,6 +84,81 @@ Later slices of design 0001 add T1 tooling (`cargo xtask check --gpu`, required 
 - **Fixture files go in `testdata/`,** next to the code that uses them.
 - **Fix a bug by writing a failing test first,** then the fix.
 
+## Warnings and errors fail tests
+
+Any warning or error that a test causes fails it, whichever subsystem or dependency logged it (R2, R3). This works through `tracing`: every event is *attributed* to a session, and each test has its own.
+
+### Logging levels
+
+Failing tests on warnings works only because the levels mean something definite. Log at:
+
+| Level | When | Examples |
+|---|---|---|
+| `ERROR` | An operation failed, or a bug was detected | A validation error; a failed shader compile in hot reload |
+| `WARN` | Something unexpected happened that someone should act on | A validation warning; a Lua script overrunning its budget |
+| `INFO` | Normal, notable events, including expected limitations | The selected device; an optional extension the device lacks |
+| `DEBUG`, `TRACE` | Detail for diagnosing problems | Per-frame timings; every barrier |
+
+Code that logs a normal condition at `WARN` is a bug. Fix it by changing the level, not by suppressing the message.
+
+### `TestSession`
+
+Every test that runs engine code starts with a `TestSession` (`src/diagnostics/capture.rs`):
+
+```rust
+use crate::diagnostics::capture::TestSession;
+
+#[test]
+fn resolves_paths() {
+    let _session = TestSession::new();
+    // ...code that should log nothing at WARN or above...
+} // `_session` is dropped, which fails the test if anything was
+```
+
+`TestSession::new` installs the test subscriber, once per test process, and enters a new session's span on the test's thread. When the session is dropped, at the end of the test, it panics, failing the test, if a warning or error was attributed to it unexpectedly, listing each one (the first 64, then a count). Name it `_session`, not `_`, which would drop it at once.
+
+Logs appear in a failing test's output, at `INFO` and above. Set `RUST_LOG` to see more, for example `RUST_LOG=debug cargo test resolves_paths`. `RUST_LOG` changes only what's printed: warnings and errors fail tests whatever it says.
+
+### Expected warnings
+
+A test of code that should warn declares the warning before the code that triggers it, with its level, its target (matched exactly), and a matcher for the rest:
+
+```rust
+let session = TestSession::new();
+session.expect(Level::WARN, "clockwork::import", |event| event.message.contains("case"));
+// ...resolve a path whose case doesn't match...
+```
+
+Each expectation is met by one event, so a warning that's expected twice is declared twice. An expected event that never arrives fails the test too, naming the line that declared it. The matcher gets a `CapturedEvent` (level, target, message ID and message). It runs on whichever thread logged the event, so it mustn't log, and a matcher that panics counts as not matching.
+
+### Rules
+
+- **Never install another subscriber** (`tracing::subscriber::set_default`, `with_default`, or a global one) in a test. It hides that thread's events from the capture layer, so its warnings pass silently. A test that needs to check what was logged uses `expect`. The only exceptions are `src/diagnostics.rs`'s own tests of the layers.
+- **Threads a test starts must enter the session's span,** or their events can't be attributed:
+
+  ```rust
+  let span = session.span().clone();
+  std::thread::spawn(move || {
+      let _entered = span.entered();
+      // ...
+  });
+  ```
+
+  Code called back from C on its own threads, such as the Vulkan debug callback, tags its events with an explicit `session` field (`session = id.as_u64()`) instead.
+- **Unattributed banners.** A warning or error from outside any session, or from a session whose `TestSession` has been dropped, can't fail a test. It's printed to stderr, even from passing tests, with a banner:
+
+  ```text
+  === clockwork: unattributed WARN outside any session ===
+    WARN clockwork::rhi::vulkan: ...
+  ```
+
+  A banner means some test isn't in a session, or a thread didn't enter the span. Find it and fix it.
+- **Suppression.** A message that's harmless and can't be fixed here, such as a false positive in the validation layer, can be suppressed: add an entry to `SUPPRESSED` in `src/diagnostics.rs`, with the message's target, its message ID (for validation, the VUID), and a reason, linking an upstream issue where there is one. A test checks that every entry has a reason. Suppressed messages are still logged at their level. Best-practices validation messages (IDs beginning `BestPractices-`) are only logged, never counted.
+
+### How it works
+
+`src/diagnostics.rs` defines sessions and the layers. A `Session` has a process-unique `SessionId`, and a span named `session` with the ID in a `session` field. An event is attributed to its own `session` field if it has one, otherwise to the nearest enclosing session span, otherwise to nothing. The test subscriber has three layers, each with its own filter: `SessionLayer`, which records each session span's ID; a fmt layer, filtered by `RUST_LOG`; and `TestCapture`, which takes every warning and error and routes it to its session's `TestSession`. The application's subscriber is the same, except that a `DiagnosticCounter` counts warnings and errors in place of `TestCapture`.
+
 ## CI
 
 `.github/workflows/ci.yml` runs on every push and pull request, on GitHub-hosted runners:
