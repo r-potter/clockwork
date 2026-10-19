@@ -321,6 +321,7 @@ dependencies = [
  "anyhow",
  "ash",
  "ash-window",
+ "clap",
  "glam",
  "raw-window-handle",
  "tracing",

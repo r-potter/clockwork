@@ -253,6 +253,24 @@ Skips mustn't hide failures on the machines that have the capability. `CLOCKWORK
 
 `cargo xtask check --gpu` sets it to `all`, so on the reference machines a test needing a capability either runs or fails.
 
+## The application's options
+
+The application takes command-line options (R14), listed by `cargo run -- --help`:
+
+| Option | Effect | Default |
+|---|---|---|
+| `--device <SUBSTRING>` | Only consider devices whose names contain it, ignoring case | The best device |
+| `--validation <FEATURES>` | `off`, or a comma-separated list of the features in "`CLOCKWORK_VALIDATION`" above. Used if the validation layer is available; otherwise a warning is logged and the application runs without it. | `sync` in debug builds, `off` in release builds |
+| `--exit-after-frames <N>` | Exit cleanly after rendering N frames, at least 1 | Run until the window is closed |
+
+Tests can't take options, since `cargo test` can't pass any to them, so they read environment variables instead. The engine itself never reads the environment: each variable has an option to match, parsed by the same function, so the two can't drift apart.
+
+| Test variable | Application option | Differences |
+|---|---|---|
+| `CLOCKWORK_DEVICE` | `--device` | None |
+| `CLOCKWORK_VALIDATION` | `--validation` | Tests reject `off`, and require validation, where the application only prefers it |
+| `CLOCKWORK_REQUIRED_CAPABILITIES` | None | Only tests skip on missing capabilities |
+
 ## CI
 
 `.github/workflows/ci.yml` runs on every push and pull request, on GitHub-hosted runners:
