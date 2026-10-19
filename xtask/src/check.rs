@@ -11,11 +11,12 @@
 
 use std::path::Path;
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use xshell::Shell;
 
 use crate::prerequisites;
 use crate::slangc::Platform;
+use crate::virtual_displays::{self, VirtualDisplays};
 use crate::window_systems::{self, SmokeRun, WindowSystem};
 
 /// What `cargo xtask check` was asked to check.
@@ -26,12 +27,30 @@ pub struct Options {
     pub gpu: bool,
     /// With `gpu`, leave out the windowed smoke runs, on purpose.
     pub no_window: bool,
+    /// With `gpu`, on Linux: run the smoke runs on virtual displays, rather
+    /// than the desktop session's.
+    pub virtual_displays: bool,
 }
 
 impl Options {
     /// Whether these options ask for the smoke runs.
     fn smoke_runs(self) -> bool {
         self.gpu && !self.no_window
+    }
+
+    /// Checks that these options make sense on `platform`. The command line
+    /// already rejects `--virtual-displays` without `--gpu`, or with
+    /// `--no-window`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for `--virtual-displays` on Windows, whose one window
+    /// system needs no display server.
+    pub fn validate(self, platform: Platform) -> Result<()> {
+        if self.virtual_displays && platform != Platform::Linux {
+            bail!("--virtual-displays is only for Linux, where Xvfb and Weston provide them");
+        }
+        Ok(())
     }
 }
 
@@ -54,7 +73,7 @@ pub struct Step {
     /// The arguments to `cargo`.
     pub args: Vec<&'static str>,
     /// Environment variables set for this command only.
-    pub env: Vec<(&'static str, &'static str)>,
+    pub env: Vec<(&'static str, String)>,
     /// Environment variables unset for this command only.
     pub unset: Vec<&'static str>,
 }
@@ -70,14 +89,20 @@ impl Step {
         }
     }
 
-    /// The step for `run`: the application under its window system.
-    fn smoke_run(run: &SmokeRun) -> Self {
+    /// The step for `run`: the application under its window system, with
+    /// `display_env` set, except for the variables `run` unsets.
+    fn smoke_run(run: &SmokeRun, display_env: &[(&'static str, String)]) -> Self {
         let name = match run.window_system {
             WindowSystem::Win32 => "smoke run under Win32",
             WindowSystem::Wayland => "smoke run under Wayland",
             WindowSystem::X11 => "smoke run under X11",
         };
         Self {
+            env: display_env
+                .iter()
+                .filter(|(key, _)| !run.unset.contains(key))
+                .cloned()
+                .collect(),
             unset: run.unset.to_vec(),
             ..Self::cargo(name, &SMOKE_RUN_ARGS)
         }
@@ -85,13 +110,19 @@ impl Step {
 }
 
 /// The commands `cargo xtask check` runs after the prerequisites check, in
-/// order. `smoke_runs` are added after the tests, if `options` asks for them.
-pub fn steps(options: Options, smoke_runs: &[SmokeRun]) -> Vec<Step> {
+/// order. `smoke_runs` are added after the tests, if `options` asks for them,
+/// with `display_env` set: the virtual displays' variables, if there are
+/// any.
+pub fn steps(
+    options: Options,
+    smoke_runs: &[SmokeRun],
+    display_env: &[(&'static str, String)],
+) -> Vec<Step> {
     let tests = if options.gpu {
         // Every tier, and every capability required, so that no T1 test is
         // skipped on the machines that run this.
         Step {
-            env: vec![("CLOCKWORK_REQUIRED_CAPABILITIES", "all")],
+            env: vec![("CLOCKWORK_REQUIRED_CAPABILITIES", "all".to_owned())],
             ..Step::cargo("tests, including GPU tests", &["test", "--workspace"])
         }
     } else {
@@ -129,7 +160,7 @@ pub fn steps(options: Options, smoke_runs: &[SmokeRun]) -> Vec<Step> {
         ),
         Step {
             // `-D warnings` makes broken intra-doc links fail the check.
-            env: vec![("RUSTDOCFLAGS", "-D warnings")],
+            env: vec![("RUSTDOCFLAGS", "-D warnings".to_owned())],
             ..Step::cargo(
                 "rustdoc",
                 &[
@@ -143,7 +174,11 @@ pub fn steps(options: Options, smoke_runs: &[SmokeRun]) -> Vec<Step> {
         tests,
     ];
     if options.smoke_runs() {
-        steps.extend(smoke_runs.iter().map(Step::smoke_run));
+        steps.extend(
+            smoke_runs
+                .iter()
+                .map(|run| Step::smoke_run(run, display_env)),
+        );
     }
     steps
 }
@@ -152,14 +187,32 @@ pub fn steps(options: Options, smoke_runs: &[SmokeRun]) -> Vec<Step> {
 ///
 /// # Errors
 ///
-/// Returns an error if a window system has no display for its smoke run, if
-/// a prerequisite is missing, or if any check fails, naming the check.
+/// Returns an error if the options don't apply to this platform, if the
+/// virtual displays don't start, if a window system has no display for its
+/// smoke run, if a prerequisite is missing, or if any check fails, naming the
+/// check.
 pub fn run(root: &Path, options: Options) -> Result<()> {
-    // Decided first, so that a missing display fails at once, not after the
-    // tests.
+    let platform = Platform::current();
+    options.validate(platform)?;
+    // Started and decided first, so that a missing display fails at once,
+    // not after the tests. The virtual displays are stopped when `displays`
+    // is dropped, on return.
+    let displays = if options.virtual_displays {
+        Some(VirtualDisplays::start(&root.join("target"))?)
+    } else {
+        None
+    };
+    let display_env = displays
+        .as_ref()
+        .map(VirtualDisplays::env)
+        .unwrap_or_default();
     let smoke_runs = if options.smoke_runs() {
-        window_systems::smoke_runs(Platform::current(), |name| {
-            std::env::var_os(name).is_some_and(|value| !value.is_empty())
+        window_systems::smoke_runs(platform, |name| {
+            if displays.is_some() {
+                virtual_displays::is_set_in(&display_env, name)
+            } else {
+                std::env::var_os(name).is_some_and(|value| !value.is_empty())
+            }
         })?
     } else {
         Vec::new()
@@ -170,7 +223,7 @@ pub fn run(root: &Path, options: Options) -> Result<()> {
     prerequisites::check(&sh, options.gpu)?;
 
     let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
-    for step in steps(options, &smoke_runs) {
+    for step in steps(options, &smoke_runs, &display_env) {
         eprintln!("\n==> {}", step.name);
         let mut cmd = sh.cmd(&cargo).args(&step.args);
         for (key, value) in &step.env {
@@ -196,12 +249,14 @@ mod tests {
     const GPU: Options = Options {
         gpu: true,
         no_window: false,
+        virtual_displays: false,
     };
 
     /// `--gpu --no-window`.
     const GPU_NO_WINDOW: Options = Options {
         gpu: true,
         no_window: true,
+        virtual_displays: false,
     };
 
     /// The smoke runs for a Linux desktop session, with both window systems.
@@ -211,7 +266,7 @@ mod tests {
 
     /// The steps for `options`, on a Linux desktop.
     fn steps_for(options: Options) -> Vec<Step> {
-        steps(options, &linux_smoke_runs())
+        steps(options, &linux_smoke_runs(), &[])
     }
 
     /// The names of the steps for `options`, on a Linux desktop.
@@ -267,7 +322,7 @@ mod tests {
     fn rustdoc_denies_warnings_on_private_items() {
         let doc = step("rustdoc");
         assert!(doc.args.contains(&"--document-private-items"));
-        assert_eq!(doc.env, [("RUSTDOCFLAGS", "-D warnings")]);
+        assert_eq!(doc.env, [("RUSTDOCFLAGS", "-D warnings".to_owned())]);
     }
 
     /// The test step skips T1 tests, which need a GPU, by their module name.
@@ -286,7 +341,10 @@ mod tests {
         assert!(!names.contains(&"tests without a GPU"), "{names:?}");
         let tests = step_for(GPU_NO_WINDOW, "tests, including GPU tests");
         assert_eq!(tests.args, ["test", "--workspace"]);
-        assert_eq!(tests.env, [("CLOCKWORK_REQUIRED_CAPABILITIES", "all")]);
+        assert_eq!(
+            tests.env,
+            [("CLOCKWORK_REQUIRED_CAPABILITIES", "all".to_owned())]
+        );
     }
 
     /// `--gpu --no-window` changes only the test step: the other checks are
@@ -337,7 +395,10 @@ mod tests {
     #[test]
     fn windows_smoke_runs_under_win32() {
         let runs = window_systems::smoke_runs(Platform::Windows, |_| false).unwrap();
-        let names: Vec<_> = steps(GPU, &runs).iter().map(|step| step.name).collect();
+        let names: Vec<_> = steps(GPU, &runs, &[])
+            .iter()
+            .map(|step| step.name)
+            .collect();
         assert_eq!(names.last(), Some(&"smoke run under Win32"));
         assert_eq!(
             names.iter().filter(|name| name.contains("smoke")).count(),
@@ -356,5 +417,54 @@ mod tests {
                 "{options:?}: {names:?}"
             );
         }
+    }
+
+    /// Variables like those [`VirtualDisplays::env`] returns.
+    fn virtual_display_env() -> Vec<(&'static str, String)> {
+        vec![
+            ("DISPLAY", ":99".to_owned()),
+            ("WAYLAND_DISPLAY", "clockwork-wayland-42".to_owned()),
+            ("XDG_RUNTIME_DIR", "runtime".to_owned()),
+        ]
+    }
+
+    /// Each smoke run gets the virtual displays' variables, except those it
+    /// unsets to choose its window system.
+    #[test]
+    fn smoke_runs_use_the_virtual_displays() {
+        let steps = steps(GPU, &linux_smoke_runs(), &virtual_display_env());
+        let env_of = |name| {
+            let step = steps.iter().find(|step| step.name == name).unwrap();
+            step.env.iter().map(|(key, _)| *key).collect::<Vec<_>>()
+        };
+        assert_eq!(
+            env_of("smoke run under Wayland"),
+            ["WAYLAND_DISPLAY", "XDG_RUNTIME_DIR"]
+        );
+        assert_eq!(
+            env_of("smoke run under X11"),
+            ["DISPLAY", "XDG_RUNTIME_DIR"]
+        );
+    }
+
+    /// The virtual displays' variables are for the smoke runs only.
+    #[test]
+    fn other_steps_dont_use_the_virtual_displays() {
+        let with = steps(GPU, &linux_smoke_runs(), &virtual_display_env());
+        let without = steps_for(GPU);
+        let count = with.len() - 2;
+        assert_eq!(with[..count], without[..count]);
+    }
+
+    /// `--virtual-displays` is for Linux only.
+    #[test]
+    fn virtual_displays_are_for_linux() {
+        let options = Options {
+            virtual_displays: true,
+            ..GPU
+        };
+        assert!(options.validate(Platform::Linux).is_ok());
+        assert!(options.validate(Platform::Windows).is_err());
+        assert!(GPU.validate(Platform::Windows).is_ok());
     }
 }
