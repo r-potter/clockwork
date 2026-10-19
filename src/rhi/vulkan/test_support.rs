@@ -138,10 +138,6 @@ impl VulkanTestBackend {
     /// # Panics
     ///
     /// Panics if the device lacks `capability` and it's required.
-    #[expect(
-        dead_code,
-        reason = "no T1 test needs a capability until foundations-ash-1.4's reference_device_reports_required_extensions"
-    )]
     pub fn has(&self, capability: Capability) -> bool {
         let device = &self.rhi.physical_device;
         let supported = capability.is_supported_by(device);
@@ -178,10 +174,6 @@ macro_rules! require_capabilities {
         }
     };
 }
-#[expect(
-    unused_imports,
-    reason = "no T1 test needs a capability until foundations-ash-1.4's reference_device_reports_required_extensions"
-)]
 pub(crate) use require_capabilities;
 
 #[cfg(test)]

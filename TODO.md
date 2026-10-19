@@ -138,15 +138,13 @@ Outstanding tasks and future work.
 
 ## Testing
 
-- [ ] **Run a T1 test that needs a capability.** `require_capabilities!`
-      and `VulkanTestBackend::has` (`src/rhi/vulkan/test_support.rs`) have
-      T0 tests, but no T1 test needs a capability yet, so they carry
-      `#[expect(dead_code)]`/`#[expect(unused_imports)]`. Remove those with
-      the first one, `reference_device_reports_required_extensions` in
-      `foundations-ash-1.4`. The RTX 4090's driver (610.88) has
-      `VK_EXT_descriptor_heap` and `VK_EXT_present_timing` but not
-      `VK_KHR_device_address_commands`, so that test will fail on the Windows
-      machine under `cargo xtask check --gpu` until its driver has it.
+- [x] **Run a T1 test that needs a capability.** Done in the
+      `foundations-ash-1.4` slice of design 0001:
+      `reference_device_reports_required_extensions` in
+      `src/rhi/vulkan/gpu_tests.rs` uses `require_capabilities!`, so the
+      `#[expect]` attributes on it and `VulkanTestBackend::has` are gone. It
+      passes on the RTX 4090 from driver 617.42, the first checked that has
+      `VK_KHR_device_address_commands`.
 
 - [x] **Make the unit tests work without a Vulkan driver.** Done in the
       `foundations-validation` slice of design 0001: every test that creates

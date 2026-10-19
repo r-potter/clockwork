@@ -1,15 +1,16 @@
-//! T1 tests of the Vulkan backend's validation: that the validation layer's
-//! messages reach the test that caused them (R5), and that synchronization
-//! validation is on (R6).
+//! T1 tests of the Vulkan backend: that the validation layer's messages
+//! reach the test that caused them (R5), that synchronization validation is
+//! on (R6), and that the device's Vulkan 1.4 and extension features are
+//! queried (R12).
 //!
-//! Each test makes a mistake on purpose, and declares the message it expects
+//! Each validation test makes a mistake on purpose, and declares the message it expects
 //! by its ID, so the test fails if the message never arrives, which is what
 //! would happen if validation were off or its messages were lost.
 
 use ash::vk;
 use tracing::Level;
 
-use super::test_support::VulkanTestBackend;
+use super::test_support::{Capability, VulkanTestBackend, require_capabilities};
 use crate::diagnostics::VALIDATION_TARGET;
 use crate::diagnostics::capture::TestSession;
 
@@ -184,4 +185,30 @@ fn sync_hazards_are_reported() {
     }
     // SAFETY: the command buffer is recording.
     unsafe { device.end_command_buffer(command_buffer) }.unwrap();
+}
+
+/// The device has the extensions ADR 0002 requires, with their features,
+/// and the Vulkan 1.4 and extension structures were queried (R12).
+///
+/// Device selection doesn't require these extensions yet, so this test is
+/// what fails on a reference device that lacks them:
+/// `cargo xtask check --gpu` requires every capability. Elsewhere, it's
+/// skipped.
+#[test]
+fn reference_device_reports_required_extensions() {
+    let session = TestSession::new();
+    let backend = VulkanTestBackend::headless(&session);
+    require_capabilities!(
+        backend,
+        Capability::DescriptorHeap,
+        Capability::DeviceAddressCommands,
+    );
+
+    let device = &backend.physical_device;
+    // Every Vulkan 1.4 device supports `maintenance5`, so it's only unset if
+    // the 1.4 features weren't queried.
+    assert_eq!(device.features.vulkan14.maintenance5, vk::TRUE);
+    // Every descriptor heap device has descriptors of some size, so it's only
+    // zero if the extension's properties weren't queried.
+    assert!(device.properties.descriptor_heap.buffer_descriptor_size > 0);
 }
