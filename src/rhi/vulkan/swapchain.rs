@@ -50,16 +50,22 @@ const PREFERRED_COMPOSITE_ALPHA: &[vk::CompositeAlphaFlagsKHR] = &[
 pub struct Swapchain {
     /// Kept to destroy the image views and semaphores.
     device: ash::Device,
+    /// The `VK_KHR_swapchain` functions for the device.
     swapchain_fn: khr::swapchain::Device,
+    /// The swapchain, created with `swapchain_fn`.
     swapchain: vk::SwapchainKHR,
+    /// The swapchain's images, owned by the swapchain.
     images: Vec<vk::Image>,
+    /// A view of each image in `images`, at the same index.
     image_views: Vec<vk::ImageView>,
     /// Signalled when rendering to each image has finished, and waited on to
     /// present it. Indexed by image rather than by frame in flight: a present
     /// may still be waiting on its semaphore after the frame's fence has
     /// signalled, but not once the same image has been acquired again.
     render_finished: Vec<vk::Semaphore>,
+    /// The images' format and colour space.
     format: vk::SurfaceFormatKHR,
+    /// The images' size, in pixels.
     extent: vk::Extent2D,
     /// The window size the swapchain was created for. May differ from
     /// `extent`, as some surfaces choose their own size.

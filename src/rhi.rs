@@ -40,7 +40,9 @@ impl<T: HasDisplayHandle + HasWindowHandle + ?Sized> Window for T {}
 /// The size of a window's drawable area, in physical pixels.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct WindowSize {
+    /// The width, in physical pixels.
     pub width: u32,
+    /// The height, in physical pixels.
     pub height: u32,
 }
 
@@ -49,7 +51,9 @@ pub struct WindowSize {
 /// The size is needed because some window systems (such as Wayland) leave the
 /// size of the rendered images to the application.
 pub struct WindowTarget {
+    /// The window, which the backend keeps alive while it renders to it.
     pub window: Arc<dyn Window>,
+    /// The window's drawable size when the target was made.
     pub size: WindowSize,
 }
 
@@ -145,18 +149,32 @@ pub fn create(
 
 #[cfg(test)]
 mod tests {
+    //! T0 checks of this module, which need no GPU.
+
     use super::*;
 
     /// Every supported graphics API.
-    const ALL_GRAPHICS_APIS: &[GraphicsApi] = &[GraphicsApi::Vulkan];
+    pub(super) const ALL_GRAPHICS_APIS: &[GraphicsApi] = &[GraphicsApi::Vulkan];
 
     // Fails to compile when a variant is added to `GraphicsApi`, as a reminder
     // to add it to `ALL_GRAPHICS_APIS`.
     const _: () = match GraphicsApi::Vulkan {
         GraphicsApi::Vulkan => (),
     };
+}
 
-    /// Runs headless, so it does not need a display.
+#[cfg(test)]
+mod gpu_tests {
+    //! T1 tests of creating backends. They create real graphics API
+    //! instances, so they need a driver, and `cargo xtask check` skips them by
+    //! this module's name. `foundations-validation` (design 0001) moves them
+    //! to `src/rhi/gpu_tests.rs`.
+
+    use super::tests::ALL_GRAPHICS_APIS;
+    use super::*;
+
+    /// Every graphics API's backend can be created headless, so it needs no
+    /// display, and reports itself as headless and not suspended.
     #[test]
     fn create_succeeds_for_every_graphics_api() {
         for &api in ALL_GRAPHICS_APIS {
@@ -188,6 +206,8 @@ mod tests {
         }
     }
 
+    /// A headless backend has no window to suspend, resize or resume, so it
+    /// ignores the first two and rejects the third, staying headless.
     #[test]
     fn headless_backends_ignore_suspend_and_resize_and_reject_resume() {
         let size = WindowSize {

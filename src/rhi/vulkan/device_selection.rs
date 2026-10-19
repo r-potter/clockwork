@@ -22,6 +22,7 @@ use super::surface::SurfaceSupport;
 
 /// A device being considered for selection.
 pub struct Candidate {
+    /// The device, with the properties and features selection compares.
     pub device: PhysicalDevice,
     /// How the device can present to the window's surface, or `None` when
     /// headless.
@@ -30,13 +31,16 @@ pub struct Candidate {
 
 /// The selected device, and the queue families to use on it.
 pub struct Selection {
+    /// The device that met every requirement and compared best.
     pub device: PhysicalDevice,
+    /// The queue families to create the logical device's queues from.
     pub queue_families: QueueFamilies,
 }
 
 /// Indices of the queue families to use on a device.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct QueueFamilies {
+    /// Supports graphics operations.
     pub graphics: u32,
     /// Can present to the window's surface. `None` when headless. May be the
     /// same family as `graphics`.
@@ -47,6 +51,7 @@ pub struct QueueFamilies {
 struct Requirement {
     /// Describes what is required, for logging when a device fails it.
     description: &'static str,
+    /// Returns whether the candidate meets the requirement.
     is_met: fn(&Candidate) -> bool,
 }
 

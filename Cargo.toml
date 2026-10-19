@@ -3,6 +3,9 @@ name = "clockwork"
 version = "0.1.0"
 edition = "2024"
 
+[lints]
+workspace = true
+
 [dependencies]
 anyhow = "1.0.104"
 ash = "0.38.0"
@@ -12,3 +15,23 @@ raw-window-handle = "0.6"
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 winit = "0.30.13"
+
+# The engine is the root package and the only default member, so plain
+# `cargo build`, `run` and `test` act on it alone (ADR 0001). `xtask` holds the
+# developer tooling, run as `cargo xtask` (see `.cargo/config.toml`).
+[workspace]
+members = [".", "xtask"]
+default-members = ["."]
+
+# Lints for every crate in the workspace (R13 in design 0001). `cargo xtask
+# check` runs clippy with `-D warnings`, so each of these fails the check.
+[workspace.lints.rust]
+# Already the 2024 edition's default, made explicit.
+unsafe_op_in_unsafe_fn = "warn"
+
+[workspace.lints.clippy]
+# Every `unsafe` block needs a `// SAFETY:` comment saying why it is sound.
+undocumented_unsafe_blocks = "warn"
+# Every item is documented, including private ones, struct fields, enum
+# variants, test modules and test helpers.
+missing_docs_in_private_items = "warn"

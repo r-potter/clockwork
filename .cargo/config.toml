@@ -1,0 +1,4 @@
+[alias]
+# Developer tooling: `cargo xtask check` runs every check a branch must pass.
+# See `docs/testing.md`.
+xtask = "run --package xtask --"
