@@ -237,6 +237,17 @@ pub const SUPPRESSED: &[Suppression] = &[
                  and under minimal window managers. It only means that font settings changed \
                  while the application runs aren't picked up, which the engine doesn't use.",
     },
+    // Logged by `sctk-adwaita` 0.10, which draws winit's window decorations
+    // on Wayland, through `log`, in `config::prefer_dark`.
+    Suppression {
+        target: "sctk_adwaita::config",
+        message: MessageMatch::Prefix("XDG Settings Portal did not return response in time"),
+        reason: "sctk-adwaita asks the XDG Settings Portal, through `dbus-send`, whether the \
+                 window decorations should be dark, and logs an error whenever `dbus-send` is \
+                 installed but nothing answers. That's normal with no portal running, as in CI's \
+                 headless Weston and on minimal desktops. The decorations are then light, which \
+                 is harmless.",
+    },
 ];
 
 /// The target `event` is classified and reported by: its own, or, for a
@@ -822,6 +833,22 @@ mod tests {
                 "winit::platform_impl::linux::x11::xdisplay",
                 None,
                 "error setting XSETTINGS; Xft options won't reload automatically",
+            ),
+            Class::Suppressed,
+        );
+    }
+
+    /// sctk-adwaita's error when no XDG Settings Portal answers, as in CI's
+    /// headless Weston, is suppressed, exactly as sctk-adwaita 0.10 logs it.
+    #[test]
+    fn sctk_adwaitas_missing_portal_error_is_suppressed() {
+        assert_eq!(
+            classify(
+                Level::ERROR,
+                "sctk_adwaita::config",
+                None,
+                "XDG Settings Portal did not return response in time: timeout: 100ms, key: \
+                 color-scheme",
             ),
             Class::Suppressed,
         );
