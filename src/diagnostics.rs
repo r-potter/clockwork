@@ -226,6 +226,16 @@ pub const SUPPRESSED: &[Suppression] = &[
                  still works, and uninstalling or disabling it would stop OBS from capturing \
                  the engine.",
     },
+    // Logged by `winit` 0.30 through `tracing` when it connects to an X
+    // server, in `XConnection::new`.
+    Suppression {
+        target: "winit::platform_impl::linux::x11::xdisplay",
+        message: MessageMatch::Prefix("error setting XSETTINGS; Xft options won't reload"),
+        reason: "winit warns whenever no XSETTINGS manager owns the screen's selection, which \
+                 is normal on a bare X server such as Xvfb, which the smoke runs use in CI, \
+                 and under minimal window managers. It only means that font settings changed \
+                 while the application runs aren't picked up, which the engine doesn't use.",
+    },
 ];
 
 /// Classifies an event by its level, target, message ID and message. Pure.
@@ -786,6 +796,21 @@ mod tests {
                 TEST_SUPPRESSED
             ),
             Class::Counted,
+        );
+    }
+
+    /// winit's warning when there's no XSETTINGS manager, as on the Xvfb the
+    /// smoke runs use in CI, is suppressed, exactly as winit 0.30 logs it.
+    #[test]
+    fn winits_missing_xsettings_warning_is_suppressed() {
+        assert_eq!(
+            classify(
+                Level::WARN,
+                "winit::platform_impl::linux::x11::xdisplay",
+                None,
+                "error setting XSETTINGS; Xft options won't reload automatically",
+            ),
+            Class::Suppressed,
         );
     }
 
