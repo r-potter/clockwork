@@ -88,7 +88,7 @@ Later designs add the other tiers design 0001 lists.
 - **Name a test for the behaviour it checks,** as a sentence about the code: `rejects_devices_without_graphics`, `linux_sdk_comes_before_path`. Not `test_select_3`.
 - **One behaviour per test,** so that a failure names what broke. Several assertions are fine if they check the same behaviour.
 - **Document each test**: what it checks, and why it matters, if that isn't obvious.
-- **Keep logic pure where you can,** taking its inputs (the platform, environment variables, a file probe, device properties) as parameters, so that it's T0 and every platform's behaviour is tested on any machine (ADR 0003). `build/slangc.rs` is an example.
+- **Keep logic pure where you can,** taking its inputs (the platform, environment variables, a file probe, device properties) as parameters, so that it's T0 and every platform's behaviour is tested on any machine (ADR 0003). `build/slangc.rs` and `xtask/src/window_systems.rs` are examples: the Linux window systems are tested on Windows, and Win32 on Linux.
 - **Build paths with `Path`,** never by joining strings, and compare `Path` values, not strings, so tests pass on both operating systems.
 - **Fixture files go in `testdata/`,** next to the code that uses them.
 - **Fix a bug by writing a failing test first,** then the fix.
