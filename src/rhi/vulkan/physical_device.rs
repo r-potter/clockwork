@@ -34,6 +34,16 @@ pub struct PhysicalDevice {
     pub extensions: Vec<vk::ExtensionProperties>,
 }
 
+// `PhysicalDevice` must be `Send` and `Sync`, so that the device design 0002
+// shares between threads can hold it ("Threading"). It gets both from its
+// fields: `ash` declares its structures `Send` and `Sync`, despite their
+// `p_next` pointers. This fails to compile if a change loses either.
+const _: () = {
+    /// Compiles only for types that are `Send` and `Sync`.
+    const fn assert_send_sync<T: Send + Sync>() {}
+    assert_send_sync::<PhysicalDevice>();
+};
+
 /// Device properties, including limits, grouped by the Vulkan version or
 /// extension that introduced them.
 ///
