@@ -20,9 +20,9 @@ Outstanding tasks and future work.
       only the chosen device.
 - [ ] **Extend device selection as the renderer grows.** Add entries to
       `REQUIREMENTS` for the features, limits and extensions the renderer
-      comes to depend on, and refine `compare` if needed. Remove the
-      `#[expect(dead_code)]` attributes in `src/rhi/vulkan/physical_device.rs`
-      as fields come into use.
+      comes to depend on, and refine `compare` if needed. The ADR 0002
+      baseline is required since design 0002's `rhi-baseline` slice, and
+      every field of `PhysicalDevice` is now read.
 - [x] **Create a window surface.** Done in `src/rhi/vulkan/surface.rs`,
       using `ash-window` to enable the surface instance extensions and create
       the surface. Passing no window runs the backend headless.

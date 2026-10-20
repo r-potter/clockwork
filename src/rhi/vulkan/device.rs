@@ -39,7 +39,8 @@ impl LogicalDevice {
     /// - Vulkan 1.3's `dynamic_rendering` and `synchronization2`
     ///
     /// If `queue_families` has a present family, `VK_KHR_swapchain` is also
-    /// enabled.
+    /// enabled. `texture_compression_bc` is enabled where the device supports
+    /// it, since it's optional (design 0002, "Data structures and layout").
     ///
     /// # Errors
     ///
@@ -97,9 +98,13 @@ impl LogicalDevice {
         let mut device_address_commands_features =
             vk::PhysicalDeviceDeviceAddressCommandsFeaturesKHR::default()
                 .device_address_commands(true);
+        let core_features = vk::PhysicalDeviceFeatures::default().texture_compression_bc(
+            physical_device.features.core.texture_compression_bc == vk::TRUE,
+        );
         let create_info = vk::DeviceCreateInfo::default()
             .queue_create_infos(&queue_create_infos)
             .enabled_extension_names(&extensions)
+            .enabled_features(&core_features)
             .push(&mut vulkan11_features)
             .push(&mut vulkan12_features)
             .push(&mut vulkan13_features)
