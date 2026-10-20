@@ -1,9 +1,10 @@
 # 0001: Foundations
 
-- **Status:** Accepted
+- **Status:** Implemented
 - **Author:** Ralph Potter, with Claude
 - **Created:** 2026-10-15
 - **Accepted:** 2026-10-19
+- **Implemented:** 2026-10-20
 - **Depends on:** ADRs [0001](../decisions/0001-single-binary-crate.md), [0002](../decisions/0002-vulkan-feature-baseline.md) and [0003](../decisions/0003-supported-platforms.md)
 
 ## Context
@@ -655,7 +656,30 @@ None remain. See *Resolved in review* below.
 
 ## As built
 
-*(Filled in at close-out.)*
+Every slice is merged, and all three CI jobs pass (R17). What differs from the design above, and why:
+
+**Recorded as revisions during the slices** (see the revision history for each one's reasoning):
+- `SUPPRESSED` entries match a message by ID or, for messages without one, by the start of its text (R4).
+- Unknown validation layer settings are caught by the layer's own `VALIDATION-SETTINGS` warning, not by reading its manifest (R7).
+- Each smoke run unsets the variables that would let `winit` choose another window system, `WAYLAND_SOCKET` included.
+- `ash-window` is patched to the same `ash` commit, rather than replaced by our own surface creation.
+- The test-only `Capability` list gained `SwapchainMaintenance`. The pinned lavapipe has it, so its expected set is `descriptor-heap`, `device-address-commands` and `swapchain-maintenance`.
+- CI runs on pull requests and pushes to `main`, not on every push.
+- `--lavapipe` sets `VK_DRIVER_FILES` in `xtask`'s own environment, so that the prerequisites check sees lavapipe too, and lavapipe's capabilities are an explicit list checked against `Capability` by a test.
+
+**Found while building `foundations-lavapipe`**, when CI first ran the GPU tests and smoke runs:
+- **Messages through the `log` crate couldn't be suppressed.** `tracing-subscriber` gives them the target `log`, and the counter and `TestSession` classified by it, so no `SUPPRESSED` entry could match them, though R4 assumed they could. Both now classify by the record's own target (`diagnostics::target_of`), with a test.
+- **The "harmless dependency warnings" risk happened twice,** and both are suppressed with reasons: `winit`'s XSETTINGS warning on an X server with no settings manager, such as Xvfb, and `sctk-adwaita`'s error when no XDG Settings Portal answers, as under headless Weston. Neither has an upstream issue to link. A third, `winit`'s warning that Xvfb's display is 0 mm in size, is avoided instead: `--virtual-displays` sets `WINIT_X11_SCALE_FACTOR=1` for the smoke runs.
+- **Xvfb listens only on its abstract socket,** so `--virtual-displays` works under WSL, where `/tmp/.X11-unix` is WSLg's. WSLg's own Wayland compositor dropped the smoke run after a few frames, so under WSL the smoke runs use the virtual displays.
+- **The X11 smoke run needs `libxkbcommon-x11`,** which `winit` loads at run time. It's documented in `docs/testing.md` and installed in CI.
+- **The lavapipe build** passes Meson more options than "Lavapipe" lists: it also turns off OpenGL and its window-system glue, and puts libraries in `lib`. It removes the source and build directories once installed, and a stamp file records the pin and options, so it rebuilds only when either changes.
+- **CI installs Meson from PyPI**, pinned to 1.12.1, since Mesa needs 1.4 and Ubuntu 24.04 has 1.3. **The lavapipe cache** is keyed on the runner's image and on `xtask/src/lavapipe.rs`, which holds the options as well as the pin, rather than on the commit alone, and it's saved as soon as the build finishes, so a failing check doesn't discard it.
+- **The SDK's Vulkan loader** is in `lib/VulkanLoader/lib` in SDK 1.4.363.0, as its `setup-env.sh` has it. CI pointed `LD_LIBRARY_PATH` at `lib`, so the GPU tests loaded the runner's Vulkan 1.3 loader until it was fixed.
+- **Smoke runs on headless Weston proved reliable** with lavapipe, so the Wayland smoke run stays in CI, as the design intended (see "Risks").
+
+**The pin** is Mesa `main` at `44fd0fd` (2026-10-19). Mesa's `26.3-branchpoint` (2026-10-15) already has every ADR 0002 extension on lavapipe, so the pin can move to the 26.3.0 release when it's tagged, as "Lavapipe" plans (see `TODO.md`).
+
+**Hardware checks:** `foundations-lavapipe` was checked under Win32 on a Windows laptop with an RTX 4070 (driver 617.42), and on the pinned lavapipe under WSL. The RTX 3090 check under Linux hasn't been run for that slice (see `TODO.md`).
 
 ## Revision history
 
@@ -675,3 +699,4 @@ None remain. See *Resolved in review* below.
 | 2026-10-19 | Revised during `foundations-ash-1.4`: the test-only `Capability` list gains `SwapchainMaintenance` (`VK_KHR_swapchain_maintenance1`, optional in ADR 0002, like `PresentTiming`), so that a test of the swapchain's present-fence path can skip where it's missing and fail on the reference machines. Lavapipe's expected set, "everything except" three capabilities, now includes it. Whether the pinned lavapipe has it is checked in `foundations-lavapipe`, which leaves it out of the set if not. |
 | 2026-10-20 | Revised after `foundations-ash-1.4`: CI runs on every pull request and every push to `main`, rather than on every push and every pull request (goal 9, R17 and "CI"). Running on both checked each pull request's commits twice. Pull requests based on another branch, as later PRs in a stack are, still run. A branch with no pull request doesn't, so it needs a draft pull request to be checked. |
 | 2026-10-19 | Revised during `foundations-lavapipe`: `--lavapipe` sets `VK_DRIVER_FILES` in `xtask`'s own environment, which every command it runs inherits, rather than for child processes only (see "Checks: `cargo xtask`"). The prerequisites check queries the Vulkan loader inside `xtask`, so it would otherwise list the machine's drivers rather than lavapipe. It also unsets `VK_ADD_DRIVER_FILES` and `VK_ICD_FILENAMES`, which would add drivers or be ignored. The caller's environment is unchanged. Lavapipe's expected capabilities are listed explicitly, with a test that every capability is either one lavapipe has or one it lacks, since `CLOCKWORK_REQUIRED_CAPABILITIES` has no "all except". |
+| 2026-10-20 | Implemented. *As built* filled in. |

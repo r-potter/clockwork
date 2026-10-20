@@ -165,3 +165,29 @@ Outstanding tasks and future work.
       is suppressed by prefix, on `clockwork::validation`, where the debug
       messenger logs the loader's messages, so OBS can still capture the
       engine.
+- [ ] **Run the RTX 3090 hardware check for `foundations-lavapipe`.** It
+      was merged after checks on the Windows laptop (RTX 4070) and on the
+      pinned lavapipe under WSL. Run `cargo xtask check --gpu` on the RTX
+      3090 in a desktop session, with both window systems: the slice changed
+      how warnings from the `log` crate are classified, and added two
+      suppressions for messages logged under X11 and Wayland.
+- [ ] **Move the lavapipe pin to Mesa 26.3.0.** The pin in
+      `xtask/src/lavapipe.rs` is a commit on Mesa's `main`, because no
+      release had `VK_EXT_descriptor_heap` and
+      `VK_KHR_device_address_commands` on lavapipe. Mesa's
+      `26.3-branchpoint` (2026-10-15) has both, so pin the `mesa-26.3.0`
+      tag's commit once it's released, following "Moving the pin" in
+      `docs/testing.md`. Then consider whether a packaged lavapipe (Arch, or
+      a PPA on Ubuntu) could replace the build, which would need a revision
+      of design 0001, since a rolling package isn't pinned.
+- [ ] **Pin CI's Linux runners to an Ubuntu version.** The jobs use
+      `ubuntu-latest`, which GitHub moves from 24.04 to 26.04 between
+      2026-10-19 and 2026-11-19. The move changes the lavapipe cache key,
+      forcing a rebuild, and may rename or remove packages the
+      `linux-lavapipe` job installs. Pin `ubuntu-24.04`, or move to
+      `ubuntu-26.04` deliberately and check the job's packages and Meson
+      there.
+- [ ] **Move CI off actions that run on Node.js 20.** GitHub warns that
+      `actions/cache@v4` targets Node.js 20, which is deprecated, and runs
+      it on Node.js 24 instead. Move to a version that targets Node.js 24
+      when there is one.
