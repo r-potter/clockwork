@@ -157,7 +157,7 @@ Each step is a design document, accepted before any implementation, then a serie
 | Step | Design | Status |
 |---|---|---|
 | 0 | [`0001-foundations`](design/0001-foundations.md): design process, diagnostics and test harness, Vulkan 1.4 bindings, checks and CI | Implemented |
-| 1 | `0002-rhi`: render hardware interface | Not started |
+| 1 | [`0002-rhi`](design/0002-rhi.md): render hardware interface | Accepted |
 | 2 | `0003-frame-graph`: data-driven frame graph | Not started |
 | 3 | `0004-input`: input devices, actions and cameras | Not started |
 | 4 | `0005-ecs`: entity-component system | Not started |
