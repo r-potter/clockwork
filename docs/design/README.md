@@ -32,4 +32,4 @@ Small cross-cutting decisions that don't need a full design are recorded as [ADR
 |---|---|---|
 | 0000 | [Template](0000-template.md) | n/a |
 | 0001 | [Foundations](0001-foundations.md) | Implemented |
-| 0002 | [Render Hardware Interface](0002-rhi.md) | Proposed |
+| 0002 | [Render Hardware Interface](0002-rhi.md) | Accepted |
