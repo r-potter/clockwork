@@ -49,6 +49,17 @@ pub struct QueueFamilies {
     pub present: Option<u32>,
 }
 
+/// The descriptors the resource heap holds: one per texture view a shader
+/// can use (design 0002, "Binding model").
+pub const RESOURCE_HEAP_CAPACITY: u64 = 65_536;
+
+/// The descriptors the sampler heap holds (design 0002, "Binding model").
+pub const SAMPLER_HEAP_CAPACITY: u64 = 2_048;
+
+/// The push data, in bytes, that each draw or dispatch can carry (design
+/// 0002, "Binding model").
+pub const MIN_PUSH_DATA_SIZE: u64 = 128;
+
 /// A minimum requirement a device must meet to be selected.
 struct Requirement {
     /// Describes what is required, for logging when a device fails it.
@@ -91,7 +102,64 @@ const REQUIREMENTS: &[Requirement] = &[
         },
     },
     Requirement {
-        description: "has a queue family that supports graphics",
+        description: "supports VK_EXT_descriptor_heap",
+        is_met: |candidate| {
+            candidate
+                .device
+                .supports_extension(ext::descriptor_heap::NAME)
+                && candidate.device.features.descriptor_heap.descriptor_heap == vk::TRUE
+        },
+    },
+    Requirement {
+        description: "supports VK_KHR_device_address_commands",
+        is_met: |candidate| {
+            let features = &candidate.device.features.device_address_commands;
+            candidate
+                .device
+                .supports_extension(khr::device_address_commands::NAME)
+                && features.device_address_commands == vk::TRUE
+        },
+    },
+    Requirement {
+        description: "supports buffer device addresses, timeline semaphores and host query reset",
+        is_met: |candidate| {
+            let features = &candidate.device.features.vulkan12;
+            features.buffer_device_address == vk::TRUE
+                && features.timeline_semaphore == vk::TRUE
+                && features.host_query_reset == vk::TRUE
+        },
+    },
+    Requirement {
+        description: "supports enough push data",
+        is_met: |candidate| {
+            let properties = &candidate.device.properties.descriptor_heap;
+            properties.max_push_data_size >= MIN_PUSH_DATA_SIZE
+        },
+    },
+    Requirement {
+        description: "supports large enough descriptor heaps",
+        is_met: |candidate| {
+            let properties = &candidate.device.properties.descriptor_heap;
+            let resource_heap = heap_size(
+                RESOURCE_HEAP_CAPACITY,
+                properties.image_descriptor_size,
+                properties.image_descriptor_alignment,
+                properties.min_resource_heap_reserved_range,
+            );
+            let sampler_heap = heap_size(
+                SAMPLER_HEAP_CAPACITY,
+                properties.sampler_descriptor_size,
+                properties.sampler_descriptor_alignment,
+                properties.min_sampler_heap_reserved_range,
+            );
+            resource_heap <= properties.max_resource_heap_size
+                && sampler_heap <= properties.max_sampler_heap_size
+        },
+    },
+    Requirement {
+        // Both rendering and its timings need it (design 0002,
+        // "Timestamps").
+        description: "has a queue family that supports graphics and timestamps",
         is_met: |candidate| graphics_families(&candidate.device).next().is_some(),
     },
     Requirement {
@@ -119,6 +187,24 @@ const REQUIREMENTS: &[Requirement] = &[
         },
     },
 ];
+
+/// The size, in bytes, of a descriptor heap holding `capacity` descriptors
+/// of `descriptor_size` bytes, each at a multiple of `alignment`, after the
+/// `reserved` bytes the driver needs for itself.
+///
+/// Saturates rather than overflowing, so that a driver reporting absurd
+/// sizes fails the requirement instead of wrapping around to pass it.
+fn heap_size(
+    capacity: u64,
+    descriptor_size: vk::DeviceSize,
+    alignment: vk::DeviceSize,
+    reserved: vk::DeviceSize,
+) -> vk::DeviceSize {
+    let stride = descriptor_size
+        .checked_next_multiple_of(alignment.max(1))
+        .unwrap_or(vk::DeviceSize::MAX);
+    capacity.saturating_mul(stride).saturating_add(reserved)
+}
 
 /// Chooses the best of `candidates` that matches `device_filter` (if any)
 /// and meets every requirement, and the queue families to use on it.
@@ -176,21 +262,10 @@ struct ReportedCapability {
 
 /// The optional capabilities that [`select`] reports for the selected device.
 ///
-/// These are the ADR 0002 extensions that [`REQUIREMENTS`] doesn't require,
-/// until the code that uses them makes them required (design `0002-rhi`). A
-/// feature is only set when the device supports its extension.
+/// These are the ADR 0002 extensions that are optional, so [`REQUIREMENTS`]
+/// doesn't require them. A feature is only set when the device supports its
+/// extension.
 const REPORTED_CAPABILITIES: &[ReportedCapability] = &[
-    ReportedCapability {
-        name: "descriptor heap",
-        is_supported: |device| device.features.descriptor_heap.descriptor_heap == vk::TRUE,
-    },
-    ReportedCapability {
-        name: "device address commands",
-        is_supported: |device| {
-            let features = &device.features.device_address_commands;
-            features.device_address_commands == vk::TRUE
-        },
-    },
     ReportedCapability {
         name: "present timing",
         is_supported: |device| device.features.present_timing.present_timing == vk::TRUE,
@@ -330,18 +405,23 @@ fn queue_families(candidate: &Candidate) -> QueueFamilies {
     }
 }
 
-/// The indices of `device`'s queue families that support graphics.
+/// The indices of `device`'s queue families that support graphics and can
+/// write timestamps, which are the families rendering can use.
 fn graphics_families(device: &PhysicalDevice) -> impl Iterator<Item = u32> + '_ {
     device
         .queue_families
         .iter()
         .enumerate()
-        .filter(|(_, family)| family.queue_flags.contains(vk::QueueFlags::GRAPHICS))
+        .filter(|(_, family)| {
+            family.queue_flags.contains(vk::QueueFlags::GRAPHICS) && family.timestamp_valid_bits > 0
+        })
         .map(|(index, _)| index as u32)
 }
 
 #[cfg(test)]
 mod tests {
+    use std::ffi::CStr;
+
     use super::*;
 
     use crate::rhi::vulkan::physical_device::{Features, Properties};
@@ -361,6 +441,17 @@ mod tests {
         for (dst, src) in properties.core.device_name.iter_mut().zip(name.bytes()) {
             *dst = src as _;
         }
+        // The RTX 4090's descriptor heap properties, from driver 617.42.
+        let heap = &mut properties.descriptor_heap;
+        heap.max_push_data_size = 256;
+        heap.max_resource_heap_size = 32 << 20;
+        heap.max_sampler_heap_size = 128 << 10;
+        heap.min_resource_heap_reserved_range = 0x17a00;
+        heap.min_sampler_heap_reserved_range = 0x200;
+        heap.image_descriptor_size = 32;
+        heap.image_descriptor_alignment = 32;
+        heap.sampler_descriptor_size = 32;
+        heap.sampler_descriptor_alignment = 32;
 
         let mut memory_properties = vk::PhysicalDeviceMemoryProperties {
             memory_heap_count: 1,
@@ -375,7 +466,12 @@ mod tests {
         features.vulkan13.dynamic_rendering = vk::TRUE;
         features.vulkan13.synchronization2 = vk::TRUE;
         features.vulkan11.shader_draw_parameters = vk::TRUE;
+        features.vulkan12.buffer_device_address = vk::TRUE;
+        features.vulkan12.timeline_semaphore = vk::TRUE;
+        features.vulkan12.host_query_reset = vk::TRUE;
         features.shader_object.shader_object = vk::TRUE;
+        features.descriptor_heap.descriptor_heap = vk::TRUE;
+        features.device_address_commands.device_address_commands = vk::TRUE;
 
         PhysicalDevice {
             handle: vk::PhysicalDevice::null(),
@@ -385,14 +481,41 @@ mod tests {
             queue_families: vec![vk::QueueFamilyProperties {
                 queue_flags: vk::QueueFlags::GRAPHICS,
                 queue_count: 1,
+                timestamp_valid_bits: 64,
                 ..Default::default()
             }],
-            extensions: vec![
+            extensions: [
+                ext::shader_object::NAME,
+                ext::descriptor_heap::NAME,
+                khr::device_address_commands::NAME,
+            ]
+            .into_iter()
+            .map(|name| {
                 vk::ExtensionProperties::default()
-                    .extension_name(ext::shader_object::NAME)
-                    .unwrap(),
-            ],
+                    .extension_name(name)
+                    .unwrap()
+            })
+            .collect(),
         }
+    }
+
+    /// Asserts that a device changed by `modify` is rejected, by checking
+    /// that a worse device that meets every requirement is selected instead.
+    fn assert_rejected(modify: impl FnOnce(&mut PhysicalDevice)) {
+        let mut rejected = device("rejected", vk::PhysicalDeviceType::DISCRETE_GPU, 16 * GIB);
+        modify(&mut rejected);
+        let devices = vec![
+            rejected,
+            device("accepted", vk::PhysicalDeviceType::INTEGRATED_GPU, 8 * GIB),
+        ];
+        assert_eq!(selected_name(devices), "accepted");
+    }
+
+    /// Removes the extension `name` from `device`.
+    fn remove_extension(device: &mut PhysicalDevice, name: &CStr) {
+        device
+            .extensions
+            .retain(|extension| extension.extension_name_as_c_str() != Ok(name));
     }
 
     /// Wraps `devices` as candidates for headless selection.
@@ -425,11 +548,13 @@ mod tests {
         }
     }
 
-    /// Adds a queue family with `flags` to `device`.
+    /// Adds a queue family with `flags`, which can write timestamps, to
+    /// `device`.
     fn with_family(mut device: PhysicalDevice, flags: vk::QueueFlags) -> PhysicalDevice {
         device.queue_families.push(vk::QueueFamilyProperties {
             queue_flags: flags,
             queue_count: 1,
+            timestamp_valid_bits: 64,
             ..Default::default()
         });
         device
@@ -579,6 +704,99 @@ mod tests {
             ),
         ];
         assert_eq!(selected_name(devices), "draw parameters");
+    }
+
+    /// Descriptor heaps need both the extension and its feature (ADR 0002).
+    #[test]
+    fn rejects_devices_without_descriptor_heaps() {
+        assert_rejected(|device| remove_extension(device, ext::descriptor_heap::NAME));
+        assert_rejected(|device| device.features.descriptor_heap.descriptor_heap = vk::FALSE);
+    }
+
+    /// Device address commands need both the extension and its feature
+    /// (ADR 0002).
+    #[test]
+    fn rejects_devices_without_device_address_commands() {
+        assert_rejected(|device| remove_extension(device, khr::device_address_commands::NAME));
+        assert_rejected(|device| {
+            let features = &mut device.features.device_address_commands;
+            features.device_address_commands = vk::FALSE;
+        });
+    }
+
+    /// Buffer device addresses, timeline semaphores and host query reset are
+    /// each required (design 0002, R1).
+    #[test]
+    fn rejects_devices_without_each_vulkan_1_2_feature() {
+        assert_rejected(|device| device.features.vulkan12.buffer_device_address = vk::FALSE);
+        assert_rejected(|device| device.features.vulkan12.timeline_semaphore = vk::FALSE);
+        assert_rejected(|device| device.features.vulkan12.host_query_reset = vk::FALSE);
+    }
+
+    /// A device must carry at least [`MIN_PUSH_DATA_SIZE`] bytes of push
+    /// data, and exactly that much is enough.
+    #[test]
+    fn requires_enough_push_data() {
+        assert_rejected(|device| {
+            device.properties.descriptor_heap.max_push_data_size = MIN_PUSH_DATA_SIZE - 1;
+        });
+        let mut device = device("device", vk::PhysicalDeviceType::DISCRETE_GPU, 8 * GIB);
+        device.properties.descriptor_heap.max_push_data_size = MIN_PUSH_DATA_SIZE;
+        assert!(select(headless(vec![device]), None).is_ok());
+    }
+
+    /// Each heap must hold its capacity of descriptors as well as the
+    /// driver's reserved range.
+    #[test]
+    fn requires_large_enough_descriptor_heaps() {
+        assert_rejected(|device| {
+            let heap = &mut device.properties.descriptor_heap;
+            heap.max_resource_heap_size = RESOURCE_HEAP_CAPACITY * heap.image_descriptor_size - 1;
+            heap.min_resource_heap_reserved_range = 0;
+        });
+        assert_rejected(|device| {
+            let heap = &mut device.properties.descriptor_heap;
+            heap.max_sampler_heap_size = SAMPLER_HEAP_CAPACITY * heap.sampler_descriptor_size;
+            heap.min_sampler_heap_reserved_range = 1;
+        });
+    }
+
+    /// A heap's size counts each descriptor at its aligned stride, plus the
+    /// reserved range.
+    #[test]
+    fn heap_size_aligns_each_descriptor() {
+        assert_eq!(heap_size(4, 32, 32, 0), 128);
+        assert_eq!(heap_size(4, 24, 32, 0), 128);
+        assert_eq!(heap_size(4, 32, 0, 512), 640);
+    }
+
+    /// Absurd sizes saturate rather than wrapping around to a small heap.
+    #[test]
+    fn heap_size_saturates() {
+        assert_eq!(heap_size(2, u64::MAX, 1, 0), u64::MAX);
+        assert_eq!(heap_size(1, u64::MAX - 1, 4, 0), u64::MAX);
+        assert_eq!(heap_size(1, 1, 1, u64::MAX), u64::MAX);
+    }
+
+    /// Rendering's timings need timestamps on the graphics queue (design
+    /// 0002, "Timestamps").
+    #[test]
+    fn rejects_devices_whose_graphics_family_lacks_timestamps() {
+        assert_rejected(|device| device.queue_families[0].timestamp_valid_bits = 0);
+    }
+
+    /// A graphics family without timestamps is passed over for one with
+    /// them.
+    #[test]
+    fn chooses_a_graphics_family_with_timestamps() {
+        let mut device = with_family(
+            device("device", vk::PhysicalDeviceType::DISCRETE_GPU, 8 * GIB),
+            vk::QueueFlags::GRAPHICS,
+        );
+        device.queue_families[0].timestamp_valid_bits = 0;
+        device.queue_families[1].timestamp_valid_bits = 36;
+        let selection = select(headless(vec![device]), None).unwrap();
+        assert_eq!(selection.queue_families.graphics, 1);
     }
 
     #[test]
@@ -783,13 +1001,11 @@ mod tests {
     fn the_summary_lists_the_capabilities_a_device_has() {
         let mut device = device("device", vk::PhysicalDeviceType::DISCRETE_GPU, 8 * GIB);
         let features = &mut device.features;
-        features.descriptor_heap.descriptor_heap = vk::TRUE;
-        features.device_address_commands.device_address_commands = vk::TRUE;
         features.present_timing.present_timing = vk::TRUE;
         features.swapchain_maintenance1.swapchain_maintenance1 = vk::TRUE;
         assert_eq!(
             capability_summary(&device),
-            "has descriptor heap, device address commands, present timing, swapchain maintenance",
+            "has present timing, swapchain maintenance",
         );
     }
 
@@ -798,15 +1014,13 @@ mod tests {
     #[test]
     fn the_summary_lists_the_capabilities_a_device_lacks() {
         let mut device = device("device", vk::PhysicalDeviceType::DISCRETE_GPU, 8 * GIB);
-        device.features.descriptor_heap.descriptor_heap = vk::TRUE;
         device
             .features
-            .device_address_commands
-            .device_address_commands = vk::TRUE;
+            .swapchain_maintenance1
+            .swapchain_maintenance1 = vk::TRUE;
         assert_eq!(
             capability_summary(&device),
-            "has descriptor heap, device address commands; \
-             lacks present timing, swapchain maintenance",
+            "has swapchain maintenance; lacks present timing",
         );
     }
 
@@ -816,8 +1030,7 @@ mod tests {
         let device = device("device", vk::PhysicalDeviceType::DISCRETE_GPU, 8 * GIB);
         assert_eq!(
             capability_summary(&device),
-            "lacks descriptor heap, device address commands, present timing, \
-             swapchain maintenance",
+            "lacks present timing, swapchain maintenance",
         );
     }
 

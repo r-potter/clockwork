@@ -20,9 +20,9 @@ The engine targets the extensions [ADR 0002](decisions/0002-vulkan-feature-basel
 | NVIDIA driver, Windows | 617.42 | Checked on the RTX 4090 on 2026-10-19 with `vulkaninfo`: it has every ADR 0002 extension, required and optional. 610.88 lacks `VK_KHR_device_address_commands`. |
 | NVIDIA driver, Linux | 615.71.09 | Checked on the RTX 3090 on 2026-10-15 with `vulkaninfo` (ADR 0002). |
 
-`reference_device_reports_required_extensions`, in `src/rhi/vulkan/gpu_tests.rs`, fails under `cargo xtask check --gpu` on a device without the required extensions. The application logs the optional ones the selected device has and lacks, at `INFO`, when it starts.
+Device selection rejects a device without the required extensions and features, or whose limits are too small for the RHI (design 0002, R1), and logs why at `INFO`. GPU tests then fail, because no device can be selected. The application logs the optional extensions the selected device has and lacks, at `INFO`, when it starts.
 
-Nothing enables these extensions yet, so until the RHI uses them, GPU tests also pass with an older SDK, such as 1.4.341.1.
+The required extensions are enabled on every device the engine creates, so GPU tests need the minimum SDK above. An older validation layer reports the extensions it doesn't know, or misses errors in code that uses them.
 
 ### Linux
 

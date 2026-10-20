@@ -31,10 +31,15 @@ impl LogicalDevice {
     /// of `queue_families`.
     ///
     /// Enables the extensions and features device selection requires:
-    /// `VK_EXT_shader_object` and its `shader_object` feature, Vulkan 1.1's
-    /// `shader_draw_parameters`, and Vulkan 1.3's `dynamic_rendering` and
-    /// `synchronization2`. If `queue_families` has a present family,
-    /// `VK_KHR_swapchain` is also enabled.
+    /// - `VK_EXT_shader_object`, `VK_EXT_descriptor_heap` and
+    ///   `VK_KHR_device_address_commands`, each with its main feature
+    /// - Vulkan 1.1's `shader_draw_parameters`
+    /// - Vulkan 1.2's `buffer_device_address`, `timeline_semaphore` and
+    ///   `host_query_reset`
+    /// - Vulkan 1.3's `dynamic_rendering` and `synchronization2`
+    ///
+    /// If `queue_families` has a present family, `VK_KHR_swapchain` is also
+    /// enabled.
     ///
     /// # Errors
     ///
@@ -62,7 +67,11 @@ impl LogicalDevice {
             })
             .collect();
 
-        let mut extensions = vec![ext::shader_object::NAME.as_ptr()];
+        let mut extensions = vec![
+            ext::shader_object::NAME.as_ptr(),
+            ext::descriptor_heap::NAME.as_ptr(),
+            khr::device_address_commands::NAME.as_ptr(),
+        ];
         if queue_families.present.is_some() {
             extensions.push(khr::swapchain::NAME.as_ptr());
         }
@@ -71,17 +80,32 @@ impl LogicalDevice {
         // `shader_draw_parameters`.
         let mut vulkan11_features =
             vk::PhysicalDeviceVulkan11Features::default().shader_draw_parameters(true);
+        // Buffers are used through their device addresses, queues are
+        // synchronized with timeline semaphores, and timestamp queries are
+        // reset from the host (design 0002).
+        let mut vulkan12_features = vk::PhysicalDeviceVulkan12Features::default()
+            .buffer_device_address(true)
+            .timeline_semaphore(true)
+            .host_query_reset(true);
         let mut vulkan13_features = vk::PhysicalDeviceVulkan13Features::default()
             .dynamic_rendering(true)
             .synchronization2(true);
         let mut shader_object_features =
             vk::PhysicalDeviceShaderObjectFeaturesEXT::default().shader_object(true);
+        let mut descriptor_heap_features =
+            vk::PhysicalDeviceDescriptorHeapFeaturesEXT::default().descriptor_heap(true);
+        let mut device_address_commands_features =
+            vk::PhysicalDeviceDeviceAddressCommandsFeaturesKHR::default()
+                .device_address_commands(true);
         let create_info = vk::DeviceCreateInfo::default()
             .queue_create_infos(&queue_create_infos)
             .enabled_extension_names(&extensions)
             .push(&mut vulkan11_features)
+            .push(&mut vulkan12_features)
             .push(&mut vulkan13_features)
-            .push(&mut shader_object_features);
+            .push(&mut shader_object_features)
+            .push(&mut descriptor_heap_features)
+            .push(&mut device_address_commands_features);
         // SAFETY: `physical_device` was enumerated from `instance`, and
         // `create_info` and the structures it points to are valid for the
         // duration of the call. Selection checked that the queue families and
