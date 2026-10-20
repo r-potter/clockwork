@@ -1,6 +1,6 @@
 # Clockwork architecture
 
-**Status:** Proposed. Must be accepted before design `0002-rhi` is written.
+**Status:** Proposed. Must be accepted before design `0002-rhi` is accepted.
 
 This document is the map of the engine: what the subsystems are, how they depend on each other, and how a frame flows through them. Detailed designs live in [`design/`](design/README.md), and cross-cutting decisions in [`decisions/`](decisions/README.md). Sections marked *provisional* are settled by the design doc named in them, and this document is updated when that design is accepted.
 
@@ -17,7 +17,7 @@ Clockwork is a rendering engine for showcasing graphics and simulation technique
 1. **Explicit and derived, never hand-written.** GPU synchronization comes from the frame graph's analysis of declared resource accesses. Rendering code can't issue barriers.
 2. **Techniques are data.** A rendering technique is a frame graph description plus its Slang shaders, loaded and hot-reloaded at run time, rather than Rust code that wires passes together.
 3. **Pure cores, thin shells.** Each subsystem keeps its logic in plain Rust that can be tested without a GPU, window or file system: the frame graph compiler, ECS storage and scheduling, importers' mesh processing, input mapping. The parts that touch Vulkan, winit or disk stay small and translate only.
-4. **No silent failure.** Importers report everything they skip. Device selection logs why each device was rejected. The validation layer's messages fail the tests.
+4. **No silent failure.** Importers report everything they skip. Device selection logs why each device was rejected. Any unexpected warning or error, including the validation layer's, fails the test that caused it.
 5. **Modern Vulkan only.** Vulkan 1.4, with descriptor heaps, device address commands, shader objects, dynamic rendering and timeline semaphores, and no legacy fallback paths. See [ADR 0002](decisions/0002-vulkan-feature-baseline.md).
 6. **Every platform from the start.** Windows (Win32), and Linux under both X11 and Wayland, are supported from the first step, and every design accounts for their differences. Android, macOS and iOS are planned, through Mesa's Turnip and KosmicKrisp drivers, so no design may assume a desktop. See [ADR 0003](decisions/0003-supported-platforms.md).
 7. **Decisions are written down.** Every design and every cross-cutting decision has a document. Deviations are recorded, not left in commit messages.
@@ -69,7 +69,6 @@ Arrows in the diagram are the only dependencies allowed. In particular:
 - **The ECS doesn't know about rendering.** Rendering reads from it only through extraction, so simulation never waits on the GPU.
 - **Importers don't know about the ECS or the GPU.** They produce a scene model, which is spawned into the ECS separately. This keeps importers testable against files alone.
 - **Only the platform layer (`src/main.rs` today) uses winit types.** Input receives engine events translated from them.
-
 - **Diagnostics sits below everything.** Every subsystem may depend on `src/diagnostics.rs`, and it depends on no subsystem. It isn't drawn in the diagram, because every box would point at it.
 
 These rules are checked in review now. If the code is split into crates later, they become crate boundaries that the compiler enforces.
@@ -123,23 +122,25 @@ Any unexpected `WARN` or `ERROR` fails the test that caused it, and fails the ap
 
 ## Source layout
 
-The engine is a single binary crate. That's deliberate: see [ADR 0001](decisions/0001-single-binary-crate.md). From `0001-foundations` on, the repository is a Cargo workspace holding the engine and its developer tooling (`xtask`).
+The engine is a single binary crate. That's deliberate: see [ADR 0001](decisions/0001-single-binary-crate.md). The repository is a Cargo workspace holding the engine and its developer tooling (`xtask`).
 
 ```
 build.rs              compiles shaders/ to SPIR-V with slangc
+build/slangc.rs       finds slangc, shared by build.rs and xtask
 shaders/              Slang shaders (a module library from 0007-pbr on)
-src/main.rs           platform layer: winit event loop, window, frame loop
-src/rhi.rs            the RHI trait and backend selection
+src/main.rs           platform layer: options, winit event loop, window, frame loop
+src/diagnostics.rs    sessions, log attribution, classification and counting
+src/test_support.rs   shared test fixtures and the test environment
+src/rhi.rs            the RHI trait, backend options and backend selection
 src/rhi/vulkan/       the Vulkan backend
+xtask/                developer tooling: cargo xtask check, cargo xtask lavapipe
+.github/workflows/    CI
 docs/                 this document, designs, decisions, and the testing guide
 ```
 
 Target layout, as later designs are accepted:
 
 ```
-src/diagnostics.rs    sessions, log attribution and counting (0001-foundations)
-src/test_support.rs   shared test fixtures (0001-foundations)
-xtask/                developer tooling: cargo xtask check, cargo xtask lavapipe (0001-foundations)
 src/frame_graph/      (0003-frame-graph)
 src/input/            (0004-input)
 src/ecs/              (0005-ecs)
@@ -151,11 +152,11 @@ testdata/             small checked-in test fixtures
 
 ## Roadmap
 
-Each step is a design document, accepted before any implementation, then a series of implementation branches. See [`design/README.md`](design/README.md) for the process.
+Each step is a design document, accepted before any implementation, then a series of implementation slices, each reviewed as a stack of small pull requests. See [`design/README.md`](design/README.md) for the process.
 
 | Step | Design | Status |
 |---|---|---|
-| 0 | [`0001-foundations`](design/0001-foundations.md): design process, diagnostics and test harness, Vulkan 1.4 bindings, checks and CI | Proposed |
+| 0 | [`0001-foundations`](design/0001-foundations.md): design process, diagnostics and test harness, Vulkan 1.4 bindings, checks and CI | Implemented |
 | 1 | `0002-rhi`: render hardware interface | Not started |
 | 2 | `0003-frame-graph`: data-driven frame graph | Not started |
 | 3 | `0004-input`: input devices, actions and cameras | Not started |
