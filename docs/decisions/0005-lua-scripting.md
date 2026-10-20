@@ -1,6 +1,6 @@
 # 0005: Embed Lua through mlua for scripting
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-10-15
 
 ## Context

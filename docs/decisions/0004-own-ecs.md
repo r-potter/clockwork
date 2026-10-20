@@ -1,6 +1,6 @@
 # 0004: Build our own entity-component system
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-10-15
 
 ## Context
