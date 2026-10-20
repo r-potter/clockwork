@@ -101,10 +101,12 @@ Outstanding tasks and future work.
       support Vulkan 1.4, `VK_EXT_shader_object`, `VK_EXT_descriptor_heap`
       and `VK_KHR_device_address_commands`. MoltenVK isn't planned, because
       it implements a more limited subset of Vulkan (ADR 0002).
-- [ ] **Decide whether `PhysicalDevice` needs to be `Send`/`Sync`.** It is
-      neither, because `ash`'s structures contain `p_next` raw pointers, even
-      though they are always null. If the RHI needs to be used across threads,
-      add `unsafe impl Send`/`Sync` with a safety comment.
+- [x] **Decide whether `PhysicalDevice` needs to be `Send`/`Sync`.** It
+      needs both, since design 0002 shares the device between threads. It
+      already is both: the pinned `ash` declares its structures `Send` and
+      `Sync`, though `ash` 0.38 didn't, so no `unsafe impl` is needed. A
+      compile-time assertion in `src/rhi/vulkan/physical_device.rs` keeps it
+      so.
 
 ## Engine
 
