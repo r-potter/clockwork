@@ -13,6 +13,7 @@ use tracing::Level;
 use super::test_support::{Capability, VulkanTestBackend, require_capabilities};
 use crate::diagnostics::VALIDATION_TARGET;
 use crate::diagnostics::capture::TestSession;
+use crate::rhi::QueueKind;
 
 /// A buffer and the memory bound to it, destroyed when dropped.
 struct TestBuffer<'a> {
@@ -185,6 +186,20 @@ fn sync_hazards_are_reported() {
     }
     // SAFETY: the command buffer is recording.
     unsafe { device.end_command_buffer(command_buffer) }.unwrap();
+}
+
+/// The capabilities describe the selected device, and include what device
+/// selection requires: timestamps on the graphics queue, and enough push
+/// data (design 0002, R2).
+#[test]
+fn capabilities_describe_the_selected_device() {
+    let session = TestSession::new();
+    let backend = VulkanTestBackend::headless(&session);
+    let capabilities = backend.capabilities();
+    assert_eq!(capabilities.device_name, backend.physical_device.name());
+    assert!(capabilities.timestamps.contains(QueueKind::Graphics));
+    assert!(capabilities.limits.max_push_data_size >= 128);
+    assert!(capabilities.limits.timestamp_period_ns > 0.0);
 }
 
 /// The device has the extensions ADR 0002 requires, with their features,

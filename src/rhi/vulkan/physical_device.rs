@@ -64,7 +64,6 @@ pub struct Properties {
 ///
 /// The `p_next` pointers are always null.
 #[derive(Debug, Default)]
-#[expect(dead_code, reason = "fields will be read by device selection")]
 pub struct Features {
     /// Vulkan 1.0 features.
     pub core: vk::PhysicalDeviceFeatures,
@@ -241,7 +240,6 @@ impl PhysicalDevice {
     }
 
     /// The device's limits, such as maximum image sizes.
-    #[expect(dead_code, reason = "will be used by device selection")]
     pub fn limits(&self) -> &vk::PhysicalDeviceLimits {
         &self.properties.core.limits
     }

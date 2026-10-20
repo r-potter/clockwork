@@ -13,6 +13,7 @@
 //! on [`VALIDATION_TARGET`](crate::diagnostics::VALIDATION_TARGET), attributed
 //! to [`BackendOptions::session`]. See the [`validation`] module.
 
+mod capabilities;
 mod device;
 mod device_selection;
 mod frames;
@@ -35,7 +36,9 @@ use ash::{Entry, Instance, ext::debug_utils, vk};
 use raw_window_handle::RawDisplayHandle;
 use tracing::{info, warn};
 
-use super::{BackendOptions, GraphicsApi, RenderHardwareInterface, WindowSize, WindowTarget};
+use super::{
+    BackendOptions, Capabilities, GraphicsApi, RenderHardwareInterface, WindowSize, WindowTarget,
+};
 use device::LogicalDevice;
 use device_selection::{Candidate, Selection};
 use frames::Frames;
@@ -88,6 +91,8 @@ pub struct VulkanRenderHardwareInterface {
     surface: Option<Surface>,
     /// The physical device chosen by [`device_selection::select`].
     physical_device: PhysicalDevice,
+    /// What `physical_device` can do beyond the requirements.
+    capabilities: Capabilities,
     /// Declared last so that it is dropped last, after every object created
     /// from it.
     instance: VulkanInstance,
@@ -167,6 +172,7 @@ impl VulkanRenderHardwareInterface {
         let Selection {
             device: physical_device,
             queue_families,
+            capabilities,
         } = device_selection::select(candidates, options.device_filter.as_deref())?;
 
         let device = LogicalDevice::new(&instance.instance, &physical_device, queue_families)?;
@@ -182,12 +188,25 @@ impl VulkanRenderHardwareInterface {
             device,
             surface,
             physical_device,
+            capabilities,
             instance,
         };
         if let Some(size) = window_size {
             rhi.recreate_swapchain(size)?;
         }
         Ok(rhi)
+    }
+
+    /// What the selected device can do beyond the requirements.
+    ///
+    /// Design 0002 exposes this through the RHI's `Device` trait, which
+    /// `rhi-resources` adds. Until then, only tests ask.
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "exposed by the Device trait later")
+    )]
+    pub fn capabilities(&self) -> &Capabilities {
+        &self.capabilities
     }
 
     /// Replaces the swapchain with one for the current surface, sized to fit
@@ -572,6 +591,7 @@ impl fmt::Debug for VulkanRenderHardwareInterface {
             .field("headless", &self.is_headless())
             .field("suspended", &self.is_suspended())
             .field("physical_device", &self.physical_device.name())
+            .field("capabilities", &self.capabilities.summary())
             .field("queue_families", &self.device.queue_families())
             .field(
                 "swapchain",

@@ -19,11 +19,15 @@
 //! tests configure them the same way; only where the values come from
 //! differs.
 //!
+//! What the selected device can do beyond the baseline is described by
+//! [`Capabilities`] (design 0002, "Capabilities").
+//!
 //! To add a backend:
 //! 1. add a variant to [`GraphicsApi`],
 //! 2. add a submodule with a type implementing [`RenderHardwareInterface`],
 //! 3. add a match arm for it in [`create`].
 
+mod capabilities;
 #[cfg(test)]
 mod gpu_tests;
 mod vulkan;
@@ -34,6 +38,8 @@ use std::sync::Arc;
 
 use anyhow::{Result, bail};
 use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
+
+pub use capabilities::{Capabilities, Limits, QueueKind, QueueKindSet};
 
 use crate::diagnostics::SessionId;
 use vulkan::VulkanRenderHardwareInterface;

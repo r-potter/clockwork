@@ -19,8 +19,10 @@ use ash::{ext, khr, vk};
 use tracing::info;
 
 use super::API_VERSION;
+use super::capabilities;
 use super::physical_device::PhysicalDevice;
 use super::surface::SurfaceSupport;
+use crate::rhi::Capabilities;
 
 /// A device being considered for selection.
 pub struct Candidate {
@@ -31,12 +33,16 @@ pub struct Candidate {
     pub surface_support: Option<SurfaceSupport>,
 }
 
-/// The selected device, and the queue families to use on it.
+/// The selected device, the queue families to use on it, and its
+/// capabilities.
 pub struct Selection {
     /// The device that met every requirement and compared best.
     pub device: PhysicalDevice,
     /// The queue families to create the logical device's queues from.
     pub queue_families: QueueFamilies,
+    /// What the device can do beyond the requirements, using
+    /// `queue_families`.
+    pub capabilities: Capabilities,
 }
 
 /// Indices of the queue families to use on a device.
@@ -241,61 +247,17 @@ pub fn select(candidates: Vec<Candidate>, device_filter: Option<&str>) -> Result
         bail!("no Vulkan device meets the minimum requirements; see the log for details");
     };
     let queue_families = queue_families(&selected);
+    let capabilities = capabilities::derive(&selected.device, queue_families);
     info!(
         "selected {} ({}), with queue families {queue_families:?}",
         selected.device.name(),
-        capability_summary(&selected.device),
+        capabilities.summary(),
     );
     Ok(Selection {
         device: selected.device,
         queue_families,
+        capabilities,
     })
-}
-
-/// An optional capability that [`select`] reports for the selected device.
-struct ReportedCapability {
-    /// The capability's name, for the log.
-    name: &'static str,
-    /// Returns whether the device has the capability.
-    is_supported: fn(&PhysicalDevice) -> bool,
-}
-
-/// The optional capabilities that [`select`] reports for the selected device.
-///
-/// These are the ADR 0002 extensions that are optional, so [`REQUIREMENTS`]
-/// doesn't require them. A feature is only set when the device supports its
-/// extension.
-const REPORTED_CAPABILITIES: &[ReportedCapability] = &[
-    ReportedCapability {
-        name: "present timing",
-        is_supported: |device| device.features.present_timing.present_timing == vk::TRUE,
-    },
-    ReportedCapability {
-        name: "swapchain maintenance",
-        is_supported: |device| {
-            let features = &device.features.swapchain_maintenance1;
-            features.swapchain_maintenance1 == vk::TRUE
-        },
-    },
-];
-
-/// Summarises which of [`REPORTED_CAPABILITIES`] `device` has and lacks, for
-/// the log: for example, `has descriptor heap; lacks present timing`.
-fn capability_summary(device: &PhysicalDevice) -> String {
-    let mut has = Vec::new();
-    let mut lacks = Vec::new();
-    for capability in REPORTED_CAPABILITIES {
-        if (capability.is_supported)(device) {
-            has.push(capability.name);
-        } else {
-            lacks.push(capability.name);
-        }
-    }
-    match (has.is_empty(), lacks.is_empty()) {
-        (false, true) => format!("has {}", has.join(", ")),
-        (true, false) => format!("lacks {}", lacks.join(", ")),
-        _ => format!("has {}; lacks {}", has.join(", "), lacks.join(", ")),
-    }
 }
 
 /// Keeps the candidates whose names contain `device_filter`, ignoring case,
@@ -403,6 +365,40 @@ fn queue_families(candidate: &Candidate) -> QueueFamilies {
         graphics: graphics.expect("requirements guarantee a graphics queue family"),
         present: Some(present.expect("requirements guarantee a present queue family")),
     }
+}
+
+/// The first of `device`'s queue families that supports compute but not
+/// graphics, or `None` if it has none, when compute work shares the graphics
+/// family (design 0002, "Queues and submission").
+pub fn dedicated_compute_family(device: &PhysicalDevice) -> Option<u32> {
+    first_family(device, vk::QueueFlags::COMPUTE, vk::QueueFlags::GRAPHICS)
+}
+
+/// The first of `device`'s queue families that supports transfers but
+/// neither graphics nor compute, or `None` if it has none, when transfers
+/// share a more capable family (design 0002, "Queues and submission").
+pub fn dedicated_transfer_family(device: &PhysicalDevice) -> Option<u32> {
+    first_family(
+        device,
+        vk::QueueFlags::TRANSFER,
+        vk::QueueFlags::GRAPHICS | vk::QueueFlags::COMPUTE,
+    )
+}
+
+/// The index of `device`'s first queue family that supports everything in
+/// `wanted` and nothing in `unwanted`.
+fn first_family(
+    device: &PhysicalDevice,
+    wanted: vk::QueueFlags,
+    unwanted: vk::QueueFlags,
+) -> Option<u32> {
+    device
+        .queue_families
+        .iter()
+        .position(|family| {
+            family.queue_flags.contains(wanted) && !family.queue_flags.intersects(unwanted)
+        })
+        .map(|index| index as u32)
 }
 
 /// The indices of `device`'s queue families that support graphics and can
@@ -996,42 +992,31 @@ mod tests {
         );
     }
 
-    /// The summary lists every reported capability a device has.
+    /// Dedicated compute and transfer families are found by their flags,
+    /// and a family that also supports graphics or compute isn't dedicated.
     #[test]
-    fn the_summary_lists_the_capabilities_a_device_has() {
-        let mut device = device("device", vk::PhysicalDeviceType::DISCRETE_GPU, 8 * GIB);
-        let features = &mut device.features;
-        features.present_timing.present_timing = vk::TRUE;
-        features.swapchain_maintenance1.swapchain_maintenance1 = vk::TRUE;
-        assert_eq!(
-            capability_summary(&device),
-            "has present timing, swapchain maintenance",
-        );
-    }
-
-    /// The summary lists the capabilities a device lacks too, as the log
-    /// contract says an optional extension a device lacks is notable.
-    #[test]
-    fn the_summary_lists_the_capabilities_a_device_lacks() {
-        let mut device = device("device", vk::PhysicalDeviceType::DISCRETE_GPU, 8 * GIB);
-        device
-            .features
-            .swapchain_maintenance1
-            .swapchain_maintenance1 = vk::TRUE;
-        assert_eq!(
-            capability_summary(&device),
-            "has swapchain maintenance; lacks present timing",
-        );
-    }
-
-    /// A device with none of the capabilities lists only what it lacks.
-    #[test]
-    fn the_summary_of_a_device_without_capabilities() {
+    fn finds_dedicated_families() {
         let device = device("device", vk::PhysicalDeviceType::DISCRETE_GPU, 8 * GIB);
-        assert_eq!(
-            capability_summary(&device),
-            "lacks present timing, swapchain maintenance",
+        assert_eq!(dedicated_compute_family(&device), None);
+        assert_eq!(dedicated_transfer_family(&device), None);
+
+        let device = with_family(
+            with_family(device, vk::QueueFlags::COMPUTE | vk::QueueFlags::TRANSFER),
+            vk::QueueFlags::TRANSFER,
         );
+        assert_eq!(dedicated_compute_family(&device), Some(1));
+        assert_eq!(dedicated_transfer_family(&device), Some(2));
+    }
+
+    /// The selection carries the device's capabilities, for its queue
+    /// families.
+    #[test]
+    fn the_selection_carries_capabilities() {
+        let mut device = device("device", vk::PhysicalDeviceType::DISCRETE_GPU, 8 * GIB);
+        device.features.core.texture_compression_bc = vk::TRUE;
+        let selection = select(headless(vec![device]), None).unwrap();
+        assert_eq!(selection.capabilities.device_name, "device");
+        assert!(selection.capabilities.bc_compression);
     }
 
     /// A device that matches the filter must still meet the requirements:
