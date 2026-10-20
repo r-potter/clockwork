@@ -1,6 +1,6 @@
 # Clockwork architecture
 
-**Status:** Proposed. Must be accepted before design `0002-rhi` is accepted.
+**Status:** Accepted on 2026-10-20.
 
 This document is the map of the engine: what the subsystems are, how they depend on each other, and how a frame flows through them. Detailed designs live in [`design/`](design/README.md), and cross-cutting decisions in [`decisions/`](decisions/README.md). Sections marked *provisional* are settled by the design doc named in them, and this document is updated when that design is accepted.
 
