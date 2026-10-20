@@ -519,7 +519,7 @@ mod tests {
             tests.env,
             [(
                 "CLOCKWORK_REQUIRED_CAPABILITIES",
-                "descriptor-heap,device-address-commands,swapchain-maintenance".to_owned()
+                "swapchain-maintenance,bc-compression".to_owned()
             )]
         );
     }

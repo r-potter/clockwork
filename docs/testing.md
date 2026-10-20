@@ -143,13 +143,13 @@ sudo dnf install git meson ninja-build pkgconf-pkg-config gcc gcc-c++ llvm-devel
 
 `xtask` points the Vulkan loader at lavapipe's manifest with `VK_DRIVER_FILES`, so it's the only driver, and unsets `VK_ADD_DRIVER_FILES` and `VK_ICD_FILENAMES`, which would add drivers or be ignored. It does this in its own environment, which every command it runs inherits, so the prerequisites check lists lavapipe alone too; your shell's environment is unchanged.
 
-`CLOCKWORK_REQUIRED_CAPABILITIES` becomes the capabilities lavapipe has, rather than `all`: `descriptor-heap`, `device-address-commands` and `swapchain-maintenance`. Tests needing the others skip on it, since it has one queue family and no present timing, so the hardware checks before review cover those. The list is `CAPABILITIES` in `xtask/src/lavapipe.rs`, and a test there fails if a capability added to `Capability` isn't listed either as one lavapipe has or as one it lacks.
+`CLOCKWORK_REQUIRED_CAPABILITIES` becomes the capabilities lavapipe has, rather than `all`: `swapchain-maintenance` and `bc-compression`. Tests needing the others skip on it, since it has one queue family and no present timing, so the hardware checks before review cover those. The list is `CAPABILITIES` in `xtask/src/lavapipe.rs`. A test there fails if a capability added to `Capability` isn't listed either as one lavapipe has or as one it lacks, and the GPU test `every_required_capability_is_present` fails if lavapipe lacks one listed as one it has.
 
 To run a single test on lavapipe, set the same variables yourself:
 
 ```sh
 VK_DRIVER_FILES=$PWD/target/lavapipe/<commit>/install/share/vulkan/icd.d/lvp_icd.x86_64.json \
-  CLOCKWORK_REQUIRED_CAPABILITIES=descriptor-heap,device-address-commands,swapchain-maintenance \
+  CLOCKWORK_REQUIRED_CAPABILITIES=swapchain-maintenance,bc-compression \
   cargo test <test name>
 ```
 
@@ -341,16 +341,18 @@ Some tests need a capability that not every device has, such as a dedicated tran
 ```rust
 let session = TestSession::new();
 let backend = VulkanTestBackend::headless(&session);
-require_capabilities!(backend, Capability::DescriptorHeap);
+require_capabilities!(backend, Capability::DedicatedTransferQueue);
 ```
 
-The capabilities are listed in `Capability`, in `src/rhi/vulkan/test_support.rs`, with the names used below: `descriptor-heap`, `device-address-commands`, `present-timing`, `swapchain-maintenance`, `dedicated-compute-queue` and `dedicated-transfer-queue`. The list is for tests only, until the RHI has its own capability query. A device has an extension's capability when it has both the extension and the extension's main feature.
+The capabilities are listed in `Capability`, in `src/rhi/vulkan/test_support.rs`, with the names used below: `present-timing`, `swapchain-maintenance`, `dedicated-compute-queue`, `dedicated-transfer-queue` and `bc-compression`. Each names an optional part of the RHI's `Capabilities` (design 0002), and a device has it when its `Capabilities` say so, so tests see the device as the RHI's users do. What device selection requires, such as descriptor heaps, isn't listed: every selected device has it.
 
 A skipped test passes, but prints a banner to stderr, even when the test passes, so skips are visible:
 
 ```text
-=== clockwork: skipped rhi::vulkan::gpu_tests::...: NVIDIA GeForce RTX 4090 lacks the device-address-commands capability ===
+=== clockwork: skipped rhi::vulkan::gpu_tests::...: llvmpipe (LLVM 19.1.7, 256 bits) lacks the dedicated-transfer-queue capability ===
 ```
+
+`every_required_capability_is_present`, in `src/rhi/vulkan/gpu_tests.rs`, asks about every capability, so a required one the device lacks fails a test even before any test needs it.
 
 ### `CLOCKWORK_REQUIRED_CAPABILITIES`
 
