@@ -102,12 +102,12 @@ pub enum Validation {
     Off,
     /// Enable these features if available. Otherwise log a warning, and
     /// continue with what is available.
-    Preferred(ValidationFeatures),
+    Preferred(ValidationFeatureSet),
     /// Enable these features, or fail to create the backend.
-    Required(ValidationFeatures),
+    Required(ValidationFeatureSet),
 }
 
-/// One validation feature, enabled as part of [`ValidationFeatures`].
+/// One validation feature, enabled as part of [`ValidationFeatureSet`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ValidationFeature {
     /// Checks API usage against the specification's valid usage rules. Every
@@ -149,7 +149,7 @@ impl ValidationFeature {
 /// Invariant: any feature implies [`ValidationFeature::Core`], so the set is
 /// either empty ([`OFF`](Self::OFF)) or contains `Core`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct ValidationFeatures {
+pub struct ValidationFeatureSet {
     /// Whether [`ValidationFeature::Core`] is enabled.
     core: bool,
     /// Whether [`ValidationFeature::Sync`] is enabled.
@@ -160,8 +160,9 @@ pub struct ValidationFeatures {
     best_practices: bool,
 }
 
-impl ValidationFeatures {
-    /// No validation at all.
+impl ValidationFeatureSet {
+    /// The empty set: no validation at all. It's named for what it means, as
+    /// the value `off` parses to, rather than `EMPTY`.
     pub const OFF: Self = Self {
         core: false,
         sync: false,
@@ -209,7 +210,7 @@ impl ValidationFeatures {
     }
 }
 
-impl fmt::Display for ValidationFeatures {
+impl fmt::Display for ValidationFeatureSet {
     /// Formats the set as it's parsed: `off`, or the features' names,
     /// separated by commas.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -221,7 +222,7 @@ impl fmt::Display for ValidationFeatures {
     }
 }
 
-impl FromStr for ValidationFeatures {
+impl FromStr for ValidationFeatureSet {
     type Err = anyhow::Error;
 
     /// Parses `off`, or a comma-separated list of feature names. Spaces
@@ -353,7 +354,7 @@ mod tests {
     };
 
     /// Parses `value`, panicking with the error if it's invalid.
-    fn parse(value: &str) -> ValidationFeatures {
+    fn parse(value: &str) -> ValidationFeatureSet {
         value
             .parse()
             .unwrap_or_else(|err| panic!("{value:?}: {err:?}"))
@@ -362,7 +363,7 @@ mod tests {
     /// `off` is the empty set.
     #[test]
     fn off_parses_as_no_features() {
-        assert_eq!(parse("off"), ValidationFeatures::OFF);
+        assert_eq!(parse("off"), ValidationFeatureSet::OFF);
         assert!(parse("off").is_off());
     }
 
@@ -376,7 +377,7 @@ mod tests {
             assert!(features.contains(feature), "{feature:?}");
         }
         assert_eq!(parse("sync"), parse("core,sync"));
-        assert_eq!(parse("sync"), ValidationFeatures::SYNC);
+        assert_eq!(parse("sync"), ValidationFeatureSet::SYNC);
     }
 
     /// A list enables each feature it names and no other, ignoring spaces
@@ -408,7 +409,7 @@ mod tests {
             "best_practices",
         ] {
             assert!(
-                value.parse::<ValidationFeatures>().is_err(),
+                value.parse::<ValidationFeatureSet>().is_err(),
                 "{value:?} parsed"
             );
         }
@@ -417,7 +418,7 @@ mod tests {
     /// The error names the value and lists what's valid.
     #[test]
     fn invalid_feature_errors_list_the_valid_names() {
-        let err = "fast".parse::<ValidationFeatures>().unwrap_err();
+        let err = "fast".parse::<ValidationFeatureSet>().unwrap_err();
         assert_eq!(
             err.to_string(),
             "invalid validation features \"fast\": expected off, or a comma-separated list of \

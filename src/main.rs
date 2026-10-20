@@ -13,7 +13,7 @@ use anyhow::{Context, Result, bail};
 use clap::Parser;
 use diagnostics::{DiagnosticCounter, Session, SessionLayer, is_session_span};
 use rhi::{
-    BackendOptions, GraphicsApi, RenderHardwareInterface, Validation, ValidationFeatures,
+    BackendOptions, GraphicsApi, RenderHardwareInterface, Validation, ValidationFeatureSet,
     WindowSize, WindowTarget,
 };
 use tracing::level_filters::LevelFilter;
@@ -48,7 +48,7 @@ struct Options {
     /// layer is available, unless --fail-on-warnings is given. [default:
     /// sync in debug builds, off in release builds]
     #[arg(long, value_name = "FEATURES")]
-    validation: Option<ValidationFeatures>,
+    validation: Option<ValidationFeatureSet>,
     /// Exit cleanly after rendering N frames. [default: run until the window
     /// is closed]
     #[arg(long, value_name = "N", value_parser = clap::value_parser!(u64).range(1..))]
@@ -93,14 +93,14 @@ fn parse_device(value: &str) -> Result<String, &'static str> {
 /// can't be one that wasn't validated, unless the features are `off`: then it
 /// fails only on what the engine itself logs.
 fn validation(
-    requested: Option<ValidationFeatures>,
+    requested: Option<ValidationFeatureSet>,
     fail_on_warnings: bool,
     debug: bool,
 ) -> Validation {
     let default = if debug {
-        ValidationFeatures::SYNC
+        ValidationFeatureSet::SYNC
     } else {
-        ValidationFeatures::OFF
+        ValidationFeatureSet::OFF
     };
     let features = requested.unwrap_or(default);
     if features.is_off() {
@@ -494,10 +494,10 @@ mod tests {
         let options = parse(&["--validation", "sync,gpu"]).unwrap();
         assert_eq!(
             options.validation,
-            Some(ValidationFeatures::SYNC.with(rhi::ValidationFeature::Gpu))
+            Some(ValidationFeatureSet::SYNC.with(rhi::ValidationFeature::Gpu))
         );
         let options = parse(&["--validation", "off"]).unwrap();
-        assert_eq!(options.validation, Some(ValidationFeatures::OFF));
+        assert_eq!(options.validation, Some(ValidationFeatureSet::OFF));
     }
 
     /// An unknown feature is an error, naming the valid ones.
@@ -540,7 +540,7 @@ mod tests {
     fn default_validation_depends_on_the_build() {
         assert_eq!(
             validation(None, false, true),
-            Validation::Preferred(ValidationFeatures::SYNC)
+            Validation::Preferred(ValidationFeatureSet::SYNC)
         );
         assert_eq!(validation(None, false, false), Validation::Off);
     }
@@ -549,7 +549,7 @@ mod tests {
     /// builds can be validated too.
     #[test]
     fn requested_validation_is_preferred_in_any_build() {
-        let features = ValidationFeatures::SYNC.with(rhi::ValidationFeature::BestPractices);
+        let features = ValidationFeatureSet::SYNC.with(rhi::ValidationFeature::BestPractices);
         for debug in [true, false] {
             assert_eq!(
                 validation(Some(features), false, debug),
@@ -562,7 +562,7 @@ mod tests {
     #[test]
     fn validation_off_turns_it_off() {
         assert_eq!(
-            validation(Some(ValidationFeatures::OFF), false, true),
+            validation(Some(ValidationFeatureSet::OFF), false, true),
             Validation::Off
         );
     }
@@ -579,9 +579,9 @@ mod tests {
     fn fail_on_warnings_requires_validation() {
         assert_eq!(
             validation(None, true, true),
-            Validation::Required(ValidationFeatures::SYNC)
+            Validation::Required(ValidationFeatureSet::SYNC)
         );
-        let features = ValidationFeatures::SYNC.with(rhi::ValidationFeature::Gpu);
+        let features = ValidationFeatureSet::SYNC.with(rhi::ValidationFeature::Gpu);
         for debug in [true, false] {
             assert_eq!(
                 validation(Some(features), true, debug),
@@ -597,7 +597,7 @@ mod tests {
     fn fail_on_warnings_keeps_validation_off() {
         assert_eq!(validation(None, true, false), Validation::Off);
         assert_eq!(
-            validation(Some(ValidationFeatures::OFF), true, true),
+            validation(Some(ValidationFeatureSet::OFF), true, true),
             Validation::Off
         );
     }

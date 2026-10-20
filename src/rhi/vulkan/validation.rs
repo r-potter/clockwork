@@ -22,7 +22,7 @@ use ash::{Entry, vk};
 use tracing::{Level, debug, error, trace, warn};
 
 use crate::diagnostics::{SessionId, VALIDATION_TARGET};
-use crate::rhi::{Validation, ValidationFeature, ValidationFeatures};
+use crate::rhi::{Validation, ValidationFeature, ValidationFeatureSet};
 
 /// The Khronos validation layer, shipped with the Vulkan SDK.
 pub const VALIDATION_LAYER: &CStr = c"VK_LAYER_KHRONOS_validation";
@@ -94,9 +94,9 @@ impl Availability {
 /// How the instance is created for validation, decided by [`decide`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Plan {
-    /// The features to enable. [`ValidationFeatures::OFF`] means no layer and
+    /// The features to enable. [`ValidationFeatureSet::OFF`] means no layer and
     /// no debug messenger.
-    pub features: ValidationFeatures,
+    pub features: ValidationFeatureSet,
     /// Whether to pass the features to the layer as settings, through
     /// `VK_EXT_layer_settings`. Without it, the layer runs with its defaults,
     /// which are core validation only.
@@ -109,7 +109,7 @@ pub struct Plan {
 impl Plan {
     /// A plan with no validation and nothing to warn about.
     const OFF: Self = Self {
-        features: ValidationFeatures::OFF,
+        features: ValidationFeatureSet::OFF,
         use_settings: false,
         warning: None,
     };
@@ -167,7 +167,7 @@ pub fn decide(requested: Validation, available: Availability) -> Result<Plan> {
             );
         }
         return Ok(Plan {
-            features: ValidationFeatures::OFF.with(ValidationFeature::Core),
+            features: ValidationFeatureSet::OFF.with(ValidationFeature::Core),
             use_settings: false,
             warning: Some(format!(
                 "{layer} doesn't provide VK_EXT_layer_settings, so validation features \
@@ -192,7 +192,7 @@ pub struct LayerSettings {
 
 impl LayerSettings {
     /// The settings that enable exactly `features`.
-    pub fn new(features: ValidationFeatures) -> Self {
+    pub fn new(features: ValidationFeatureSet) -> Self {
         Self {
             values: FEATURE_SETTINGS
                 .map(|(feature, _)| vk::Bool32::from(features.contains(feature))),
@@ -360,7 +360,7 @@ mod tests {
     };
 
     /// Core validation only.
-    const CORE: ValidationFeatures = ValidationFeatures::OFF.with(ValidationFeature::Core);
+    const CORE: ValidationFeatureSet = ValidationFeatureSet::OFF.with(ValidationFeature::Core);
 
     /// `Off` needs nothing, and enables nothing, whatever is available.
     #[test]
@@ -374,8 +374,8 @@ mod tests {
     #[test]
     fn no_features_enable_nothing() {
         for requested in [
-            Validation::Preferred(ValidationFeatures::OFF),
-            Validation::Required(ValidationFeatures::OFF),
+            Validation::Preferred(ValidationFeatureSet::OFF),
+            Validation::Required(ValidationFeatureSet::OFF),
         ] {
             assert_eq!(decide(requested, NO_LAYER).unwrap(), Plan::OFF);
         }
@@ -386,13 +386,13 @@ mod tests {
     #[test]
     fn available_features_are_enabled_through_settings() {
         for requested in [
-            Validation::Preferred(ValidationFeatures::SYNC),
-            Validation::Required(ValidationFeatures::SYNC),
+            Validation::Preferred(ValidationFeatureSet::SYNC),
+            Validation::Required(ValidationFeatureSet::SYNC),
         ] {
             assert_eq!(
                 decide(requested, EVERYTHING).unwrap(),
                 Plan {
-                    features: ValidationFeatures::SYNC,
+                    features: ValidationFeatureSet::SYNC,
                     use_settings: true,
                     warning: None,
                 },
@@ -413,7 +413,7 @@ mod tests {
     /// Preferred validation continues without the layer, with a warning.
     #[test]
     fn preferred_validation_warns_without_the_layer() {
-        let plan = decide(Validation::Preferred(ValidationFeatures::SYNC), NO_LAYER).unwrap();
+        let plan = decide(Validation::Preferred(ValidationFeatureSet::SYNC), NO_LAYER).unwrap();
         assert!(plan.features.is_off());
         assert!(plan.warning.unwrap().contains("isn't installed"));
     }
@@ -422,7 +422,7 @@ mod tests {
     /// them, naming the features.
     #[test]
     fn required_features_fail_without_settings() {
-        let features = ValidationFeatures::SYNC.with(ValidationFeature::BestPractices);
+        let features = ValidationFeatureSet::SYNC.with(ValidationFeature::BestPractices);
         let err = decide(Validation::Required(features), NO_SETTINGS).unwrap_err();
         assert!(
             err.to_string()
@@ -435,7 +435,11 @@ mod tests {
     /// with a warning naming them.
     #[test]
     fn preferred_features_fall_back_to_core_without_settings() {
-        let plan = decide(Validation::Preferred(ValidationFeatures::SYNC), NO_SETTINGS).unwrap();
+        let plan = decide(
+            Validation::Preferred(ValidationFeatureSet::SYNC),
+            NO_SETTINGS,
+        )
+        .unwrap();
         assert_eq!(plan.features, CORE);
         assert!(!plan.use_settings);
         assert!(plan.warning.unwrap().contains("sync"));
@@ -455,7 +459,7 @@ mod tests {
     /// value saying whether its feature is enabled.
     #[test]
     fn settings_cover_every_feature() {
-        let features = ValidationFeatures::SYNC;
+        let features = ValidationFeatureSet::SYNC;
         let layer_settings = LayerSettings::new(features);
         let settings = layer_settings.settings();
         assert_eq!(settings.len(), ValidationFeature::ALL.len());

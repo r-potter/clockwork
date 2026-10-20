@@ -8,7 +8,7 @@
 //! | Variable | Meaning | Default |
 //! |---|---|---|
 //! | [`CLOCKWORK_DEVICE`] | Only consider devices whose names contain this, ignoring case | Every device |
-//! | [`CLOCKWORK_VALIDATION`] | The validation features, as for [`ValidationFeatures`]'s parser, except that `off` is rejected | `sync` |
+//! | [`CLOCKWORK_VALIDATION`] | The validation features, as for [`ValidationFeatureSet`]'s parser, except that `off` is rejected | `sync` |
 //! | [`CLOCKWORK_REQUIRED_CAPABILITIES`] | `all`, or a comma-separated list of capabilities whose absence fails tests rather than skipping them | None |
 //!
 //! Each variable is read by a pure function of its value, tested here, and a
@@ -25,7 +25,7 @@ use tracing_subscriber::{EnvFilter, Layer, fmt, registry};
 
 use crate::diagnostics::SessionLayer;
 use crate::diagnostics::capture::{TestCapture, TestSession};
-use crate::rhi::{BackendOptions, Validation, ValidationFeatures};
+use crate::rhi::{BackendOptions, Validation, ValidationFeatureSet};
 
 /// Restricts T1 tests to devices whose names contain its value.
 pub const CLOCKWORK_DEVICE: &str = "CLOCKWORK_DEVICE";
@@ -113,11 +113,11 @@ fn env(name: &str) -> Option<String> {
 ///
 /// Returns an error if the value doesn't parse, or is `off`: T1 tests always
 /// require validation.
-fn validation_features(value: Option<&str>) -> Result<ValidationFeatures> {
+fn validation_features(value: Option<&str>) -> Result<ValidationFeatureSet> {
     let Some(value) = value.filter(|value| !value.trim().is_empty()) else {
-        return Ok(ValidationFeatures::SYNC);
+        return Ok(ValidationFeatureSet::SYNC);
     };
-    let features: ValidationFeatures = value.parse()?;
+    let features: ValidationFeatureSet = value.parse()?;
     if features.is_off() {
         bail!("GPU tests always require validation, so \"off\" isn't allowed");
     }
@@ -250,7 +250,7 @@ mod tests {
         for value in [None, Some(""), Some("  ")] {
             assert_eq!(
                 validation_features(value).unwrap(),
-                ValidationFeatures::SYNC
+                ValidationFeatureSet::SYNC
             );
         }
     }
