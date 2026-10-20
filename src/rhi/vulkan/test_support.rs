@@ -1,97 +1,68 @@
 //! Fixtures for the Vulkan backend's T1 tests: [`VulkanTestBackend`], the
 //! test-only [`Capability`] list, and [`require_capabilities!`].
 //!
-//! The capability list is a stand-in, for tests only. Design `0002-rhi`
-//! replaces it with the RHI's own capability query.
-
-use ash::{ext, khr, vk};
+//! [`Capability`] names the optional parts of the RHI's [`Capabilities`], so
+//! that tests can require them by name in `CLOCKWORK_REQUIRED_CAPABILITIES`.
+//! Whether a device has one is read from its [`Capabilities`], as the RHI's
+//! users read it (design 0002, "Capabilities").
 
 use super::VulkanRenderHardwareInterface;
-use super::physical_device::PhysicalDevice;
 use crate::diagnostics::capture::TestSession;
+use crate::rhi::Capabilities;
 use crate::test_support::{self, RequiredCapabilities};
 
-/// A capability some T1 tests need, which some devices lack.
+/// An optional capability some T1 tests need, which some devices lack.
 ///
 /// A test that needs one asks [`VulkanTestBackend::has`], usually through
 /// [`require_capabilities!`], and is skipped on devices without it, unless
-/// `CLOCKWORK_REQUIRED_CAPABILITIES` requires it (R9).
+/// `CLOCKWORK_REQUIRED_CAPABILITIES` requires it (design 0001, R9).
+///
+/// The capabilities device selection requires, such as descriptor heaps,
+/// aren't listed: every selected device has them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Capability {
-    /// `VK_EXT_descriptor_heap` (ADR 0002).
-    DescriptorHeap,
-    /// `VK_KHR_device_address_commands` (ADR 0002).
-    DeviceAddressCommands,
-    /// `VK_EXT_present_timing` (ADR 0002).
+    /// [`Capabilities::present_timing`].
     PresentTiming,
-    /// `VK_KHR_swapchain_maintenance1` (ADR 0002).
+    /// [`Capabilities::swapchain_maintenance`].
     SwapchainMaintenance,
-    /// A queue family that supports compute but not graphics.
+    /// [`Capabilities::dedicated_compute_queue`].
     DedicatedComputeQueue,
-    /// A queue family that supports transfers, but neither graphics nor
-    /// compute.
+    /// [`Capabilities::dedicated_transfer_queue`].
     DedicatedTransferQueue,
+    /// [`Capabilities::bc_compression`].
+    BcCompression,
 }
 
 impl Capability {
     /// Every capability.
-    pub const ALL: [Self; 6] = [
-        Self::DescriptorHeap,
-        Self::DeviceAddressCommands,
+    pub const ALL: [Self; 5] = [
         Self::PresentTiming,
         Self::SwapchainMaintenance,
         Self::DedicatedComputeQueue,
         Self::DedicatedTransferQueue,
+        Self::BcCompression,
     ];
 
     /// The capability's name, as written in
     /// `CLOCKWORK_REQUIRED_CAPABILITIES`.
     pub fn name(self) -> &'static str {
         match self {
-            Self::DescriptorHeap => "descriptor-heap",
-            Self::DeviceAddressCommands => "device-address-commands",
             Self::PresentTiming => "present-timing",
             Self::SwapchainMaintenance => "swapchain-maintenance",
             Self::DedicatedComputeQueue => "dedicated-compute-queue",
             Self::DedicatedTransferQueue => "dedicated-transfer-queue",
+            Self::BcCompression => "bc-compression",
         }
     }
 
-    /// Whether `device` has the capability.
-    ///
-    /// An extension capability needs both the extension and its main
-    /// feature.
-    pub fn is_supported_by(self, device: &PhysicalDevice) -> bool {
-        let features = &device.features;
-        let has_family = |wanted: vk::QueueFlags, unwanted: vk::QueueFlags| {
-            device.queue_families.iter().any(|family| {
-                family.queue_flags.contains(wanted) && !family.queue_flags.intersects(unwanted)
-            })
-        };
+    /// Whether a device with `capabilities` has the capability.
+    pub fn is_in(self, capabilities: &Capabilities) -> bool {
         match self {
-            Self::DescriptorHeap => {
-                device.supports_extension(ext::descriptor_heap::NAME)
-                    && features.descriptor_heap.descriptor_heap == vk::TRUE
-            }
-            Self::DeviceAddressCommands => {
-                device.supports_extension(khr::device_address_commands::NAME)
-                    && features.device_address_commands.device_address_commands == vk::TRUE
-            }
-            Self::PresentTiming => {
-                device.supports_extension(ext::present_timing::NAME)
-                    && features.present_timing.present_timing == vk::TRUE
-            }
-            Self::SwapchainMaintenance => {
-                device.supports_extension(khr::swapchain_maintenance1::NAME)
-                    && features.swapchain_maintenance1.swapchain_maintenance1 == vk::TRUE
-            }
-            Self::DedicatedComputeQueue => {
-                has_family(vk::QueueFlags::COMPUTE, vk::QueueFlags::GRAPHICS)
-            }
-            Self::DedicatedTransferQueue => has_family(
-                vk::QueueFlags::TRANSFER,
-                vk::QueueFlags::GRAPHICS | vk::QueueFlags::COMPUTE,
-            ),
+            Self::PresentTiming => capabilities.present_timing,
+            Self::SwapchainMaintenance => capabilities.swapchain_maintenance,
+            Self::DedicatedComputeQueue => capabilities.dedicated_compute_queue,
+            Self::DedicatedTransferQueue => capabilities.dedicated_transfer_queue,
+            Self::BcCompression => capabilities.bc_compression,
         }
     }
 }
@@ -139,10 +110,14 @@ impl VulkanTestBackend {
     ///
     /// Panics if the device lacks `capability` and it's required.
     pub fn has(&self, capability: Capability) -> bool {
-        let device = &self.rhi.physical_device;
-        let supported = capability.is_supported_by(device);
+        let capabilities = self.rhi.capabilities();
+        let supported = capability.is_in(capabilities);
         if !supported {
-            test_support::missing_capability(capability.name(), &device.name(), &self.required);
+            test_support::missing_capability(
+                capability.name(),
+                &capabilities.device_name,
+                &self.required,
+            );
         }
         supported
     }
@@ -162,7 +137,7 @@ impl std::ops::Deref for VulkanTestBackend {
 /// ```ignore
 /// let session = TestSession::new();
 /// let backend = VulkanTestBackend::headless(&session);
-/// require_capabilities!(backend, Capability::DescriptorHeap);
+/// require_capabilities!(backend, Capability::DedicatedTransferQueue);
 /// ```
 macro_rules! require_capabilities {
     ($backend:expr, $($capability:expr),+ $(,)?) => {
@@ -174,6 +149,10 @@ macro_rules! require_capabilities {
         }
     };
 }
+#[expect(
+    unused_imports,
+    reason = "no GPU test needs an optional capability until design 0002's rhi-commands"
+)]
 pub(crate) use require_capabilities;
 
 #[cfg(test)]
@@ -181,10 +160,9 @@ mod tests {
     //! T0 tests of the capability list and [`require_capabilities!`].
 
     use std::cell::RefCell;
-    use std::ffi::CStr;
 
     use super::*;
-    use crate::rhi::vulkan::physical_device::{Features, Properties};
+    use crate::rhi::{Limits, QueueKind, QueueKindSet};
 
     /// Every capability has a distinct name, so none can be required by
     /// mistake in place of another.
@@ -196,70 +174,52 @@ mod tests {
         assert_eq!(names.len(), Capability::ALL.len());
     }
 
-    /// Creates a device with `extensions`, and with every feature of the
-    /// extensions the capabilities check.
-    fn device_with(extensions: &[&CStr]) -> PhysicalDevice {
-        let mut features = Features::default();
-        features.descriptor_heap.descriptor_heap = vk::TRUE;
-        features.device_address_commands.device_address_commands = vk::TRUE;
-        features.present_timing.present_timing = vk::TRUE;
-        features.swapchain_maintenance1.swapchain_maintenance1 = vk::TRUE;
-        PhysicalDevice {
-            handle: vk::PhysicalDevice::null(),
-            properties: Properties::default(),
-            features,
-            memory_properties: vk::PhysicalDeviceMemoryProperties::default(),
-            queue_families: Vec::new(),
-            extensions: extensions
-                .iter()
-                .map(|name| {
-                    vk::ExtensionProperties::default()
-                        .extension_name(name)
-                        .unwrap()
-                })
-                .collect(),
+    /// Capabilities with every optional one set to `has`.
+    fn capabilities(has: bool) -> Capabilities {
+        Capabilities {
+            device_name: "device".to_owned(),
+            present_timing: has,
+            swapchain_maintenance: has,
+            dedicated_compute_queue: has,
+            dedicated_transfer_queue: has,
+            timestamps: QueueKindSet::EMPTY.with(QueueKind::Graphics),
+            bc_compression: has,
+            limits: Limits {
+                max_push_data_size: 128,
+                max_texture_dimension_2d: 16_384,
+                max_compute_workgroup_size: [1_024, 1_024, 64],
+                timestamp_period_ns: 1.0,
+            },
         }
     }
 
-    /// The capabilities each extension provides, with its name.
-    const EXTENSION_CAPABILITIES: [(Capability, &CStr); 4] = [
-        (Capability::DescriptorHeap, ext::descriptor_heap::NAME),
-        (
-            Capability::DeviceAddressCommands,
-            khr::device_address_commands::NAME,
-        ),
-        (Capability::PresentTiming, ext::present_timing::NAME),
-        (
-            Capability::SwapchainMaintenance,
-            khr::swapchain_maintenance1::NAME,
-        ),
-    ];
-
-    /// A device with an extension and its feature has the capability, and
-    /// one without the extension lacks it.
+    /// Each capability reads its own field: a device has it when that
+    /// field is set, and only then.
     #[test]
-    fn extension_capabilities_need_the_extension() {
-        for (capability, name) in EXTENSION_CAPABILITIES {
-            assert!(
-                capability.is_supported_by(&device_with(&[name])),
-                "{capability:?}"
-            );
-            assert!(
-                !capability.is_supported_by(&device_with(&[])),
-                "{capability:?}"
-            );
-        }
-    }
-
-    /// A device that has an extension but doesn't support its feature lacks
-    /// the capability, so a test can't run on a driver that only advertises
-    /// it.
-    #[test]
-    fn extension_capabilities_need_the_feature() {
-        for (capability, name) in EXTENSION_CAPABILITIES {
-            let mut device = device_with(&[name]);
-            device.features = Features::default();
-            assert!(!capability.is_supported_by(&device), "{capability:?}");
+    fn each_capability_reads_its_field() {
+        for capability in Capability::ALL {
+            assert!(capability.is_in(&capabilities(true)), "{capability:?}");
+            assert!(!capability.is_in(&capabilities(false)), "{capability:?}");
+            for other in Capability::ALL
+                .into_iter()
+                .filter(|&other| other != capability)
+            {
+                // Clearing another capability's field doesn't change this
+                // one.
+                let mut capabilities = capabilities(true);
+                match other {
+                    Capability::PresentTiming => capabilities.present_timing = false,
+                    Capability::SwapchainMaintenance => capabilities.swapchain_maintenance = false,
+                    Capability::DedicatedComputeQueue => {
+                        capabilities.dedicated_compute_queue = false;
+                    }
+                    Capability::DedicatedTransferQueue => {
+                        capabilities.dedicated_transfer_queue = false;
+                    }
+                    Capability::BcCompression => capabilities.bc_compression = false,
+                }
+                assert!(capability.is_in(&capabilities), "{capability:?}, {other:?}");
+            }
         }
     }
 
@@ -288,7 +248,7 @@ mod tests {
         let mut test = || {
             require_capabilities!(
                 backend,
-                Capability::DescriptorHeap,
+                Capability::BcCompression,
                 Capability::PresentTiming,
             );
             reached = true;
@@ -301,7 +261,7 @@ mod tests {
     #[test]
     fn require_capabilities_continues_with_every_capability() {
         let backend = FakeBackend {
-            capabilities: vec![Capability::DescriptorHeap, Capability::PresentTiming],
+            capabilities: vec![Capability::BcCompression, Capability::PresentTiming],
             asked: RefCell::default(),
         };
         assert!(reaches_the_test_body(&backend));
@@ -318,7 +278,7 @@ mod tests {
         assert!(!reaches_the_test_body(&backend));
         assert_eq!(
             *backend.asked.borrow(),
-            [Capability::DescriptorHeap, Capability::PresentTiming],
+            [Capability::BcCompression, Capability::PresentTiming],
         );
     }
 }

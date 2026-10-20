@@ -63,12 +63,9 @@ pub const PIN: Pin = Pin {
 ///
 /// Every capability is either here or in the tests' list of those lavapipe
 /// lacks, which a test checks, so that one added to `Capability` can't
-/// quietly skip in CI.
-pub const CAPABILITIES: &[&str] = &[
-    "descriptor-heap",
-    "device-address-commands",
-    "swapchain-maintenance",
-];
+/// quietly skip in CI. The engine's `every_required_capability_is_present`
+/// GPU test fails if lavapipe lacks one listed here.
+pub const CAPABILITIES: &[&str] = &["swapchain-maintenance", "bc-compression"];
 
 /// Mesa's repository.
 const REPOSITORY: &str = "https://gitlab.freedesktop.org/mesa/mesa.git";

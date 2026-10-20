@@ -1,7 +1,7 @@
 //! T1 tests of the Vulkan backend: that the validation layer's messages
 //! reach the test that caused them (R5), that synchronization validation is
-//! on (R6), and that the device's Vulkan 1.4 and extension features are
-//! queried (R12).
+//! on (R6), that the device's Vulkan 1.4 and extension features are queried
+//! (R12), and that its capabilities describe it (design 0002, R2).
 //!
 //! Each validation test makes a mistake on purpose, and declares the message it expects
 //! by its ID, so the test fails if the message never arrives, which is what
@@ -10,7 +10,7 @@
 use ash::vk;
 use tracing::Level;
 
-use super::test_support::{Capability, VulkanTestBackend, require_capabilities};
+use super::test_support::{Capability, VulkanTestBackend};
 use crate::diagnostics::VALIDATION_TARGET;
 use crate::diagnostics::capture::TestSession;
 use crate::rhi::QueueKind;
@@ -202,22 +202,29 @@ fn capabilities_describe_the_selected_device() {
     assert!(capabilities.limits.timestamp_period_ns > 0.0);
 }
 
-/// The device has the extensions ADR 0002 requires, with their features,
-/// and the Vulkan 1.4 and extension structures were queried (R12).
+/// The device has every capability `CLOCKWORK_REQUIRED_CAPABILITIES`
+/// requires, as `cargo xtask check --gpu` sets it for the machine.
 ///
-/// Device selection doesn't require these extensions yet, so this test is
-/// what fails on a reference device that lacks them:
-/// `cargo xtask check --gpu` requires every capability. Elsewhere, it's
-/// skipped.
+/// Every capability is asked about, so a missing required one fails here,
+/// even before any test needs it. On lavapipe, that checks that the
+/// expected set `cargo xtask check --lavapipe` uses is right. The others are
+/// reported as skipped.
+#[test]
+fn every_required_capability_is_present() {
+    let session = TestSession::new();
+    let backend = VulkanTestBackend::headless(&session);
+    for capability in Capability::ALL {
+        backend.has(capability);
+    }
+}
+
+/// The Vulkan 1.4 and extension structures were queried (R12 in design
+/// 0001). Device selection requires the ADR 0002 extensions, so every
+/// selected device has them.
 #[test]
 fn reference_device_reports_required_extensions() {
     let session = TestSession::new();
     let backend = VulkanTestBackend::headless(&session);
-    require_capabilities!(
-        backend,
-        Capability::DescriptorHeap,
-        Capability::DeviceAddressCommands,
-    );
 
     let device = &backend.physical_device;
     // Every Vulkan 1.4 device supports `maintenance5`, so it's only unset if
