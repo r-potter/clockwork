@@ -248,6 +248,17 @@ pub const SUPPRESSED: &[Suppression] = &[
                  headless Weston and on minimal desktops. The decorations are then light, which \
                  is harmless.",
     },
+    // Logged by `sctk-adwaita` 0.10 through `log`, in
+    // `Buttons::parse_button_layout_side`.
+    Suppression {
+        target: "sctk_adwaita::buttons",
+        message: MessageMatch::Prefix("Ignoring unknown button type: "),
+        reason: "sctk-adwaita reads the window decorations' button layout from the desktop's \
+                 settings, and warns about each entry it doesn't recognise, including the empty \
+                 entry on the side of GNOME's default layout `:minimize,maximize,close` that has \
+                 no buttons. The layout belongs to the user's desktop, and the decorations just \
+                 leave the entry out, which is harmless.",
+    },
 ];
 
 /// The target `event` is classified and reported by: its own, or, for a
@@ -849,6 +860,21 @@ mod tests {
                 None,
                 "XDG Settings Portal did not return response in time: timeout: 100ms, key: \
                  color-scheme",
+            ),
+            Class::Suppressed,
+        );
+    }
+
+    /// sctk-adwaita's warning about the empty side of GNOME's default button
+    /// layout is suppressed, exactly as sctk-adwaita 0.10 logs it.
+    #[test]
+    fn sctk_adwaitas_unknown_button_warning_is_suppressed() {
+        assert_eq!(
+            classify(
+                Level::WARN,
+                "sctk_adwaita::buttons",
+                None,
+                "Ignoring unknown button type: ",
             ),
             Class::Suppressed,
         );
