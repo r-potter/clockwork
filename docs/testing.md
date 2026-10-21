@@ -180,13 +180,14 @@ Tests are unit tests inside the crate they test (ADR 0001). There's no `tests/` 
 | Tier | Kind | Needs | How to run |
 |---|---|---|---|
 | T0 | Unit: pure logic, such as device selection and the `slangc` lookup | Nothing beyond the prerequisites | `cargo test --workspace -- --skip gpu_tests`, or `cargo xtask check` |
+| T0 | Property: invariants checked over generated inputs, with `proptest` (see "Property tests") | Nothing beyond the prerequisites | As for unit tests, which they run with |
 | T1 | GPU: real Vulkan work, headless, with validation required | A Vulkan 1.4 driver and the validation layer | `cargo test`, which runs every tier, or `cargo xtask check --gpu` |
 
 How tests are told apart:
 - **T1 tests live in modules named `gpu_tests`**, so `--skip gpu_tests` leaves them out. Don't use `gpu_tests` anywhere else in a test's path, or it will be skipped too.
 - **Everything else is T0**, and must pass on a machine with no Vulkan driver, as the CI runners are.
 
-Later designs add the other tiers design 0001 lists.
+Later designs add the other tiers design 0001 lists. Design 0002 adds property tests.
 
 ## Writing tests
 
@@ -197,6 +198,18 @@ Later designs add the other tiers design 0001 lists.
 - **Build paths with `Path`,** never by joining strings, and compare `Path` values, not strings, so tests pass on both operating systems.
 - **Fixture files go in `testdata/`,** next to the code that uses them.
 - **Fix a bug by writing a failing test first,** then the fix.
+
+## Property tests
+
+A property test checks an invariant over many generated inputs, rather than a few chosen ones, using [`proptest`](https://docs.rs/proptest). It suits code with a simple specification and a large input space, such as an allocator, where the cases that break it are hard to pick by hand. The first is `allocations_match_a_simulated_model`, in `src/rhi/vulkan/memory/tlsf.rs`, which runs random allocations and frees against a model of the live ranges.
+
+- **Check against a model.** The clearest property is usually that the code agrees with a simple, obviously correct version of itself, such as a list of live ranges standing in for the allocator's free lists.
+- **Keep generated inputs small,** a few hundred steps of small sizes, so that a run takes well under a second, and failures shrink to cases a person can read.
+- **Make sure it can fail.** Break the code on purpose, once, and check that the test catches it, then undo the change.
+- **Commit `proptest-regressions/`.** When a property fails, `proptest` shrinks the input to a minimal case and records it in a file there, named for the test's source file. Every later run replays the recorded cases first, so a fixed bug stays fixed. Review the file like any other test change.
+- **Run more cases** with `PROPTEST_CASES`, for example `PROPTEST_CASES=10000 cargo test allocations_match_a_simulated_model`, when changing the code a property covers. The default is 256.
+
+Property tests are T0: they run with the unit tests, and need no GPU.
 
 ## Warnings and errors fail tests
 
