@@ -538,7 +538,10 @@ impl fmt::Debug for TlsfSuballocator {
 
 #[cfg(test)]
 mod tests {
-    //! T0 tests of the TLSF suballocator (design 0002, R19).
+    //! T0 unit and property tests of the TLSF suballocator (design 0002,
+    //! R19).
+
+    use proptest::prelude::*;
 
     use super::*;
 
@@ -680,5 +683,141 @@ mod tests {
         let foreign = second.allocate(8, 1).unwrap();
         let _ = first.allocate(8, 1).unwrap();
         first.free(foreign);
+    }
+
+    /// One step of a property test: allocate, or free one of the live
+    /// allocations.
+    #[derive(Debug, Clone)]
+    enum Step {
+        /// Allocate `size` bytes, aligned to `1 << alignment_log2`.
+        Allocate {
+            /// The bytes to allocate.
+            size: u64,
+            /// The alignment's power of two.
+            alignment_log2: u32,
+        },
+        /// Free the live allocation at this position, modulo their number.
+        Free(usize),
+    }
+
+    /// Steps that allocate up to 4 KiB with alignments up to 256, or free.
+    fn steps() -> impl Strategy<Value = Vec<Step>> {
+        let step = prop_oneof![
+            (1..=4_096_u64, 0..=8_u32).prop_map(|(size, alignment_log2)| Step::Allocate {
+                size,
+                alignment_log2
+            }),
+            any::<usize>().prop_map(Step::Free),
+        ];
+        prop::collection::vec(step, 1..200)
+    }
+
+    /// Whether some gap between `live` ranges, within `0..capacity`, holds
+    /// `size` bytes at a multiple of `alignment`. `live` is sorted by offset.
+    fn some_gap_fits(live: &[(u64, u64)], capacity: u64, size: u64, alignment: u64) -> bool {
+        let mut start: u64 = 0;
+        for (offset, length) in live.iter().copied().chain([(capacity, 0)]) {
+            let fits = start
+                .checked_next_multiple_of(alignment)
+                .and_then(|aligned| aligned.checked_add(size))
+                .is_some_and(|end| end <= offset);
+            if fits {
+                return true;
+            }
+            start = offset + length;
+        }
+        false
+    }
+
+    proptest! {
+        /// Random allocations and frees, checked against a model of the
+        /// live ranges: every allocation is aligned, inside the capacity,
+        /// and overlaps no other; an allocation fails only when no gap can
+        /// hold it; and freeing everything leaves the whole capacity free.
+        ///
+        /// The model is `simulation`, the allocations the suballocator has
+        /// handed out and not yet taken back. Before each allocation, it's sorted
+        /// into `ranges`, which is what the suballocator should consider in
+        /// use. When an allocation succeeds, the test checks that:
+        ///
+        /// - its offset is a multiple of the alignment asked for, so the
+        ///   gap before an aligned allocation was split off correctly;
+        /// - it ends within `0..capacity`, so splitting and merging never
+        ///   make a range that runs past the end;
+        /// - it overlaps none of the live ranges, so a range in use was
+        ///   never also in a free list, and no range was handed out twice.
+        ///
+        /// When an allocation fails, the test checks that no gap between the
+        /// live ranges could have held it, using [`some_gap_fits`]. This is
+        /// the guarantee that sets this suballocator apart from textbook
+        /// TLSF, which can fail while a fitting range sits in a class its
+        /// constant-time search skips.
+        ///
+        /// After every step, allocating or freeing, the test checks that
+        /// [`TlsfSuballocator::allocated`] is the total size of the live
+        /// allocations, so allocating and freeing account for exactly the
+        /// bytes asked for, not the gaps or the space split off after them.
+        ///
+        /// At the end, the test frees whatever is still live, and checks
+        /// that nothing is counted as allocated, and that a single
+        /// allocation of the whole capacity succeeds at offset 0. That only
+        /// works if freeing merged every free range with its neighbours,
+        /// back into one range covering `0..capacity`, so a merge missed
+        /// anywhere in the run fails it.
+        #[test]
+        fn allocations_match_a_simulated_model(capacity in 1..=65_536_u64, steps in steps()) {
+            let mut suballocator = TlsfSuballocator::new(capacity);
+            // The simulated model of the live ranges.
+            let mut simulation: Vec<Allocation> = Vec::new();
+            for step in steps {
+                match step {
+                    Step::Allocate { size, alignment_log2 } => {
+                        let alignment = 1 << alignment_log2;
+                        let mut ranges: Vec<_> =
+                            simulation.iter().map(|a| (a.offset(), a.size())).collect();
+                        ranges.sort_unstable();
+                        match suballocator.allocate(size, alignment) {
+                            Some(allocation) => {
+                                let (offset, end) = (allocation.offset(), allocation.offset() + size);
+                                // Allocations start at a multiple of their
+                                // alignment.
+                                prop_assert_eq!(offset % alignment, 0);
+                                // Allocations lie within `0..capacity`.
+                                prop_assert!(end <= capacity);
+                                for &(other, length) in &ranges {
+                                    // Allocations overlap no simulated live
+                                    // range.
+                                    prop_assert!(end <= other || other + length <= offset);
+                                }
+                                simulation.push(allocation);
+                            }
+                            None => {
+                                // Allocations fail only when no gap exists
+                                // between the simulated live ranges that
+                                // could hold them.
+                                prop_assert!(!some_gap_fits(&ranges, capacity, size, alignment));
+                            }
+                        }
+                    }
+                    Step::Free(index) => {
+                        if !simulation.is_empty() {
+                            let allocation = simulation.swap_remove(index % simulation.len());
+                            suballocator.free(allocation);
+                        }
+                    }
+                }
+                // The bytes counted as allocated are exactly the simulated
+                // live allocations' sizes.
+                prop_assert_eq!(suballocator.allocated(), simulation.iter().map(Allocation::size).sum::<u64>());
+            }
+            for allocation in simulation {
+                suballocator.free(allocation);
+            }
+            // Freeing everything leaves nothing counted as allocated.
+            prop_assert_eq!(suballocator.allocated(), 0);
+            // Freeing everything merges the free ranges back into one,
+            // covering the whole capacity.
+            prop_assert_eq!(suballocator.allocate(suballocator.capacity(), 1).map(|a| a.offset()), Some(0));
+        }
     }
 }

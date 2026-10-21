@@ -24,6 +24,9 @@ winit = "0.30.13"
 # For tests that log through the `log` crate, as dependencies such as
 # `sctk-adwaita` do.
 log = "0.4.34"
+# Property tests: invariants checked over generated inputs, such as the TLSF
+# suballocator's against a model (design 0002).
+proptest = "1.12.0"
 
 # The engine is the root package and the only default member, so plain
 # `cargo build`, `run` and `test` act on it alone (ADR 0001). `xtask` holds the
