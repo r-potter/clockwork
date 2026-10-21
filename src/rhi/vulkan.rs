@@ -19,6 +19,7 @@ mod device_selection;
 mod frames;
 #[cfg(test)]
 mod gpu_tests;
+mod memory;
 mod physical_device;
 mod shaders;
 mod surface;
