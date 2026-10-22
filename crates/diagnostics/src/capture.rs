@@ -314,10 +314,14 @@ fn report_unattributed(session: Option<SessionId>, event: &CapturedEvent) {
 /// so it isn't `Send`: it belongs to that thread. Threads that the test
 /// starts must enter a clone of [`span`](Self::span) to be attributed to it.
 ///
-/// ```ignore
+/// ```
+/// use clockwork_diagnostics::capture::TestSession;
+/// use tracing::{Level, warn};
+///
 /// let session = TestSession::new();
 /// session.expect(Level::WARN, "clockwork::import", |event| event.message.contains("case"));
-/// // ...code that should log that warning, and nothing else at `WARN` or above...
+/// // Code that should log that warning, and nothing else at `WARN` or above.
+/// warn!(target: "clockwork::import", "found Textures/Wood.png by ignoring case");
 /// ```
 pub struct TestSession {
     /// The guard that keeps the session's span entered on this thread.
