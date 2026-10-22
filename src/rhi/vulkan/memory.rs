@@ -5,7 +5,9 @@
 //! from them. The suballocator is [`tlsf`], which is pure: it works on
 //! offsets and sizes, with no Vulkan types, so it's tested without a GPU.
 //! [`memory_types`] chooses the memory type for each location, also as a pure
-//! function, of the device's memory properties.
+//! function, of the device's memory properties. A [`pool`] holds the blocks
+//! of one memory type, and decides which block an allocation goes in and
+//! when a block is given back, without any Vulkan calls of its own.
 
 #[cfg_attr(
     not(test),
@@ -15,6 +17,11 @@
     )
 )]
 mod memory_types;
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "the allocator in rhi-memory's next PR uses it")
+)]
+mod pool;
 #[cfg_attr(
     not(test),
     expect(
