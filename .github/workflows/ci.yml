@@ -8,6 +8,12 @@
 # Each job installs a pinned Vulkan SDK, for `slangc` and, in
 # `linux-lavapipe`, the validation layer.
 #
+# The Linux jobs run on a pinned Ubuntu release, rather than `ubuntu-latest`,
+# so that GitHub moving `ubuntu-latest` to a new release can't change the
+# packages `linux-lavapipe` installs, or the libraries its lavapipe build
+# links, without a reviewed change here. Move to a new release deliberately,
+# checking that job's packages and Meson there.
+#
 # No secrets and no self-hosted runners, so pull requests from forks are safe
 # to run.
 
@@ -41,7 +47,7 @@ env:
 
 jobs:
   linux:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v5
 
@@ -81,7 +87,7 @@ jobs:
         run: cargo xtask check
 
   linux-lavapipe:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v5
 

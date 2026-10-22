@@ -184,13 +184,11 @@ Outstanding tasks and future work.
       `docs/testing.md`. Then consider whether a packaged lavapipe (Arch, or
       a PPA on Ubuntu) could replace the build, which would need a revision
       of design 0001, since a rolling package isn't pinned.
-- [ ] **Pin CI's Linux runners to an Ubuntu version.** The jobs use
-      `ubuntu-latest`, which GitHub moves from 24.04 to 26.04 between
-      2026-10-19 and 2026-11-19. The move changes the lavapipe cache key,
-      forcing a rebuild, and may rename or remove packages the
-      `linux-lavapipe` job installs. Pin `ubuntu-24.04`, or move to
-      `ubuntu-26.04` deliberately and check the job's packages and Meson
-      there.
+- [x] **Pin CI's Linux runners to an Ubuntu version.** Both Linux jobs
+      run on `ubuntu-24.04`, so GitHub's move of `ubuntu-latest` to 26.04
+      (2026-10-19 to 2026-11-19) can't change the packages `linux-lavapipe`
+      installs, or the libraries its lavapipe build links. Moving to 26.04 is
+      a deliberate change, as "CI" in `docs/testing.md` describes.
 - [ ] **Move CI off actions that run on Node.js 20.** GitHub warns that
       `actions/cache@v4` targets Node.js 20, which is deprecated, and runs
       it on Node.js 24 instead. Move to a version that targets Node.js 24
