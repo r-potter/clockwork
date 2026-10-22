@@ -6,7 +6,7 @@ How to set up a machine, run the checks, and write tests. This guide describes o
 
 Every machine needs:
 - **Rust**, stable, with `clippy` and `rustfmt` (`rustup component add clippy rustfmt`)
-- **The Vulkan SDK** from [LunarG](https://vulkan.lunarg.com/sdk/home), which provides the Slang shader compiler (`slangc`) that `build.rs` runs, and the Khronos validation layer that GPU tests need. CI uses 1.4.363.0 (see `VULKAN_SDK_VERSION` in `.github/workflows/ci.yml`).
+- **The Vulkan SDK** from [LunarG](https://vulkan.lunarg.com/sdk/home), which provides the Slang shader compiler (`slangc`) that `clockwork-rhi`'s `build.rs` runs, and the Khronos validation layer that GPU tests need. CI uses 1.4.363.0 (see `VULKAN_SDK_VERSION` in `.github/workflows/ci.yml`).
 
 GPU tests also need a Vulkan 1.4 driver. The checks below don't.
 
@@ -44,12 +44,12 @@ Check out the repository with Git's defaults: `.gitattributes` keeps every text 
 
 ### How `slangc` is found
 
-`build.rs` and `cargo xtask check` use the same lookup (`build/slangc.rs`), in this order:
+`clockwork-rhi`'s `build.rs` and `cargo xtask check` use the same lookup (`crates/rhi/build/slangc.rs`), in this order:
 1. `SLANGC`, if set: the path to `slangc`, used as given
 2. the Vulkan SDK: `$VULKAN_SDK/bin/slangc` on Linux, `%VULKAN_SDK%\Bin\slangc.exe` on Windows
 3. each directory on `PATH`
 
-If none has it, the build fails with a message naming all three. Changing `SLANGC` or `VULKAN_SDK` recompiles the shaders. Changing `PATH` doesn't, so after moving `slangc` on `PATH`, run `cargo clean` or touch `build.rs`.
+If none has it, the build fails with a message naming all three. Changing `SLANGC` or `VULKAN_SDK` recompiles the shaders. Changing `PATH` doesn't, so after moving `slangc` on `PATH`, run `cargo clean` or touch `crates/rhi/build.rs`.
 
 ## `cargo xtask check`
 
@@ -160,14 +160,16 @@ The pin is `PIN` in `xtask/src/lavapipe.rs`: a full commit hash, its date, and, 
 - Once a Mesa release has `VK_EXT_descriptor_heap` and `VK_KHR_device_address_commands` on lavapipe (see lavapipe's entries in Mesa's `docs/features.txt`), pin that release's tagged commit instead, and say so in `PIN`'s documentation.
 - Run `cargo xtask lavapipe`, then `cargo xtask check --gpu --lavapipe`. If the new build gains a capability, add it to `CAPABILITIES`, and remove it from the test's list of those lavapipe lacks.
 
-`cargo xtask` is an alias (in `.cargo/config.toml`) for running the `xtask` crate, the repository's developer tooling. The repository is a Cargo workspace of the engine and `xtask`, with the engine as its only default member, so plain `cargo build`, `cargo run` and `cargo test` act on the engine alone.
+`cargo xtask` is an alias (in `.cargo/config.toml`) for running the `xtask` crate, the repository's developer tooling. The repository is a Cargo workspace of the engine's crates, the `clockwork` application at its root, and `xtask` (ADR 0006). Every package but `xtask` is a default member, so plain `cargo build`, `cargo run` and `cargo test` act on the whole engine, and `cargo test -p clockwork-gpu-memory` on one crate.
 
 ### Lints
 
-`Cargo.toml` sets these lints for the whole workspace (R13):
+`Cargo.toml` sets these lints for the whole workspace (R13, and ADR 0006):
 - `clippy::undocumented_unsafe_blocks`: every `unsafe` block has a `// SAFETY:` comment directly above it, saying why it's sound. A comment covering several blocks isn't enough: give each its own, even if it says "as above".
 - `clippy::missing_docs_in_private_items`: every item is documented, including private ones, struct fields and enum variants.
 - `unsafe_op_in_unsafe_fn`: unsafe operations inside an `unsafe fn` still need an `unsafe` block, with its own `// SAFETY:` comment.
+- `missing_docs`: every public item is documented, as part of its crate's API.
+- `unreachable_pub`: every `pub` item is reachable from its crate's root. Anything else is `pub(crate)` or private, so that each crate's API stays minimal.
 
 Clippy doesn't apply `missing_docs_in_private_items` to test code (`#[cfg(test)]` modules and `#[test]` functions), but the rule is the same there: document test modules, tests and test helpers, saying what each test checks and why it matters. Review checks this.
 
@@ -175,7 +177,7 @@ See "Documentation and lints" in design 0001 for what each kind of doc comment m
 
 ## Test tiers
 
-Tests are unit tests inside the crate they test (ADR 0001). There's no `tests/` directory.
+Tests are unit tests inside the crate they test, so they can reach its private items (ADR 0006). A crate may also have `tests/`, for tests of its public API, and `benches/`, for benchmarks, though none does yet. Fixtures another crate's tests need sit behind a `test-support` feature, which that crate enables in its `[dev-dependencies]`: `TestSession` is in `clockwork-diagnostics`'s.
 
 | Tier | Kind | Needs | How to run |
 |---|---|---|---|
@@ -194,14 +196,14 @@ Later designs add the other tiers design 0001 lists. Design 0002 adds property t
 - **Name a test for the behaviour it checks,** as a sentence about the code: `rejects_devices_without_graphics`, `linux_sdk_comes_before_path`. Not `test_select_3`.
 - **One behaviour per test,** so that a failure names what broke. Several assertions are fine if they check the same behaviour.
 - **Document each test**: what it checks, and why it matters, if that isn't obvious.
-- **Keep logic pure where you can,** taking its inputs (the platform, environment variables, a file probe, device properties) as parameters, so that it's T0 and every platform's behaviour is tested on any machine (ADR 0003). `build/slangc.rs` and `xtask/src/window_systems.rs` are examples: the Linux window systems are tested on Windows, and Win32 on Linux.
+- **Keep logic pure where you can,** taking its inputs (the platform, environment variables, a file probe, device properties) as parameters, so that it's T0 and every platform's behaviour is tested on any machine (ADR 0003). `crates/rhi/build/slangc.rs` and `xtask/src/window_systems.rs` are examples: the Linux window systems are tested on Windows, and Win32 on Linux.
 - **Build paths with `Path`,** never by joining strings, and compare `Path` values, not strings, so tests pass on both operating systems.
 - **Fixture files go in `testdata/`,** next to the code that uses them.
 - **Fix a bug by writing a failing test first,** then the fix.
 
 ## Property tests
 
-A property test checks an invariant over many generated inputs, rather than a few chosen ones, using [`proptest`](https://docs.rs/proptest). It suits code with a simple specification and a large input space, such as an allocator, where the cases that break it are hard to pick by hand. The first is `allocations_match_a_simulated_model`, in `src/rhi/vulkan/memory/tlsf.rs`, which runs random allocations and frees against a model of the live ranges.
+A property test checks an invariant over many generated inputs, rather than a few chosen ones, using [`proptest`](https://docs.rs/proptest). It suits code with a simple specification and a large input space, such as an allocator, where the cases that break it are hard to pick by hand. The first is `allocations_match_a_simulated_model`, in `crates/gpu-memory/src/tlsf.rs`, which runs random allocations and frees against a model of the live ranges.
 
 - **Check against a model.** The clearest property is usually that the code agrees with a simple, obviously correct version of itself, such as a list of live ranges standing in for the allocator's free lists.
 - **Keep generated inputs small,** a few hundred steps of small sizes, so that a run takes well under a second, and failures shrink to cases a person can read.
@@ -230,7 +232,7 @@ Code that logs a normal condition at `WARN` is a bug. Fix it by changing the lev
 
 ### `TestSession`
 
-Every test that runs engine code starts with a `TestSession` (`src/diagnostics/capture.rs`):
+Every test that runs engine code starts with a `TestSession` (`crates/diagnostics/src/capture.rs`):
 
 ```rust
 use crate::diagnostics::capture::TestSession;
@@ -260,7 +262,7 @@ Each expectation is met by one event, so a warning that's expected twice is decl
 
 ### Rules
 
-- **Never install another subscriber** (`tracing::subscriber::set_default`, `with_default`, or a global one) in a test. It hides that thread's events from the capture layer, so its warnings pass silently. A test that needs to check what was logged uses `expect`. The only exceptions are `src/diagnostics.rs`'s own tests of the layers.
+- **Never install another subscriber** (`tracing::subscriber::set_default`, `with_default`, or a global one) in a test. It hides that thread's events from the capture layer, so its warnings pass silently. A test that needs to check what was logged uses `expect`. The only exceptions are `crates/diagnostics/src/lib.rs`'s own tests of the layers.
 - **Threads a test starts must enter the session's span,** or their events can't be attributed:
 
   ```rust
@@ -276,27 +278,27 @@ Each expectation is met by one event, so a warning that's expected twice is decl
 
   ```text
   === clockwork: unattributed WARN outside any session ===
-    WARN clockwork::rhi::vulkan: ...
+    WARN clockwork_rhi::vulkan: ...
   ```
 
   A banner means some test isn't in a session, or a thread didn't enter the span. Find it and fix it.
-- **Suppression.** A message that's harmless and can't be fixed here, such as a false positive in the validation layer, can be suppressed: add an entry to `SUPPRESSED` in `src/diagnostics.rs`, with the message's target, how to recognise the message, and a reason, linking an upstream issue where there is one. Recognise it by its message ID (`MessageMatch::Id`; for validation, the VUID) whenever it has one. Messages without an ID, such as a dependency's warnings through the `log` crate or the Vulkan loader's, are recognised by the start of their text (`MessageMatch::Prefix`): make the prefix long enough to identify one message, and leave out parts that vary, such as version numbers. A message through `log` has the target it's printed with, the logging module's, even though `tracing` receives it with the target `log`. A test checks that every entry has a target, a non-empty ID or prefix, and a reason. Suppressed messages are still logged at their level. Best-practices validation messages (IDs beginning `BestPractices-`) are only logged, never counted.
+- **Suppression.** A message that's harmless and can't be fixed here, such as a false positive in the validation layer, can be suppressed: add an entry to `SUPPRESSED` in `crates/diagnostics/src/lib.rs`, with the message's target, how to recognise the message, and a reason, linking an upstream issue where there is one. Recognise it by its message ID (`MessageMatch::Id`; for validation, the VUID) whenever it has one. Messages without an ID, such as a dependency's warnings through the `log` crate or the Vulkan loader's, are recognised by the start of their text (`MessageMatch::Prefix`): make the prefix long enough to identify one message, and leave out parts that vary, such as version numbers. A message through `log` has the target it's printed with, the logging module's, even though `tracing` receives it with the target `log`. A test checks that every entry has a target, a non-empty ID or prefix, and a reason. Suppressed messages are still logged at their level. Best-practices validation messages (IDs beginning `BestPractices-`) are only logged, never counted.
 
 ### How it works
 
-`src/diagnostics.rs` defines sessions and the layers. A `Session` has a process-unique `SessionId`, and a span named `session` with the ID in a `session` field. An event is attributed to its own `session` field if it has one, otherwise to the nearest enclosing session span, otherwise to nothing. The test subscriber has three layers, each with its own filter: `SessionLayer`, which records each session span's ID; a fmt layer, filtered by `RUST_LOG`; and `TestCapture`, which takes every warning and error and routes it to its session's `TestSession`. The application's subscriber is the same, except that a `DiagnosticCounter` counts warnings and errors in place of `TestCapture`.
+`crates/diagnostics/src/lib.rs` defines sessions and the layers. A `Session` has a process-unique `SessionId`, and a span named `session` with the ID in a `session` field. An event is attributed to its own `session` field if it has one, otherwise to the nearest enclosing session span, otherwise to nothing. The test subscriber has three layers, each with its own filter: `SessionLayer`, which records each session span's ID; a fmt layer, filtered by `RUST_LOG`; and `TestCapture`, which takes every warning and error and routes it to its session's `TestSession`. The application's subscriber is the same, except that a `DiagnosticCounter` counts warnings and errors in place of `TestCapture`.
 
 ## GPU tests
 
-T1 tests do real Vulkan work, headless, so they need a driver but no display. They live in modules named `gpu_tests`, next to the code they test: `src/rhi/gpu_tests.rs` creates backends through `rhi::create`, and `src/rhi/vulkan/gpu_tests.rs` tests the Vulkan backend itself.
+T1 tests do real Vulkan work, headless, so they need a driver but no display. They live in modules named `gpu_tests`, next to the code they test: `crates/rhi/src/gpu_tests.rs` creates backends through `clockwork_rhi::create`, and `crates/rhi/src/vulkan/gpu_tests.rs` tests the Vulkan backend itself.
 
 ### Writing one
 
-A Vulkan T1 test creates its backend with `VulkanTestBackend::headless` (`src/rhi/vulkan/test_support.rs`), in a `TestSession`:
+A Vulkan T1 test creates its backend with `VulkanTestBackend::headless` (`crates/rhi/src/vulkan/test_support.rs`), in a `TestSession`:
 
 ```rust
 use crate::diagnostics::capture::TestSession;
-use super::test_support::VulkanTestBackend; // in src/rhi/vulkan/gpu_tests.rs
+use super::test_support::VulkanTestBackend; // in crates/rhi/src/vulkan/gpu_tests.rs
 
 #[test]
 fn clears_are_validated() {
@@ -341,7 +343,7 @@ CLOCKWORK_VALIDATION=sync,gpu cargo test
 
 On Windows, in PowerShell: `$env:CLOCKWORK_VALIDATION = "sync,gpu"; cargo test`.
 
-The features are passed to the layer as settings, through `VK_EXT_layer_settings`, using the setting names in the layer's manifest, `VkLayer_khronos_validation.json` (listed in `FEATURE_SETTINGS` in `src/rhi/vulkan/validation.rs`). Every feature's setting is passed, on or off, so that what's validated doesn't depend on the layer's defaults. If a newer layer renames a setting, it reports the old name with a `VALIDATION-SETTINGS` warning, which fails every T1 test: update the table from the new manifest.
+The features are passed to the layer as settings, through `VK_EXT_layer_settings`, using the setting names in the layer's manifest, `VkLayer_khronos_validation.json` (listed in `FEATURE_SETTINGS` in `crates/rhi/src/vulkan/validation.rs`). Every feature's setting is passed, on or off, so that what's validated doesn't depend on the layer's defaults. If a newer layer renames a setting, it reports the old name with a `VALIDATION-SETTINGS` warning, which fails every T1 test: update the table from the new manifest.
 
 ### `CLOCKWORK_DEVICE`
 
@@ -357,7 +359,7 @@ let backend = VulkanTestBackend::headless(&session);
 require_capabilities!(backend, Capability::DedicatedTransferQueue);
 ```
 
-The capabilities are listed in `Capability`, in `src/rhi/vulkan/test_support.rs`, with the names used below: `present-timing`, `swapchain-maintenance`, `dedicated-compute-queue`, `dedicated-transfer-queue` and `bc-compression`. Each names an optional part of the RHI's `Capabilities` (design 0002), and a device has it when its `Capabilities` say so, so tests see the device as the RHI's users do. What device selection requires, such as descriptor heaps, isn't listed: every selected device has it.
+The capabilities are listed in `Capability`, in `crates/rhi/src/vulkan/test_support.rs`, with the names used below: `present-timing`, `swapchain-maintenance`, `dedicated-compute-queue`, `dedicated-transfer-queue` and `bc-compression`. Each names an optional part of the RHI's `Capabilities` (design 0002), and a device has it when its `Capabilities` say so, so tests see the device as the RHI's users do. What device selection requires, such as descriptor heaps, isn't listed: every selected device has it.
 
 A skipped test passes, but prints a banner to stderr, even when the test passes, so skips are visible:
 
@@ -365,7 +367,7 @@ A skipped test passes, but prints a banner to stderr, even when the test passes,
 === clockwork: skipped rhi::vulkan::gpu_tests::...: llvmpipe (LLVM 19.1.7, 256 bits) lacks the dedicated-transfer-queue capability ===
 ```
 
-`every_required_capability_is_present`, in `src/rhi/vulkan/gpu_tests.rs`, asks about every capability, so a required one the device lacks fails a test even before any test needs it.
+`every_required_capability_is_present`, in `crates/rhi/src/vulkan/gpu_tests.rs`, asks about every capability, so a required one the device lacks fails a test even before any test needs it.
 
 ### `CLOCKWORK_REQUIRED_CAPABILITIES`
 

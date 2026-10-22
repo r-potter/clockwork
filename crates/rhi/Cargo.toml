@@ -1,0 +1,20 @@
+[package]
+name = "clockwork-rhi"
+version.workspace = true
+edition.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+anyhow.workspace = true
+ash.workspace = true
+ash-window.workspace = true
+clockwork-diagnostics.workspace = true
+clockwork-gpu-memory.workspace = true
+raw-window-handle.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+clockwork-diagnostics = { workspace = true, features = ["test-support"] }

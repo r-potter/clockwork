@@ -96,7 +96,7 @@ fn display_env(
 
 /// A running `Xvfb` and headless Weston, stopped when this is dropped.
 #[derive(Debug)]
-pub struct VirtualDisplays {
+pub(crate) struct VirtualDisplays {
     /// The `Xvfb` process.
     xvfb: Child,
     /// The Weston process.
@@ -117,7 +117,7 @@ impl VirtualDisplays {
     ///
     /// Returns an error if either program can't be started, or isn't ready
     /// in time.
-    pub fn start(target_dir: &Path) -> Result<Self> {
+    pub(crate) fn start(target_dir: &Path) -> Result<Self> {
         let dir = target_dir.join("virtual-displays");
         fs::create_dir_all(&dir).with_context(|| format!("failed to create {}", dir.display()))?;
         let runtime_dir = match std::env::var_os("XDG_RUNTIME_DIR") {
@@ -206,7 +206,7 @@ impl VirtualDisplays {
     }
 
     /// The environment variables that point a smoke run at these displays.
-    pub fn env(&self) -> Vec<(&'static str, String)> {
+    pub(crate) fn env(&self) -> Vec<(&'static str, String)> {
         display_env(&self.x11_display, &self.wayland_socket, &self.runtime_dir)
     }
 }
@@ -268,7 +268,7 @@ fn private_dir(path: &Path) -> Result<PathBuf> {
 
 /// Whether `name` is set to a non-empty value in `env`, the environment the
 /// virtual displays give the smoke runs.
-pub fn is_set_in(env: &[(&'static str, String)], name: &str) -> bool {
+pub(crate) fn is_set_in(env: &[(&'static str, String)], name: &str) -> bool {
     env.iter()
         .any(|(key, value)| *key == name && !value.is_empty())
 }

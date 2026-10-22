@@ -1,9 +1,5 @@
-//! Clockwork application entry point.
-
-mod diagnostics;
-mod rhi;
-#[cfg(test)]
-mod test_support;
+//! Clockwork application entry point: the platform layer, above the engine's
+//! crates (ADR 0006).
 
 use std::io::IsTerminal;
 use std::sync::Arc;
@@ -11,8 +7,8 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
 use clap::Parser;
-use diagnostics::{DiagnosticCounter, Session, SessionLayer, is_session_span};
-use rhi::{
+use clockwork_diagnostics::{DiagnosticCounter, Session, SessionLayer, is_session_span};
+use clockwork_rhi::{
     BackendOptions, GraphicsApi, RenderHardwareInterface, Validation, ValidationFeatures,
     WindowSize, WindowTarget,
 };
@@ -121,7 +117,7 @@ fn main() -> Result<()> {
     let options = Options::parse();
 
     // Log to stderr at `INFO` and above by default. Set `RUST_LOG` to change
-    // this, e.g. `RUST_LOG=debug` or `RUST_LOG=clockwork::rhi::vulkan=trace`.
+    // this, e.g. `RUST_LOG=debug` or `RUST_LOG=clockwork_rhi::vulkan=trace`.
     // The application has a single session, so its span is left out of the
     // output rather than prefixing every line.
     let fmt_filter = EnvFilter::builder()
@@ -263,7 +259,7 @@ impl App {
         );
 
         // Only Vulkan is available for now.
-        let rhi = rhi::create(
+        let rhi = clockwork_rhi::create(
             GraphicsApi::Vulkan,
             Some(window_target(&window)),
             &self.options,
@@ -411,6 +407,7 @@ mod tests {
 
     use clap::CommandFactory;
     use clap::error::ErrorKind;
+    use clockwork_rhi::ValidationFeature;
 
     use super::*;
 
@@ -494,7 +491,7 @@ mod tests {
         let options = parse(&["--validation", "sync,gpu"]).unwrap();
         assert_eq!(
             options.validation,
-            Some(ValidationFeatures::SYNC.with(rhi::ValidationFeature::Gpu))
+            Some(ValidationFeatures::SYNC.with(ValidationFeature::Gpu))
         );
         let options = parse(&["--validation", "off"]).unwrap();
         assert_eq!(options.validation, Some(ValidationFeatures::OFF));
@@ -549,7 +546,7 @@ mod tests {
     /// builds can be validated too.
     #[test]
     fn requested_validation_is_preferred_in_any_build() {
-        let features = ValidationFeatures::SYNC.with(rhi::ValidationFeature::BestPractices);
+        let features = ValidationFeatures::SYNC.with(ValidationFeature::BestPractices);
         for debug in [true, false] {
             assert_eq!(
                 validation(Some(features), false, debug),
@@ -581,7 +578,7 @@ mod tests {
             validation(None, true, true),
             Validation::Required(ValidationFeatures::SYNC)
         );
-        let features = ValidationFeatures::SYNC.with(rhi::ValidationFeature::Gpu);
+        let features = ValidationFeatures::SYNC.with(ValidationFeature::Gpu);
         for debug in [true, false] {
             assert_eq!(
                 validation(Some(features), true, debug),

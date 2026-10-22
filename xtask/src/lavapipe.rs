@@ -35,7 +35,7 @@ use crate::slangc::Platform;
 
 /// A Mesa commit to build lavapipe from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Pin {
+pub(crate) struct Pin {
     /// The commit's full hash.
     pub commit: &'static str,
     /// The commit's date, for reading the pin's age at a glance.
@@ -52,20 +52,21 @@ pub struct Pin {
 ///
 /// When a release has both, pin its tag's commit instead. Changing the pin is
 /// a reviewed change like any other: see "Lavapipe" in `docs/testing.md`.
-pub const PIN: Pin = Pin {
+pub(crate) const PIN: Pin = Pin {
     commit: "44fd0fde8187b5bb1e919625f1ba24cb36c18cbc",
     date: "2026-10-19",
 };
 
 /// The capabilities lavapipe at [`PIN`] has, as `CLOCKWORK_REQUIRED_CAPABILITIES`
-/// names them (see `Capability` in `src/rhi/vulkan/test_support.rs`). With
-/// `--lavapipe`, a GPU test needing one of these fails rather than skipping.
+/// names them (see `Capability` in `crates/rhi/src/vulkan/test_support.rs`).
+/// With `--lavapipe`, a GPU test needing one of these fails rather than
+/// skipping.
 ///
 /// Every capability is either here or in the tests' list of those lavapipe
 /// lacks, which a test checks, so that one added to `Capability` can't
 /// quietly skip in CI. The engine's `every_required_capability_is_present`
 /// GPU test fails if lavapipe lacks one listed here.
-pub const CAPABILITIES: &[&str] = &["swapchain-maintenance", "bc-compression"];
+pub(crate) const CAPABILITIES: &[&str] = &["swapchain-maintenance", "bc-compression"];
 
 /// Mesa's repository.
 const REPOSITORY: &str = "https://gitlab.freedesktop.org/mesa/mesa.git";
@@ -135,14 +136,14 @@ const LIBRARIES: &[&str] = &[
 
 /// Where one pin's build lives, under `target/lavapipe/<commit>/`.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Layout {
+pub(crate) struct Layout {
     /// The pin's directory.
     root: PathBuf,
 }
 
 impl Layout {
     /// The layout for `pin`, in the Cargo target directory `target_dir`.
-    pub fn new(target_dir: &Path, pin: Pin) -> Self {
+    pub(crate) fn new(target_dir: &Path, pin: Pin) -> Self {
         Self {
             root: target_dir.join("lavapipe").join(pin.commit),
         }
@@ -171,7 +172,7 @@ impl Layout {
     /// The installed driver's ICD manifest, which points the Vulkan loader at
     /// the driver, for the CPU architecture `arch` (as in
     /// [`std::env::consts::ARCH`], which Mesa uses in the file name too).
-    pub fn manifest(&self, arch: &str) -> PathBuf {
+    pub(crate) fn manifest(&self, arch: &str) -> PathBuf {
         self.install()
             .join("share")
             .join("vulkan")
@@ -285,7 +286,7 @@ fn is_built(layout: &Layout) -> bool {
 ///
 /// Returns an error, saying to run `cargo xtask lavapipe`, if this pin isn't
 /// built with the current options.
-pub fn manifest(target_dir: &Path) -> Result<PathBuf> {
+pub(crate) fn manifest(target_dir: &Path) -> Result<PathBuf> {
     let layout = Layout::new(target_dir, PIN);
     if !is_built(&layout) {
         bail!(
@@ -303,7 +304,7 @@ pub fn manifest(target_dir: &Path) -> Result<PathBuf> {
 ///
 /// Returns an error if this isn't Linux, if a prerequisite is missing, or if
 /// fetching, configuring, building or installing Mesa fails.
-pub fn build(root: &Path) -> Result<()> {
+pub(crate) fn build(root: &Path) -> Result<()> {
     if Platform::current() != Platform::Linux {
         bail!("lavapipe is only built on Linux. See \"Lavapipe\" in docs/testing.md.");
     }
@@ -487,7 +488,7 @@ mod tests {
     fn engine_capabilities() -> Vec<String> {
         let path = PathBuf::from_iter([
             crate::workspace_root(),
-            PathBuf::from_iter(["src", "rhi", "vulkan", "test_support.rs"]),
+            PathBuf::from_iter(["crates", "rhi", "src", "vulkan", "test_support.rs"]),
         ]);
         let source = fs::read_to_string(&path)
             .unwrap_or_else(|err| panic!("failed to read {}: {err}", path.display()));

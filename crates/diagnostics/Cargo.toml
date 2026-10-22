@@ -1,0 +1,21 @@
+[package]
+name = "clockwork-diagnostics"
+version.workspace = true
+edition.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[features]
+# `TestSession`, the capture layer and the test subscriber, for other crates'
+# tests. Enable it only in `[dev-dependencies]` (ADR 0006).
+test-support = []
+
+[dependencies]
+tracing.workspace = true
+tracing-log.workspace = true
+tracing-subscriber.workspace = true
+
+[dev-dependencies]
+log.workspace = true
