@@ -377,17 +377,43 @@ name = "clockwork"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "ash",
- "ash-window",
  "clap",
+ "clockwork-diagnostics",
+ "clockwork-rhi",
  "glam",
+ "tracing",
+ "tracing-subscriber",
+ "winit",
+]
+
+[[package]]
+name = "clockwork-diagnostics"
+version = "0.1.0"
+dependencies = [
  "log",
- "proptest",
- "raw-window-handle",
  "tracing",
  "tracing-log",
  "tracing-subscriber",
- "winit",
+]
+
+[[package]]
+name = "clockwork-gpu-memory"
+version = "0.1.0"
+dependencies = [
+ "proptest",
+]
+
+[[package]]
+name = "clockwork-rhi"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "ash",
+ "ash-window",
+ "clockwork-diagnostics",
+ "clockwork-gpu-memory",
+ "raw-window-handle",
+ "tracing",
 ]
 
 [[package]]

@@ -1,15 +1,15 @@
 [package]
 name = "xtask"
-version = "0.1.0"
-edition = "2024"
+version.workspace = true
+edition.workspace = true
 publish = false
 
 [lints]
 workspace = true
 
 [dependencies]
-anyhow = "1.0.104"
-# The same version as the engine's, so the workspace has one `ash`.
-ash = "0.38.0"
-clap = { version = "4.6.7", features = ["derive"] }
-xshell = "0.2.7"
+anyhow.workspace = true
+# The same as the engine's, so the workspace has one `ash`.
+ash.workspace = true
+clap.workspace = true
+xshell.workspace = true

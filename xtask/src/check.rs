@@ -21,7 +21,7 @@ use crate::{lavapipe, prerequisites};
 
 /// What `cargo xtask check` was asked to check.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct Options {
+pub(crate) struct Options {
     /// Also run the T1 tests, which need a GPU, with every capability
     /// required, and the smoke runs.
     pub gpu: bool,
@@ -51,7 +51,7 @@ impl Options {
     /// Returns an error for `--virtual-displays` on Windows, whose one window
     /// system needs no display server, and for `--lavapipe` on Windows, where
     /// it isn't built.
-    pub fn validate(self, platform: Platform) -> Result<()> {
+    pub(crate) fn validate(self, platform: Platform) -> Result<()> {
         if self.virtual_displays && platform != Platform::Linux {
             bail!("--virtual-displays is only for Linux, where Xvfb and Weston provide them");
         }
@@ -92,7 +92,7 @@ const SMOKE_RUN_ARGS: [&str; 5] = [
 
 /// One command that `cargo xtask check` runs.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Step {
+pub(crate) struct Step {
     /// What the step checks, for progress and failure messages.
     pub name: &'static str,
     /// The arguments to `cargo`.
@@ -138,7 +138,7 @@ impl Step {
 /// order. `smoke_runs` are added after the tests, if `options` asks for them,
 /// with `display_env` set: the virtual displays' variables, if there are
 /// any.
-pub fn steps(
+pub(crate) fn steps(
     options: Options,
     smoke_runs: &[SmokeRun],
     display_env: &[(&'static str, String)],
@@ -219,7 +219,7 @@ pub fn steps(
 /// virtual displays don't start, if a window system has no display for its
 /// smoke run, if a prerequisite is missing, or if any check fails, naming the
 /// check.
-pub fn run(root: &Path, options: Options) -> Result<()> {
+pub(crate) fn run(root: &Path, options: Options) -> Result<()> {
     let platform = Platform::current();
     options.validate(platform)?;
     // Set in this process, before anything else runs, so that the loader

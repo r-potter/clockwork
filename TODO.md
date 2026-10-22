@@ -11,7 +11,7 @@ Outstanding tasks and future work.
       `PhysicalDevice` has the Vulkan 1.4 features and properties. Remove the
       patch once `ash` releases these bindings.
 - [x] **Choose a physical device to render with.** Done in
-      `src/rhi/vulkan/device_selection.rs`: devices are filtered by
+      `crates/rhi/src/vulkan/device_selection.rs`: devices are filtered by
       `REQUIREMENTS` (Vulkan 1.4, `VK_EXT_shader_object`, shader draw
       parameters, dynamic rendering and synchronization2, and a graphics
       queue; plus, when there is a window, `VK_KHR_swapchain`, a queue family
@@ -23,49 +23,50 @@ Outstanding tasks and future work.
       comes to depend on, and refine `compare` if needed. The ADR 0002
       baseline is required since design 0002's `rhi-baseline` slice, and
       every field of `PhysicalDevice` is now read.
-- [x] **Create a window surface.** Done in `src/rhi/vulkan/surface.rs`,
+- [x] **Create a window surface.** Done in `crates/rhi/src/vulkan/surface.rs`,
       using `ash-window` to enable the surface instance extensions and create
       the surface. Passing no window runs the backend headless.
       `RenderHardwareInterface::suspend` and `resume` drop and recreate the
       surface, keeping the rest of the backend.
-- [x] **Add swapchain support.** Done in `src/rhi/vulkan/swapchain.rs`,
+- [x] **Add swapchain support.** Done in `crates/rhi/src/vulkan/swapchain.rs`,
       with the logical device and its graphics and present queues in
-      `src/rhi/vulkan/device.rs`. When there is a window, device selection
-      requires `VK_KHR_swapchain`, a queue family that can present, and a
-      surface format and present mode. The swapchain is recreated on resize,
-      and destroyed and recreated with the surface on suspend and resume.
+      `crates/rhi/src/vulkan/device.rs`. When there is a window, device
+      selection requires `VK_KHR_swapchain`, a queue family that can present,
+      and a surface format and present mode. The swapchain is recreated on
+      resize, and destroyed and recreated with the surface on suspend and
+      resume.
 - [x] **Render and present frames.** `render_frame` in
-      `src/rhi/vulkan.rs` acquires a swapchain image, clears it to
+      `crates/rhi/src/vulkan.rs` acquires a swapchain image, clears it to
       `CLEAR_COLOUR` with dynamic rendering, and presents it, with two frames
-      in flight (`src/rhi/vulkan/frames.rs`) and a render-finished semaphore
-      per swapchain image. Resizes and `OUT_OF_DATE`/`SUBOPTIMAL` results
-      recreate the swapchain once at the start of the next frame. Vulkan
-      1.3's `dynamic_rendering` and `synchronization2` are enabled and
+      in flight (`crates/rhi/src/vulkan/frames.rs`) and a render-finished
+      semaphore per swapchain image. Resizes and `OUT_OF_DATE`/`SUBOPTIMAL`
+      results recreate the swapchain once at the start of the next frame.
+      Vulkan 1.3's `dynamic_rendering` and `synchronization2` are enabled and
       required.
 - [x] **Draw a triangle.** `TriangleShaders` in
-      `src/rhi/vulkan/shaders.rs` draws a triangle with per-corner colours
-      from `shaders/triangle.slang`, with no vertex buffers, using linked
-      `VK_EXT_shader_object` shader objects instead of a pipeline, with all
-      rendering state set when drawing. `build.rs` compiles the shaders to
-      SPIR-V with `slangc`, and the backend embeds them. Vulkan 1.1's
-      `shaderDrawParameters` is enabled and required, because Slang compiles
-      `SV_VertexID` using the base vertex.
+      `crates/rhi/src/vulkan/shaders.rs` draws a triangle with per-corner
+      colours from `crates/rhi/shaders/triangle.slang`, with no vertex
+      buffers, using linked `VK_EXT_shader_object` shader objects instead of a
+      pipeline, with all rendering state set when drawing. `build.rs` compiles
+      the shaders to SPIR-V with `slangc`, and the backend embeds them. Vulkan
+      1.1's `shaderDrawParameters` is enabled and required, because Slang
+      compiles `SV_VertexID` using the base vertex.
 - [x] **Decide what to do on drivers without `VK_EXT_shader_object`.**
       Decided in ADR 0002: it's required, with no emulation layer or
       pipeline fallback. Devices without it are rejected at start-up.
 - [ ] **Add a rendering API to the RHI.** The triangle is hardcoded in the
-      Vulkan backend (`record_frame` in `src/rhi/vulkan.rs`). Expose
+      Vulkan backend (`record_frame` in `crates/rhi/src/vulkan.rs`). Expose
       pipelines, shaders, buffers and descriptors through
       `RenderHardwareInterface` as opaque handles, so that the application
       decides what to draw.
 - [x] **Compile shaders for other backends.** Not needed: ADR 0003 keeps
       Vulkan as the only graphics API on every planned platform, so SPIR-V
       stays the only shader target.
-- [ ] **Use `VK_KHR_swapchain_maintenance1` when available.** It's
-      optional in ADR 0002. Without it, there is no way to know when the
-      presentation engine has finished with a swapchain's images, so
-      `Swapchain::drop` in `src/rhi/vulkan/swapchain.rs` waits for the whole
-      device to be idle before destroying it, on every recreation. With it:
+- [ ] **Use `VK_KHR_swapchain_maintenance1` when available.** It's optional in
+      ADR 0002. Without it, there is no way to know when the presentation
+      engine has finished with a swapchain's images, so `Swapchain::drop` in
+      `crates/rhi/src/vulkan/swapchain.rs` waits for the whole device to be
+      idle before destroying it, on every recreation. With it:
   - pass a fence with each present (`VkSwapchainPresentFenceInfoKHR`), and
     destroy a retired swapchain, and the semaphores used to present its
     images, only once the fences for its presents have signalled, instead
@@ -91,7 +92,7 @@ Outstanding tasks and future work.
       `VK_KHR_device_address_commands` (ADR 0002). The app already handles
       `suspended` and `resumed`, destroying and recreating the surface, but
       it cannot be built for Android yet. This needs an `android_main` entry
-      point, with the app in a library crate (which ADR 0001 allows), one of
+      point, a second one over the engine's library crates (ADR 0006), one of
       `winit`'s `android-native-activity` or `android-game-activity`
       features, and a packaging tool such as `cargo-apk` or `xbuild`. Suspend
       and resume have only been tested on desktop, by calling the handlers
@@ -101,12 +102,11 @@ Outstanding tasks and future work.
       support Vulkan 1.4, `VK_EXT_shader_object`, `VK_EXT_descriptor_heap`
       and `VK_KHR_device_address_commands`. MoltenVK isn't planned, because
       it implements a more limited subset of Vulkan (ADR 0002).
-- [x] **Decide whether `PhysicalDevice` needs to be `Send`/`Sync`.** It
-      needs both, since design 0002 shares the device between threads. It
-      already is both: the pinned `ash` declares its structures `Send` and
-      `Sync`, though `ash` 0.38 didn't, so no `unsafe impl` is needed. A
-      compile-time assertion in `src/rhi/vulkan/physical_device.rs` keeps it
-      so.
+- [x] **Decide whether `PhysicalDevice` needs to be `Send`/`Sync`.** It needs
+      both, since design 0002 shares the device between threads. It already is
+      both: the pinned `ash` declares its structures `Send` and `Sync`, though
+      `ash` 0.38 didn't, so no `unsafe impl` is needed. A compile-time
+      assertion in `crates/rhi/src/vulkan/physical_device.rs` keeps it so.
 
 ## Engine
 
@@ -143,25 +143,27 @@ Outstanding tasks and future work.
 - [x] **Run a T1 test that needs a capability.** Done in the
       `foundations-ash-1.4` slice of design 0001:
       `reference_device_reports_required_extensions` in
-      `src/rhi/vulkan/gpu_tests.rs` uses `require_capabilities!`, so the
-      `#[expect]` attributes on it and `VulkanTestBackend::has` are gone. It
-      passes on the RTX 4090 from driver 617.42, the first checked that has
+      `crates/rhi/src/vulkan/gpu_tests.rs` uses `require_capabilities!`, so
+      the `#[expect]` attributes on it and `VulkanTestBackend::has` are gone.
+      It passes on the RTX 4090 from driver 617.42, the first checked that has
       `VK_KHR_device_address_commands`.
 
 - [x] **Make the unit tests work without a Vulkan driver.** Done in the
-      `foundations-validation` slice of design 0001: every test that creates
-      a backend is a T1 test, in a `gpu_tests` module (`src/rhi/gpu_tests.rs`
-      and `src/rhi/vulkan/gpu_tests.rs`), which `cargo xtask check` skips and
-      `cargo xtask check --gpu --no-window` runs, with validation required.
+      `foundations-validation` slice of design 0001: every test that creates a
+      backend is a T1 test, in a `gpu_tests` module
+      (`crates/rhi/src/gpu_tests.rs` and
+      `crates/rhi/src/vulkan/gpu_tests.rs`), which `cargo xtask check` skips
+      and `cargo xtask check --gpu --no-window` runs, with validation
+      required.
 - [x] **Install `slangc` on CI.** Done in the `foundations-checks` slice of
       design 0001: the `linux` and `windows` jobs in
       `.github/workflows/ci.yml` install a pinned Vulkan SDK, and `build.rs`
-      finds `slangc` in it (see `build/slangc.rs`).
+      finds `slangc` in it (see `crates/rhi/build/slangc.rs`).
 - [x] **Decide how to suppress messages that have no message ID.** A
-      `SUPPRESSED` entry in `src/diagnostics.rs` now matches its message by
-      ID (`MessageMatch::Id`) or, for messages without one, by the start of
-      its text (`MessageMatch::Prefix`). Recorded as a revision of design
-      0001 (R4).
+      `SUPPRESSED` entry in `crates/diagnostics/src/lib.rs` now matches its
+      message by ID (`MessageMatch::Id`) or, for messages without one, by the
+      start of its text (`MessageMatch::Prefix`). Recorded as a revision of
+      design 0001 (R4).
 - [x] **Stop the OBS Vulkan layer failing tests on the Windows machine.**
       The loader's warning about OBS's implicit layer, `VK_LAYER_OBS_HOOK`,
       is suppressed by prefix, on `clockwork::validation`, where the debug

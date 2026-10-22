@@ -2,8 +2,8 @@
 //!
 //! It prints what the build will use, so that a failure on one machine can be
 //! compared with another (see "Risks" in design 0001):
-//! - the `slangc` the engine's `build.rs` will find, where it came from, and
-//!   its version
+//! - the `slangc` `clockwork-rhi`'s `build.rs` will find, where it came
+//!   from, and its version
 //! - the Vulkan SDK's version, from `VULKAN_SDK`
 //! - with `--lavapipe`, the manifest of the lavapipe build used
 //! - with `--gpu`, the layers and devices the Vulkan loader finds
@@ -35,7 +35,7 @@ const VALIDATION_LAYER: &str = "VK_LAYER_KHRONOS_validation";
 ///
 /// Returns an error, pointing to `docs/testing.md`, if `slangc` isn't found
 /// or doesn't run, or if `gpu` is set and the GPU tests can't run.
-pub fn check(sh: &Shell, gpu: bool, driver: Option<&Path>) -> Result<()> {
+pub(crate) fn check(sh: &Shell, gpu: bool, driver: Option<&Path>) -> Result<()> {
     eprintln!("==> prerequisites");
     let env = slangc::Environment::from_process();
 
@@ -210,7 +210,7 @@ fn list(items: &[String]) -> String {
 /// as `1.4.341.1`. On Windows, `VULKAN_SDK` is that directory. On Linux, it's
 /// the `x86_64` directory inside it. So this looks at `sdk` and its parent,
 /// and returns the first whose name is a version.
-pub fn sdk_version(sdk: &Path) -> Option<&str> {
+pub(crate) fn sdk_version(sdk: &Path) -> Option<&str> {
     [Some(sdk), sdk.parent()]
         .into_iter()
         .flatten()

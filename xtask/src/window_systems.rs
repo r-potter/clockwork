@@ -24,7 +24,7 @@ use crate::slangc::Platform;
 
 /// The window systems the engine supports (ADR 0003).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum WindowSystem {
+pub(crate) enum WindowSystem {
     /// Windows' only window system.
     Win32,
     /// Wayland, on Linux.
@@ -36,7 +36,7 @@ pub enum WindowSystem {
 impl WindowSystem {
     /// The window systems `platform` supports, in the order their smoke runs
     /// run.
-    pub fn supported(platform: Platform) -> &'static [Self] {
+    pub(crate) fn supported(platform: Platform) -> &'static [Self] {
         match platform {
             Platform::Windows => &[Self::Win32],
             Platform::Linux => &[Self::Wayland, Self::X11],
@@ -78,7 +78,7 @@ impl fmt::Display for WindowSystem {
 
 /// One smoke run: the application, in a window under one window system.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SmokeRun {
+pub(crate) struct SmokeRun {
     /// The window system the run uses.
     pub window_system: WindowSystem,
     /// Environment variables unset for the run, so that it uses
@@ -93,7 +93,10 @@ pub struct SmokeRun {
 ///
 /// Returns an error naming each window system whose display isn't available,
 /// and the variable that would name it.
-pub fn smoke_runs(platform: Platform, is_set: impl Fn(&str) -> bool) -> Result<Vec<SmokeRun>> {
+pub(crate) fn smoke_runs(
+    platform: Platform,
+    is_set: impl Fn(&str) -> bool,
+) -> Result<Vec<SmokeRun>> {
     let supported = WindowSystem::supported(platform);
     let missing: Vec<_> = supported
         .iter()

@@ -11,7 +11,7 @@
 mod check;
 mod lavapipe;
 mod prerequisites;
-#[path = "../../build/slangc.rs"]
+#[path = "../../crates/rhi/build/slangc.rs"]
 mod slangc;
 mod virtual_displays;
 mod window_systems;

@@ -1,42 +1,62 @@
 [package]
 name = "clockwork"
-version = "0.1.0"
-edition = "2024"
+version.workspace = true
+edition.workspace = true
 
 [lints]
 workspace = true
 
+# The application: the platform layer above the engine's crates (ADR 0006).
 [dependencies]
+anyhow.workspace = true
+clap.workspace = true
+clockwork-diagnostics.workspace = true
+clockwork-rhi.workspace = true
+# Not used yet: for the triangle's vertices and push data (design 0002, "Data
+# structures and layout").
+glam.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+winit.workspace = true
+
+# The engine is a crate per subsystem, under `crates/` (ADR 0006), and the
+# root package is the application. They're all default members, so plain
+# `cargo build`, `run` and `test` act on the whole engine. `xtask` holds the
+# developer tooling, run as `cargo xtask` (see `.cargo/config.toml`).
+[workspace]
+members = [".", "crates/*", "xtask"]
+default-members = [".", "crates/*"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+
+# Every dependency's version, so that the crates share them. Each crate lists
+# the ones it uses, with `workspace = true`.
+[workspace.dependencies]
 anyhow = "1.0.104"
 ash = "0.38.0"
 ash-window = "0.13.0"
 clap = { version = "4.6.7", features = ["derive"] }
+clockwork-diagnostics = { path = "crates/diagnostics" }
+clockwork-gpu-memory = { path = "crates/gpu-memory" }
+clockwork-rhi = { path = "crates/rhi" }
 glam = { version = "0.34.1", features = ["bytemuck"] }
-raw-window-handle = "0.6"
-tracing = "0.1.44"
-tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
-# The same version `tracing-subscriber` uses to turn `log` records into
-# events, for their targets (see `diagnostics::target_of`).
-tracing-log = "0.2.0"
-winit = "0.30.13"
-
-[dev-dependencies]
 # For tests that log through the `log` crate, as dependencies such as
 # `sctk-adwaita` do.
 log = "0.4.34"
 # Property tests: invariants checked over generated inputs, such as the TLSF
 # suballocator's against a model (design 0002).
 proptest = "1.12.0"
+raw-window-handle = "0.6"
+tracing = "0.1.44"
+# The same version `tracing-subscriber` uses to turn `log` records into
+# events, for their targets (see `clockwork_diagnostics::target_of`).
+tracing-log = "0.2.0"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
+winit = "0.30.13"
+xshell = "0.2.7"
 
-# The engine is the root package and the only default member, so plain
-# `cargo build`, `run` and `test` act on it alone (ADR 0001). `xtask` holds the
-# developer tooling, run as `cargo xtask` (see `.cargo/config.toml`).
-[workspace]
-members = [".", "xtask"]
-default-members = ["."]
-
-# Lints for every crate in the workspace (R13 in design 0001). `cargo xtask
-# check` runs clippy with `-D warnings`, so each of these fails the check.
 # `ash` 0.38, the latest release, has bindings only up to Vulkan 1.3.281. This
 # replaces it everywhere in the dependency graph with a commit on its `master`
 # branch: f4c2ca3 (2026-07-27), generated from the Vulkan 1.4.352 headers. It's
@@ -53,9 +73,17 @@ default-members = ["."]
 ash = { git = "https://github.com/ash-rs/ash", rev = "f4c2ca3e4f6b998d5254ad101a32f024d87cdec2" }
 ash-window = { git = "https://github.com/ash-rs/ash", rev = "f4c2ca3e4f6b998d5254ad101a32f024d87cdec2" }
 
+# Lints for every crate in the workspace (R13 in design 0001, and ADR 0006).
+# `cargo xtask check` runs clippy with `-D warnings`, so each of these fails the
+# check.
 [workspace.lints.rust]
 # Already the 2024 edition's default, made explicit.
 unsafe_op_in_unsafe_fn = "warn"
+# A crate's public items are its API, so each is documented.
+missing_docs = "warn"
+# Every public item is reachable from its crate's root. Anything else is
+# `pub(crate)` or private, which keeps each crate's API minimal.
+unreachable_pub = "warn"
 
 [workspace.lints.clippy]
 # Every `unsafe` block needs a `// SAFETY:` comment saying why it is sound.

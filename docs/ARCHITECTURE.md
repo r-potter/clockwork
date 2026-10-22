@@ -27,15 +27,15 @@ Clockwork is a rendering engine for showcasing graphics and simulation technique
 ```mermaid
 flowchart TD
     platform["Platform<br/>(winit window and event loop)"]
-    input["Input and camera<br/>src/input/"]
-    scripting["Scripting (Lua)<br/>src/scripting/"]
-    ecs["Entity-component system<br/>src/ecs/"]
+    input["Input and camera"]
+    scripting["Scripting (Lua)"]
+    ecs["Entity-component system"]
     import["Asset importers<br/>glTF, USD"]
     scene["Scene model<br/>(format-agnostic)"]
-    renderer["Renderer and PBR<br/>src/renderer/, shaders/"]
-    graph["Frame graph<br/>src/frame_graph/"]
-    rhi["Render hardware interface<br/>src/rhi.rs"]
-    vulkan["Vulkan backend<br/>src/rhi/vulkan/"]
+    renderer["Renderer and PBR"]
+    graph["Frame graph"]
+    rhi["Render hardware interface<br/>clockwork-rhi"]
+    vulkan["Vulkan backend<br/>clockwork-rhi's vulkan module"]
 
     platform --> input
     input --> scripting
@@ -62,16 +62,16 @@ flowchart TD
 
 ## Dependency rules
 
-Arrows in the diagram are the only dependencies allowed. In particular:
+Arrows in the diagram are the only dependencies allowed. Each subsystem is a crate (see "Source layout"), so these are crate boundaries that the compiler enforces: a forbidden dependency is a missing entry in a `Cargo.toml`. In particular:
 
-- **No Vulkan types outside `src/rhi/vulkan/`.** The rest of the engine sees only the RHI's handles, descriptions and traits.
+- **No Vulkan types outside `clockwork-rhi`'s `vulkan` module.** Only `clockwork-rhi` depends on `ash`, and its public API names no Vulkan type. The rest of the engine sees only the RHI's handles, descriptions and traits.
 - **The frame graph doesn't know about scenes.** It knows passes, resources and accesses. The renderer is the layer that knows what a mesh or a light is.
 - **The ECS doesn't know about rendering.** Rendering reads from it only through extraction, so simulation never waits on the GPU.
 - **Importers don't know about the ECS or the GPU.** They produce a scene model, which is spawned into the ECS separately. This keeps importers testable against files alone.
-- **Only the platform layer (`src/main.rs` today) uses winit types.** Input receives engine events translated from them.
-- **Diagnostics sits below everything.** Every subsystem may depend on `src/diagnostics.rs`, and it depends on no subsystem. It isn't drawn in the diagram, because every box would point at it.
+- **Only the platform layer (`src/main.rs` today) uses winit types.** Input receives engine events translated from them. Only the root package depends on `winit`.
+- **Diagnostics sits below everything.** Every subsystem may depend on `clockwork-diagnostics`, and it depends on no subsystem. It isn't drawn in the diagram, because every box would point at it.
 
-These rules are checked in review now. If the code is split into crates later, they become crate boundaries that the compiler enforces.
+The rules within a crate, such as the Vulkan backend's being private to the RHI, are checked in review.
 
 ## Frame lifecycle (*provisional*: settled by `0004-input`, `0005-ecs` and `0003-frame-graph`)
 
@@ -122,33 +122,26 @@ Any unexpected `WARN` or `ERROR` fails the test that caused it, and fails the ap
 
 ## Source layout
 
-The engine is a single binary crate. That's deliberate: see [ADR 0001](decisions/0001-single-binary-crate.md). The repository is a Cargo workspace holding the engine and its developer tooling (`xtask`).
+The engine is a Cargo workspace with a crate per subsystem, under `crates/`, each named `clockwork-<subsystem>`: see [ADR 0006](decisions/0006-crates-by-subsystem.md). The root package is the `clockwork` binary, the platform layer and the application code above the subsystems. `xtask`, the developer tooling, is in the workspace too, but isn't a default member.
 
 ```
-build.rs              compiles shaders/ to SPIR-V with slangc
-build/slangc.rs       finds slangc, shared by build.rs and xtask
-shaders/              Slang shaders (a module library from 0007-pbr on)
-src/main.rs           platform layer: options, winit event loop, window, frame loop
-src/diagnostics.rs    sessions, log attribution, classification and counting
-src/test_support.rs   shared test fixtures and the test environment
-src/rhi.rs            the RHI trait, backend options and backend selection
-src/rhi/vulkan/       the Vulkan backend
-xtask/                developer tooling: cargo xtask check, cargo xtask lavapipe
-.github/workflows/    CI
-docs/                 this document, designs, decisions, and the testing guide
+src/main.rs                     clockwork: platform layer, options, winit event loop, window, frame loop
+crates/diagnostics/             clockwork-diagnostics: sessions, log attribution, classification and counting
+  src/capture.rs                  TestSession and the test subscriber, behind the test-support feature
+crates/gpu-memory/              clockwork-gpu-memory: the allocator's pure parts, the TLSF suballocator and the pool
+crates/rhi/                     clockwork-rhi: the RHI
+  build.rs                        compiles shaders/ to SPIR-V with slangc
+  build/slangc.rs                 finds slangc, shared by build.rs and xtask
+  shaders/                        Slang shaders
+  src/lib.rs                      the RHI trait, backend options and backend selection
+  src/test_support.rs             the test environment, for the RHI's tests
+  src/vulkan/                     the Vulkan backend
+xtask/                          developer tooling: cargo xtask check, cargo xtask lavapipe
+.github/workflows/              CI
+docs/                           this document, designs, decisions, and the testing guide
 ```
 
-Target layout, as later designs are accepted:
-
-```
-src/frame_graph/      (0003-frame-graph)
-src/input/            (0004-input)
-src/ecs/              (0005-ecs)
-src/renderer/         (0006-importers, 0007-pbr)
-src/scripting/        (0008-scripting)
-crates/assets/        asset importers, a separate crate because of openusd's compile time (0006-importers)
-testdata/             small checked-in test fixtures
-```
+Each later subsystem's design names its crate: the frame graph (`0003-frame-graph`), input (`0004-input`), the ECS (`0005-ecs`), the asset importers (`0006-importers`), the renderer (`0006-importers`, `0007-pbr`) and scripting (`0008-scripting`). The importers are a crate of their own, `crates/assets/`, to keep `openusd`'s compile out of the engine's rebuilds. Small checked-in test fixtures will go in `testdata/`.
 
 ## Roadmap
 
