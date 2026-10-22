@@ -260,6 +260,28 @@ impl FromStr for ValidationFeatures {
     }
 }
 
+/// Where a buffer's memory is, and which processor can reach it (design
+/// 0002, "Memory").
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "buffers are created in a location from rhi-resources"
+    )
+)]
+pub enum MemoryLocation {
+    /// GPU-only memory, for anything the CPU doesn't touch.
+    Device,
+    /// Memory the CPU writes and the GPU reads. Device-local where the
+    /// device lets the CPU see most of its memory, such as with resizable
+    /// BAR, and system memory otherwise.
+    Upload,
+    /// Memory the GPU writes and the CPU reads, cached for the CPU where the
+    /// device allows.
+    Readback,
+}
+
 /// Operations every graphics API backend must provide.
 ///
 /// Used as a trait object, so it must stay object-safe: no generic methods,
