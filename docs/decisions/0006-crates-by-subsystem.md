@@ -1,8 +1,8 @@
 # 0006: Split the engine into a crate per subsystem
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-10-22
-- **Supersedes:** [0001](0001-single-binary-crate.md), once accepted
+- **Supersedes:** [0001](0001-single-binary-crate.md)
 
 ## Context
 
