@@ -4,7 +4,17 @@
 //! the allocator takes large blocks of memory from Vulkan and suballocates
 //! from them. The suballocator is [`tlsf`], which is pure: it works on
 //! offsets and sizes, with no Vulkan types, so it's tested without a GPU.
+//! [`memory_types`] chooses the memory type for each location, also as a pure
+//! function, of the device's memory properties.
 
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "the memory pools in rhi-memory's later PRs use it"
+    )
+)]
+mod memory_types;
 #[cfg_attr(
     not(test),
     expect(
