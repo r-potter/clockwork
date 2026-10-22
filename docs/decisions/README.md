@@ -31,9 +31,9 @@ What becomes easier, what becomes harder, and what would make us revisit this.
 
 | Number | Decision | Status |
 |---|---|---|
-| 0001 | [Keep the engine a single binary crate](0001-single-binary-crate.md) | Accepted |
+| 0001 | [Keep the engine a single binary crate](0001-single-binary-crate.md) | Superseded by 0006 |
 | 0002 | [Target a bleeding-edge Vulkan feature set with no fallbacks](0002-vulkan-feature-baseline.md) | Accepted |
 | 0003 | [Support Windows, X11 and Wayland from the start](0003-supported-platforms.md) | Accepted |
 | 0004 | [Build our own entity-component system](0004-own-ecs.md) | Accepted |
 | 0005 | [Embed Lua through mlua for scripting](0005-lua-scripting.md) | Accepted |
-| 0006 | [Split the engine into a crate per subsystem](0006-crates-by-subsystem.md) | Proposed |
+| 0006 | [Split the engine into a crate per subsystem](0006-crates-by-subsystem.md) | Accepted |

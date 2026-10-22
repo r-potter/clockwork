@@ -1,6 +1,6 @@
 # 0001: Keep the engine a single binary crate
 
-- **Status:** Accepted
+- **Status:** Superseded by [0006](0006-crates-by-subsystem.md)
 - **Date:** 2026-10-15
 
 ## Context
