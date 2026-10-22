@@ -41,6 +41,11 @@ clap = { version = "4.6.7", features = ["derive"] }
 clockwork-diagnostics = { path = "crates/diagnostics" }
 clockwork-gpu-memory = { path = "crates/gpu-memory" }
 clockwork-rhi = { path = "crates/rhi" }
+# Benchmarks (design 0002, "Performance"), without the plots and the
+# parallel analysis, which the text reports don't need.
+criterion = { version = "0.8.2", default-features = false, features = [
+    "cargo_bench_support",
+] }
 glam = { version = "0.34.1", features = ["bytemuck"] }
 # For tests that log through the `log` crate, as dependencies such as
 # `sctk-adwaita` do.

@@ -177,19 +177,20 @@ See "Documentation and lints" in design 0001 for what each kind of doc comment m
 
 ## Test tiers
 
-Tests are unit tests inside the crate they test, so they can reach its private items (ADR 0006). A crate may also have `tests/`, for tests of its public API, and `benches/`, for benchmarks, though none does yet. Fixtures another crate's tests need sit behind a `test-support` feature, which that crate enables in its `[dev-dependencies]`: `TestSession` is in `clockwork-diagnostics`'s.
+Tests are unit tests inside the crate they test, so they can reach its private items (ADR 0006). A crate may also have `tests/`, for tests of its public API, and `benches/`, for benchmarks (see "Benchmarks"). Fixtures another crate's tests need sit behind a `test-support` feature, which that crate enables in its `[dev-dependencies]`: `TestSession` is in `clockwork-diagnostics`'s.
 
 | Tier | Kind | Needs | How to run |
 |---|---|---|---|
 | T0 | Unit: pure logic, such as device selection and the `slangc` lookup | Nothing beyond the prerequisites | `cargo test --workspace -- --skip gpu_tests`, or `cargo xtask check` |
 | T0 | Property: invariants checked over generated inputs, with `proptest` (see "Property tests") | Nothing beyond the prerequisites | As for unit tests, which they run with |
 | T1 | GPU: real Vulkan work, headless, with validation required | A Vulkan 1.4 driver and the validation layer | `cargo test`, which runs every tier, or `cargo xtask check --gpu` |
+| T2 | Benchmark: hot paths, measured against their budgets with `criterion` (see "Benchmarks") | Depends on the benchmark | `cargo bench -p <crate>`, on demand |
 
 How tests are told apart:
 - **T1 tests live in modules named `gpu_tests`**, so `--skip gpu_tests` leaves them out. Don't use `gpu_tests` anywhere else in a test's path, or it will be skipped too.
 - **Everything else is T0**, and must pass on a machine with no Vulkan driver, as the CI runners are.
 
-Later designs add the other tiers design 0001 lists. Design 0002 adds property tests.
+Later designs add the other tiers design 0001 lists. Design 0002 adds property tests and benchmarks.
 
 ## Writing tests
 
@@ -212,6 +213,23 @@ A property test checks an invariant over many generated inputs, rather than a fe
 - **Run more cases** with `PROPTEST_CASES`, for example `PROPTEST_CASES=10000 cargo test allocations_match_a_simulated_model`, when changing the code a property covers. The default is 256.
 
 Property tests are T0: they run with the unit tests, and need no GPU.
+
+## Benchmarks
+
+Benchmarks measure hot paths against the budgets in their designs, such as design 0002's "Performance", using [`criterion`](https://docs.rs/criterion). Each is in its crate's `benches/`, a separate crate that can reach only the public API, so it measures what callers pay. The first is `crates/gpu-memory/benches/allocator.rs`, which times the TLSF suballocator's and the pool's allocations and frees.
+
+```
+cargo bench -p clockwork-gpu-memory
+cargo bench -p clockwork-gpu-memory -- tlsf/allocate
+```
+
+The second runs only the benchmarks whose names contain `tlsf/allocate`. Results are printed, and kept in `target/criterion/`, so the next run reports the change from the last. To compare a branch with `main`, run the benchmarks on `main` with `-- --save-baseline main`, then on the branch with `-- --baseline main`.
+
+- **Benchmarks are run on demand,** not by `cargo xtask check` or CI, whose shared runners are too noisy for timings. The check builds them, through clippy's `--all-targets`, so they can't stop compiling. Run them when changing the code they cover, and give the numbers, and the machine, in the PR.
+- **Budgets are for the reference machine** a design names, the RTX 3090 machine for design 0002. Elsewhere, compare against `main` on the same machine rather than against the budget.
+- **Measure a steady state,** not an empty structure: the allocator's benchmarks fragment the block first, and every batch frees what it allocated, so each iteration sees the same state.
+- **Make the work repeatable,** with fixed seeds for anything random, so that two runs measure the same thing.
+- **Time only the operation,** with `iter_custom` where setup or the inverse operation would otherwise be counted, as the allocator's benchmarks do to time allocations and frees separately.
 
 ## Warnings and errors fail tests
 
