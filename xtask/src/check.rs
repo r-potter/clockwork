@@ -3,8 +3,9 @@
 //! The checks run in order, stopping at the first failure:
 //! 1. the prerequisites check (see [`crate::prerequisites`])
 //! 2. the commands from [`steps`]: formatting, clippy in debug and release,
-//!    rustdoc, and the tests: those that need no GPU, or, with `--gpu`, every
-//!    tier, followed by a smoke run under each window system
+//!    rustdoc, each crate built on its own, and the tests: those that need no
+//!    GPU, or, with `--gpu`, every tier, followed by a smoke run under each
+//!    window system
 //!
 //! The list of commands is built by a pure function, so it's tested without
 //! running anything.
@@ -12,6 +13,7 @@
 use std::path::Path;
 
 use anyhow::{Context, Result, bail};
+use serde_json::Value;
 use xshell::Shell;
 
 use crate::slangc::Platform;
@@ -94,9 +96,9 @@ const SMOKE_RUN_ARGS: [&str; 5] = [
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Step {
     /// What the step checks, for progress and failure messages.
-    pub name: &'static str,
+    pub name: String,
     /// The arguments to `cargo`.
-    pub args: Vec<&'static str>,
+    pub args: Vec<String>,
     /// Environment variables set for this command only.
     pub env: Vec<(&'static str, String)>,
     /// Environment variables unset for this command only.
@@ -105,13 +107,32 @@ pub(crate) struct Step {
 
 impl Step {
     /// A step running `cargo` with `args`, and no change to the environment.
-    fn cargo(name: &'static str, args: &[&'static str]) -> Self {
+    fn cargo(name: &str, args: &[&str]) -> Self {
         Self {
-            name,
-            args: args.to_vec(),
+            name: name.to_owned(),
+            args: args.iter().map(|&arg| arg.to_owned()).collect(),
             env: Vec::new(),
             unset: Vec::new(),
         }
+    }
+
+    /// The steps that build `package` on its own: its library and binaries,
+    /// then every target, as `cargo test --package` would. In a workspace
+    /// build, a crate gets the features every other crate turns on for their
+    /// shared dependencies, so it can build there and not on its own. And
+    /// dev-dependencies' features apply only to builds with tests, so a
+    /// library that relies on one builds with every target and not without.
+    fn alone(package: &str) -> [Self; 2] {
+        [
+            Self::cargo(
+                &format!("{package} on its own"),
+                &["check", "--package", package],
+            ),
+            Self::cargo(
+                &format!("{package} on its own, with every target"),
+                &["check", "--package", package, "--all-targets"],
+            ),
+        ]
     }
 
     /// The step for `run`: the application under its window system, with
@@ -135,11 +156,12 @@ impl Step {
 }
 
 /// The commands `cargo xtask check` runs after the prerequisites check, in
-/// order. `smoke_runs` are added after the tests, if `options` asks for them,
-/// with `display_env` set: the virtual displays' variables, if there are
-/// any.
+/// order. Each of `packages` is built on its own before the tests.
+/// `smoke_runs` are added after the tests, if `options` asks for them, with
+/// `display_env` set: the virtual displays' variables, if there are any.
 pub(crate) fn steps(
     options: Options,
+    packages: &[String],
     smoke_runs: &[SmokeRun],
     display_env: &[(&'static str, String)],
 ) -> Vec<Step> {
@@ -199,8 +221,9 @@ pub(crate) fn steps(
                 ],
             )
         },
-        tests,
     ];
+    steps.extend(packages.iter().flat_map(|package| Step::alone(package)));
+    steps.push(tests);
     if options.smoke_runs() {
         steps.extend(
             smoke_runs
@@ -209,6 +232,36 @@ pub(crate) fn steps(
         );
     }
     steps
+}
+
+/// The names of the workspace's default members, from `metadata`, the output
+/// of `cargo metadata --no-deps --format-version 1`: the engine's crates and
+/// the application, without `xtask`, which `cargo xtask` already builds on
+/// its own.
+///
+/// # Errors
+///
+/// Returns an error if `metadata` isn't JSON, or lacks a default member or
+/// its package's name.
+fn default_members(metadata: &str) -> Result<Vec<String>> {
+    let metadata: Value =
+        serde_json::from_str(metadata).context("`cargo metadata` printed invalid JSON")?;
+    let ids = metadata["workspace_default_members"]
+        .as_array()
+        .context("`cargo metadata` listed no default members")?;
+    let packages = metadata["packages"]
+        .as_array()
+        .context("`cargo metadata` listed no packages")?;
+    ids.iter()
+        .map(|id| {
+            packages
+                .iter()
+                .find(|package| package["id"] == *id)
+                .and_then(|package| package["name"].as_str())
+                .map(str::to_owned)
+                .with_context(|| format!("`cargo metadata` has no package named for {id}"))
+        })
+        .collect()
 }
 
 /// Runs every check `options` asks for in the workspace at `root`.
@@ -268,7 +321,14 @@ pub(crate) fn run(root: &Path, options: Options) -> Result<()> {
     prerequisites::check(&sh, options.gpu, driver.as_deref())?;
 
     let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
-    for step in steps(options, &smoke_runs, &display_env) {
+    let metadata = sh
+        .cmd(&cargo)
+        .args(["metadata", "--no-deps", "--format-version", "1"])
+        .quiet()
+        .read()
+        .context("failed to run `cargo metadata`")?;
+    let packages = default_members(&metadata)?;
+    for step in steps(options, &packages, &smoke_runs, &display_env) {
         eprintln!("\n==> {}", step.name);
         let mut cmd = sh.cmd(&cargo).args(&step.args);
         for (key, value) in &step.env {
@@ -317,14 +377,32 @@ mod tests {
         window_systems::smoke_runs(Platform::Linux, |_| true).unwrap()
     }
 
+    /// Two of the workspace's packages, to build on their own.
+    fn packages() -> Vec<String> {
+        vec!["clockwork".to_owned(), "clockwork-rhi".to_owned()]
+    }
+
     /// The steps for `options`, on a Linux desktop.
     fn steps_for(options: Options) -> Vec<Step> {
-        steps(options, &linux_smoke_runs(), &[])
+        steps(options, &packages(), &linux_smoke_runs(), &[])
     }
 
     /// The names of the steps for `options`, on a Linux desktop.
-    fn names_for(options: Options) -> Vec<&'static str> {
-        steps_for(options).iter().map(|step| step.name).collect()
+    fn names_for(options: Options) -> Vec<String> {
+        steps_for(options)
+            .into_iter()
+            .map(|step| step.name)
+            .collect()
+    }
+
+    /// Whether `args` contains `arg`.
+    fn has(args: &[String], arg: &str) -> bool {
+        args.iter().any(|a| a == arg)
+    }
+
+    /// Whether `args` ends with `suffix`.
+    fn ends_with(args: &[String], suffix: &[&str]) -> bool {
+        args.len() >= suffix.len() && args[args.len() - suffix.len()..] == *suffix
     }
 
     /// Finds the step called `name`, in the steps for `options`.
@@ -350,6 +428,10 @@ mod tests {
                 "clippy (debug)",
                 "clippy (release)",
                 "rustdoc",
+                "clockwork on its own",
+                "clockwork on its own, with every target",
+                "clockwork-rhi on its own",
+                "clockwork-rhi on its own, with every target",
                 "tests without a GPU",
             ]
         );
@@ -361,28 +443,42 @@ mod tests {
     fn clippy_denies_warnings_for_all_targets() {
         for name in ["clippy (debug)", "clippy (release)"] {
             let args = step(name).args;
-            assert!(args.contains(&"--all-targets"), "{name}: {args:?}");
+            assert!(has(&args, "--all-targets"), "{name}: {args:?}");
             assert!(
-                args.ends_with(&["--", "-D", "warnings"]),
+                ends_with(&args, &["--", "-D", "warnings"]),
                 "{name}: {args:?}"
             );
         }
-        assert!(step("clippy (release)").args.contains(&"--release"));
+        assert!(has(&step("clippy (release)").args, "--release"));
     }
 
     /// Rustdoc covers private items, and its warnings fail the check.
     #[test]
     fn rustdoc_denies_warnings_on_private_items() {
         let doc = step("rustdoc");
-        assert!(doc.args.contains(&"--document-private-items"));
+        assert!(has(&doc.args, "--document-private-items"));
         assert_eq!(doc.env, [("RUSTDOCFLAGS", "-D warnings".to_owned())]);
+    }
+
+    /// Each package is built by itself, so with only the features it turns
+    /// on: first without dev-dependencies, then with every target.
+    #[test]
+    fn each_package_builds_on_its_own() {
+        assert_eq!(
+            step("clockwork-rhi on its own").args,
+            ["check", "--package", "clockwork-rhi"]
+        );
+        assert_eq!(
+            step("clockwork-rhi on its own, with every target").args,
+            ["check", "--package", "clockwork-rhi", "--all-targets"]
+        );
     }
 
     /// The test step skips T1 tests, which need a GPU, by their module name.
     #[test]
     fn tests_skip_t1_modules() {
         let args = step("tests without a GPU").args;
-        assert!(args.ends_with(&["--", "--skip", "gpu_tests"]), "{args:?}");
+        assert!(ends_with(&args, &["--", "--skip", "gpu_tests"]), "{args:?}");
     }
 
     /// With `--gpu`, the tests run every tier, in place of the T0-only step,
@@ -391,7 +487,7 @@ mod tests {
     #[test]
     fn the_gpu_option_runs_every_tier_with_all_capabilities_required() {
         let names = names_for(GPU_NO_WINDOW);
-        assert!(!names.contains(&"tests without a GPU"), "{names:?}");
+        assert!(!has(&names, "tests without a GPU"), "{names:?}");
         let tests = step_for(GPU_NO_WINDOW, "tests, including GPU tests");
         assert_eq!(tests.args, ["test", "--workspace"]);
         assert_eq!(
@@ -448,11 +544,11 @@ mod tests {
     #[test]
     fn windows_smoke_runs_under_win32() {
         let runs = window_systems::smoke_runs(Platform::Windows, |_| false).unwrap();
-        let names: Vec<_> = steps(GPU, &runs, &[])
-            .iter()
+        let names: Vec<_> = steps(GPU, &packages(), &runs, &[])
+            .into_iter()
             .map(|step| step.name)
             .collect();
-        assert_eq!(names.last(), Some(&"smoke run under Win32"));
+        assert_eq!(names.last().unwrap(), "smoke run under Win32");
         assert_eq!(
             names.iter().filter(|name| name.contains("smoke")).count(),
             1
@@ -485,7 +581,12 @@ mod tests {
     /// unsets to choose its window system.
     #[test]
     fn smoke_runs_use_the_virtual_displays() {
-        let steps = steps(GPU, &linux_smoke_runs(), &virtual_display_env());
+        let steps = steps(
+            GPU,
+            &packages(),
+            &linux_smoke_runs(),
+            &virtual_display_env(),
+        );
         let env_of = |name| {
             let step = steps.iter().find(|step| step.name == name).unwrap();
             step.env.iter().map(|(key, _)| *key).collect::<Vec<_>>()
@@ -503,7 +604,12 @@ mod tests {
     /// The virtual displays' variables are for the smoke runs only.
     #[test]
     fn other_steps_dont_use_the_virtual_displays() {
-        let with = steps(GPU, &linux_smoke_runs(), &virtual_display_env());
+        let with = steps(
+            GPU,
+            &packages(),
+            &linux_smoke_runs(),
+            &virtual_display_env(),
+        );
         let without = steps_for(GPU);
         let count = with.len() - 2;
         assert_eq!(with[..count], without[..count]);
@@ -538,6 +644,49 @@ mod tests {
     fn lavapipe_is_for_linux() {
         assert!(GPU_LAVAPIPE.validate(Platform::Linux).is_ok());
         assert!(GPU_LAVAPIPE.validate(Platform::Windows).is_err());
+    }
+
+    /// Output like `cargo metadata --no-deps --format-version 1`'s, cut down
+    /// to the fields read. As in the real output, `xtask`'s ID leaves out its
+    /// name, which is the same as its directory's.
+    const METADATA: &str = r#"{
+        "packages": [
+            {"name": "clockwork", "id": "path+file:///w#clockwork@0.1.0"},
+            {"name": "clockwork-rhi", "id": "path+file:///w/crates/rhi#clockwork-rhi@0.1.0"},
+            {"name": "xtask", "id": "path+file:///w/xtask#0.1.0"}
+        ],
+        "workspace_members": [
+            "path+file:///w#clockwork@0.1.0",
+            "path+file:///w/crates/rhi#clockwork-rhi@0.1.0",
+            "path+file:///w/xtask#0.1.0"
+        ],
+        "workspace_default_members": [
+            "path+file:///w#clockwork@0.1.0",
+            "path+file:///w/crates/rhi#clockwork-rhi@0.1.0"
+        ]
+    }"#;
+
+    /// The packages built on their own are the default members, by name,
+    /// leaving out `xtask`.
+    #[test]
+    fn default_members_are_named() {
+        assert_eq!(
+            default_members(METADATA).unwrap(),
+            ["clockwork", "clockwork-rhi"]
+        );
+    }
+
+    /// A default member with no package, or output that isn't JSON, is an
+    /// error, rather than a crate quietly left out.
+    #[test]
+    fn unreadable_metadata_is_an_error() {
+        let missing = METADATA.replace(
+            r#"{"name": "clockwork-rhi", "id": "path+file:///w/crates/rhi#clockwork-rhi@0.1.0"},"#,
+            "",
+        );
+        assert_ne!(missing, METADATA);
+        assert!(default_members(&missing).is_err());
+        assert!(default_members("not JSON").is_err());
     }
 
     /// `--virtual-displays` is for Linux only.
