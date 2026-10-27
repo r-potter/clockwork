@@ -28,6 +28,7 @@ mod surface;
 mod swapchain;
 #[cfg(test)]
 pub(crate) mod test_support;
+mod textures;
 mod validation;
 
 use std::ffi::CStr;
@@ -42,7 +43,7 @@ use tracing::{info, warn};
 
 use super::{
     BackendOptions, Buffer, BufferDesc, Capabilities, Device, GpuAddress, GraphicsApi,
-    RenderHardwareInterface, RhiResult, WindowSize, WindowTarget,
+    RenderHardwareInterface, RhiResult, Texture, TextureDesc, WindowSize, WindowTarget,
 };
 use crate::handle::HandleTable;
 use buffers::BufferEntry;
@@ -54,6 +55,7 @@ use physical_device::PhysicalDevice;
 use shaders::TriangleShaders;
 use surface::Surface;
 use swapchain::Swapchain;
+use textures::TextureEntry;
 use validation::{Availability, LayerSettings, VALIDATION_LAYER};
 
 /// Name reported to the Vulkan driver for both the application and the engine.
@@ -122,6 +124,8 @@ pub(crate) struct VulkanRenderHardwareInterface {
 pub(crate) struct VulkanDevice {
     /// Every live buffer.
     buffers: RwLock<HandleTable<BufferEntry>>,
+    /// Every live texture.
+    textures: RwLock<HandleTable<TextureEntry>>,
     /// Allocates memory for resources on `device`.
     allocator: MemoryAllocator,
     /// The logical device, and its queues, created on `physical_device`.
@@ -221,6 +225,7 @@ impl VulkanRenderHardwareInterface {
         let allocator = MemoryAllocator::new(device.handle(), physical_device.memory_properties);
         let core = Arc::new(VulkanDevice {
             buffers: RwLock::new(HandleTable::new("buffer")),
+            textures: RwLock::new(HandleTable::new("texture")),
             allocator,
             device,
             physical_device,
@@ -670,6 +675,15 @@ impl Drop for VulkanDevice {
             // buffer.
             unsafe { self.free_buffer(entry) };
         }
+        let textures = self
+            .textures
+            .get_mut()
+            .unwrap_or_else(PoisonError::into_inner)
+            .drain();
+        for (_, entry) in textures {
+            // SAFETY: As above.
+            unsafe { self.free_texture(entry) };
+        }
     }
 }
 
@@ -696,6 +710,14 @@ impl Device for VulkanDevice {
 
     fn read_buffer(&self, buffer: Buffer, offset: u64, out: &mut [u8]) -> RhiResult<()> {
         self.read_buffer_entry(buffer, offset, out)
+    }
+
+    fn create_texture(&self, desc: &TextureDesc<'_>) -> RhiResult<Texture> {
+        self.create_texture_entry(desc)
+    }
+
+    fn destroy_texture(&self, texture: Texture) {
+        self.destroy_texture_entry(texture);
     }
 }
 

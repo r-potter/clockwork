@@ -360,6 +360,33 @@ pub trait Device: Debug + Send + Sync {
     /// Panics if the handle is stale, the buffer isn't in readback memory,
     /// or the range is out of bounds.
     fn read_buffer(&self, buffer: Buffer, offset: u64, out: &mut [u8]) -> RhiResult<()>;
+
+    /// Creates a texture, in GPU-only memory. Its contents are undefined
+    /// until it's written.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RhiError::OutOfDeviceMemory`] if device memory runs out,
+    /// or [`RhiError::Other`] if the texture can't be created otherwise.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the description is invalid: an empty extent, no layers or
+    /// usage, mips outside the full chain, a shape its dimension doesn't
+    /// allow, or an attachment usage that doesn't match its format. Also
+    /// panics if the device doesn't support the format for the usage.
+    fn create_texture(&self, desc: &TextureDesc<'_>) -> RhiResult<Texture>;
+
+    /// Destroys the texture. Its handle is stale from then on.
+    ///
+    /// Nothing can submit work through a `Device` yet, so the texture is
+    /// freed straight away, as [`destroy_buffer`](Self::destroy_buffer)
+    /// describes.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the handle is stale.
+    fn destroy_texture(&self, texture: Texture);
 }
 
 // The device is shared between threads, as an `Arc<dyn Device>` (design

@@ -12,7 +12,6 @@ use crate::handle::Handle;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Texture(Handle);
 
-#[expect(dead_code, reason = "the texture table issues them, in the next PR")]
 impl Texture {
     /// The texture for `handle`, issued by a backend's texture table.
     pub(crate) fn from_handle(handle: Handle) -> Self {
@@ -222,19 +221,14 @@ pub struct TextureDesc<'a> {
 }
 
 impl TextureDesc<'_> {
-    /// Checks that the description is valid, as creating a texture
+    /// Checks that the description is valid, as [`Device::create_texture`]
     /// requires.
+    ///
+    /// [`Device::create_texture`]: crate::Device::create_texture
     ///
     /// # Panics
     ///
     /// Panics on the first problem, naming the texture.
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "Device::create_texture checks descriptions, in the next PR"
-        )
-    )]
     pub(crate) fn check(&self) {
         let label = self.label;
         let Extent3d {
