@@ -30,6 +30,7 @@
 //! 2. add a submodule with a type implementing [`RenderHardwareInterface`],
 //! 3. add a match arm for it in [`create`].
 
+mod buffer;
 mod capabilities;
 mod error;
 #[cfg(test)]
@@ -47,6 +48,7 @@ use anyhow::{Result, bail};
 use clockwork_diagnostics::SessionId;
 use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
 
+pub use buffer::{Buffer, BufferDesc, BufferUsage, GpuAddress};
 pub use capabilities::{Capabilities, Limits, QueueKind, QueueKindSet};
 pub use error::{RhiError, RhiResult};
 use vulkan::VulkanRenderHardwareInterface;
@@ -296,6 +298,36 @@ pub enum MemoryLocation {
 pub trait Device: Debug + Send + Sync {
     /// The selected device's optional features and limits.
     fn capabilities(&self) -> &Capabilities;
+
+    /// Creates a buffer, with memory in `desc.location`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RhiError::OutOfDeviceMemory`] if device memory runs out,
+    /// or [`RhiError::Other`] if the buffer can't be created otherwise.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `desc.size` is zero.
+    fn create_buffer(&self, desc: &BufferDesc<'_>) -> RhiResult<Buffer>;
+
+    /// Destroys the buffer. Its handle is stale from then on.
+    ///
+    /// Nothing can submit work through a `Device` yet, so the buffer is
+    /// freed straight away. Once it can, design 0002 frees it only once
+    /// nothing translated before now can use it.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the handle is stale.
+    fn destroy_buffer(&self, buffer: Buffer);
+
+    /// The buffer's address on the GPU.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the handle is stale.
+    fn buffer_address(&self, buffer: Buffer) -> GpuAddress;
 }
 
 // The device is shared between threads, as an `Arc<dyn Device>` (design
