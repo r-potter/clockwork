@@ -16,6 +16,7 @@
 mod capabilities;
 mod device;
 mod device_selection;
+mod error;
 mod frames;
 #[cfg(test)]
 mod gpu_tests;

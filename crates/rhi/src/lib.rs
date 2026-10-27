@@ -22,12 +22,16 @@
 //! What the selected device can do beyond the baseline is described by
 //! [`Capabilities`] (design 0002, "Capabilities").
 //!
+//! RHI calls return an [`RhiError`], which tells apart the failures a caller
+//! can act on (design 0002, "Error handling").
+//!
 //! To add a backend:
 //! 1. add a variant to [`GraphicsApi`],
 //! 2. add a submodule with a type implementing [`RenderHardwareInterface`],
 //! 3. add a match arm for it in [`create`].
 
 mod capabilities;
+mod error;
 #[cfg(test)]
 mod gpu_tests;
 #[cfg(test)]
@@ -43,6 +47,7 @@ use clockwork_diagnostics::SessionId;
 use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
 
 pub use capabilities::{Capabilities, Limits, QueueKind, QueueKindSet};
+pub use error::{RhiError, RhiResult};
 use vulkan::VulkanRenderHardwareInterface;
 
 /// A window a backend can render to.
