@@ -53,7 +53,10 @@ log = "0.4.34"
 # Property tests: invariants checked over generated inputs, such as the TLSF
 # suballocator's against a model (design 0002).
 proptest = "1.12.0"
-raw-window-handle = "0.6"
+# `std` makes `HandleError` a `std::error::Error`, so `anyhow` can add context
+# to it. `winit` also enables it, but `clockwork-rhi` doesn't depend on `winit`
+# and has to build on its own.
+raw-window-handle = { version = "0.6", features = ["std"] }
 tracing = "0.1.44"
 # The same version `tracing-subscriber` uses to turn `log` records into
 # events, for their targets (see `clockwork_diagnostics::target_of`).
