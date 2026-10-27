@@ -18,3 +18,4 @@ tracing.workspace = true
 
 [dev-dependencies]
 clockwork-diagnostics = { workspace = true, features = ["test-support"] }
+proptest.workspace = true
