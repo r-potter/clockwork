@@ -689,6 +689,14 @@ impl Device for VulkanDevice {
     fn buffer_address(&self, buffer: Buffer) -> GpuAddress {
         self.buffer_entry_address(buffer)
     }
+
+    fn write_buffer(&self, buffer: Buffer, offset: u64, data: &[u8]) {
+        self.write_buffer_entry(buffer, offset, data);
+    }
+
+    fn read_buffer(&self, buffer: Buffer, offset: u64, out: &mut [u8]) -> RhiResult<()> {
+        self.read_buffer_entry(buffer, offset, out)
+    }
 }
 
 impl RenderHardwareInterface for VulkanRenderHardwareInterface {

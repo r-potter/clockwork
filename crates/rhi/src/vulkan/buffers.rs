@@ -6,21 +6,31 @@
 //! was created for, with its device address queried once, when it's
 //! created. The [`VulkanDevice`]'s buffer table holds them.
 //!
-//! Lock order: the buffer table is never held while allocating or freeing
-//! memory, so it's never held with a memory pool's lock.
+//! Upload and readback buffers are mapped persistently, through their
+//! allocations. [`write_buffer`](crate::Device::write_buffer) and
+//! [`read_buffer`](crate::Device::read_buffer) copy through the mapping
+//! while holding the buffer's own lock, so overlapping copies from two
+//! threads are a logic error, never undefined behaviour. Readback memory
+//! that isn't coherent is invalidated before it's read.
+//!
+//! Lock order: the buffer table, then a buffer's mapping lock. The table is
+//! never held while allocating or freeing memory, so it's never held with a
+//! memory pool's lock.
 
 #[cfg(test)]
 mod gpu_tests;
 
-use std::sync::{PoisonError, RwLockReadGuard, RwLockWriteGuard};
+use std::ptr;
+use std::sync::{Mutex, PoisonError, RwLockReadGuard, RwLockWriteGuard};
 
+use anyhow::anyhow;
 use ash::vk;
 
 use super::VulkanDevice;
 use super::error::{error, error_from_chain};
 use super::memory::{MemoryAllocation, MemoryRequest, Resource, buffer_requirements};
 use crate::handle::HandleTable;
-use crate::{Buffer, BufferDesc, BufferUsage, GpuAddress, RhiResult};
+use crate::{Buffer, BufferDesc, BufferUsage, GpuAddress, MemoryLocation, RhiError, RhiResult};
 
 /// A buffer in the buffer table.
 #[derive(Debug)]
@@ -31,6 +41,12 @@ pub(super) struct BufferEntry {
     allocation: MemoryAllocation,
     /// Its address on the GPU.
     address: GpuAddress,
+    /// Its size, as created, in bytes.
+    size: u64,
+    /// Where its memory is.
+    location: MemoryLocation,
+    /// Held while copying through the buffer's mapping.
+    mapping: Mutex<()>,
 }
 
 /// The Vulkan usage flags for a buffer used as `usage`. Every buffer can be
@@ -57,8 +73,8 @@ impl VulkanDevice {
     ///
     /// # Errors
     ///
-    /// Returns [`RhiError::OutOfDeviceMemory`](crate::RhiError::OutOfDeviceMemory)
-    /// if device memory runs out, or [`RhiError::Other`](crate::RhiError::Other)
+    /// Returns [`RhiError::OutOfDeviceMemory`]
+    /// if device memory runs out, or [`RhiError::Other`]
     /// if creating, allocating or binding fails otherwise.
     ///
     /// # Panics
@@ -118,6 +134,9 @@ impl VulkanDevice {
             buffer,
             allocation,
             address,
+            size: desc.size,
+            location: desc.location,
+            mapping: Mutex::new(()),
         };
         Ok(Buffer::from_handle(
             self.write_buffers().insert(desc.label, entry),
@@ -147,6 +166,102 @@ impl VulkanDevice {
         self.read_buffers().get(buffer.handle()).address
     }
 
+    /// Copies `data` into the upload buffer `buffer` at `offset`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the handle is stale, the buffer isn't in upload memory, or
+    /// the range is out of bounds.
+    pub(super) fn write_buffer_entry(&self, buffer: Buffer, offset: u64, data: &[u8]) {
+        let buffers = self.read_buffers();
+        let label = buffers.label(buffer.handle());
+        let entry = buffers.get(buffer.handle());
+        check_location("write", label, entry.location, MemoryLocation::Upload);
+        check_range("write", label, entry.size, offset, data.len());
+        let mapped = entry.allocation.mapped().expect("upload memory is mapped");
+        let _mapping = entry.mapping.lock().unwrap_or_else(PoisonError::into_inner);
+        // Upload memory is always coherent (see `memory_types`), so the
+        // write needs no flush.
+        // SAFETY: The range is inside the buffer, which is inside its
+        // allocation's mapped bytes. The mapping stays valid while the entry
+        // is in the table, which the read lock keeps it. The buffer's mapping
+        // lock keeps any other copy through it out, and `data` is a Rust
+        // slice, so it doesn't overlap mapped memory.
+        unsafe {
+            ptr::copy_nonoverlapping(
+                data.as_ptr(),
+                mapped.as_ptr().add(offset as usize),
+                data.len(),
+            );
+        }
+    }
+
+    /// Copies from the readback buffer `buffer` at `offset` into `out`,
+    /// invalidating the range first if the memory isn't coherent.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if non-coherent memory can't be invalidated.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the handle is stale, the buffer isn't in readback memory,
+    /// or the range is out of bounds.
+    pub(super) fn read_buffer_entry(
+        &self,
+        buffer: Buffer,
+        offset: u64,
+        out: &mut [u8],
+    ) -> RhiResult<()> {
+        let buffers = self.read_buffers();
+        let label = buffers.label(buffer.handle());
+        let entry = buffers.get(buffer.handle());
+        check_location("read", label, entry.location, MemoryLocation::Readback);
+        check_range("read", label, entry.size, offset, out.len());
+        if out.is_empty() {
+            return Ok(());
+        }
+        let allocation = &entry.allocation;
+        let mapped = allocation.mapped().expect("readback memory is mapped");
+        let _mapping = entry.mapping.lock().unwrap_or_else(PoisonError::into_inner);
+        if !allocation.is_coherent() {
+            let atom = self.physical_device.limits().non_coherent_atom_size;
+            let (start, size) = invalidate_range(
+                allocation.offset() + offset,
+                out.len() as u64,
+                atom,
+                allocation.memory_size(),
+            );
+            let range = vk::MappedMemoryRange::default()
+                .memory(allocation.memory())
+                .offset(start)
+                .size(size);
+            // SAFETY: The memory is mapped whole, and the range is inside it,
+            // rounded as `nonCoherentAtomSize` requires.
+            unsafe {
+                self.device
+                    .handle()
+                    .invalidate_mapped_memory_ranges(std::slice::from_ref(&range))
+            }
+            // Running out of memory here isn't while creating anything, so
+            // it isn't `OutOfDeviceMemory`.
+            .map_err(|result| {
+                RhiError::Other(anyhow!(
+                    "failed to invalidate memory for buffer \"{label}\": {result:?}"
+                ))
+            })?;
+        }
+        // SAFETY: As for `write_buffer_entry`, with `out` as the destination.
+        unsafe {
+            ptr::copy_nonoverlapping(
+                mapped.as_ptr().add(offset as usize),
+                out.as_mut_ptr(),
+                out.len(),
+            );
+        }
+        Ok(())
+    }
+
     /// Destroys a buffer taken out of the table, and frees its memory.
     ///
     /// # Safety
@@ -174,9 +289,50 @@ impl VulkanDevice {
     }
 }
 
+/// Checks that a buffer in `location` can be used for `action`, which
+/// needs it to be in `expected` memory.
+///
+/// # Panics
+///
+/// Panics if it isn't, naming the buffer.
+fn check_location(action: &str, label: &str, location: MemoryLocation, expected: MemoryLocation) {
+    assert!(
+        location == expected,
+        "cannot {action} buffer \"{label}\": it's in {location:?} memory, not {expected:?}",
+    );
+}
+
+/// Checks that `len` bytes at `offset` are inside a buffer of `size` bytes.
+///
+/// # Panics
+///
+/// Panics if they aren't, naming the buffer.
+fn check_range(action: &str, label: &str, size: u64, offset: u64, len: usize) {
+    let end = offset.checked_add(len as u64);
+    assert!(
+        end.is_some_and(|end| end <= size),
+        "cannot {action} {len} bytes at offset {offset} of buffer \"{label}\", which has {size}",
+    );
+}
+
+/// The range of memory to invalidate before reading `len` bytes at `offset`
+/// in memory of `memory_size` bytes, as an offset and a size: rounded out to
+/// multiples of `atom` (`nonCoherentAtomSize`), or to the end of the memory
+/// with `VK_WHOLE_SIZE` if that's where rounding up would reach.
+fn invalidate_range(offset: u64, len: u64, atom: u64, memory_size: u64) -> (u64, u64) {
+    let start = offset / atom * atom;
+    let end = (offset + len).div_ceil(atom) * atom;
+    if end >= memory_size {
+        (start, vk::WHOLE_SIZE)
+    } else {
+        (start, end - start)
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    //! T0 tests of buffer usage flags.
+    //! T0 tests of buffer usage flags, range and location checks, and
+    //! invalidation ranges.
 
     use super::*;
 
@@ -195,6 +351,68 @@ mod tests {
         assert_eq!(
             usage_flags(BufferUsage::INDIRECT),
             base | vk::BufferUsageFlags::INDIRECT_BUFFER,
+        );
+    }
+
+    /// Ranges inside the buffer pass, up to and including its end, and an
+    /// empty range at the end.
+    #[test]
+    fn ranges_inside_the_buffer_pass() {
+        check_range("write", "data", 16, 0, 16);
+        check_range("write", "data", 16, 12, 4);
+        check_range("write", "data", 16, 16, 0);
+    }
+
+    /// A range past the end panics, naming the buffer.
+    #[test]
+    #[should_panic(expected = "cannot read 4 bytes at offset 13 of buffer \"data\", which has 16")]
+    fn ranges_past_the_end_panic() {
+        check_range("read", "data", 16, 13, 4);
+    }
+
+    /// A range whose end overflows panics, rather than wrapping inside the
+    /// buffer.
+    #[test]
+    #[should_panic(expected = "of buffer \"data\", which has 16")]
+    fn overflowing_ranges_panic() {
+        check_range("write", "data", 16, u64::MAX, 1);
+    }
+
+    /// Writing to a buffer outside upload memory panics, naming the buffer
+    /// and both locations.
+    #[test]
+    #[should_panic(
+        expected = "cannot write buffer \"vertices\": it's in Device memory, not Upload"
+    )]
+    fn writes_outside_upload_memory_panic() {
+        check_location(
+            "write",
+            "vertices",
+            MemoryLocation::Device,
+            MemoryLocation::Upload,
+        );
+    }
+
+    /// Invalidation rounds out to whole atoms, around the range.
+    #[test]
+    fn invalidation_rounds_out_to_atoms() {
+        assert_eq!(invalidate_range(0, 64, 64, 4_096), (0, 64));
+        assert_eq!(invalidate_range(70, 10, 64, 4_096), (64, 64));
+        assert_eq!(invalidate_range(60, 10, 64, 4_096), (0, 128));
+    }
+
+    /// A range that rounds up to or past the end of the memory invalidates
+    /// to its end, since a size that isn't a multiple of the atom is only
+    /// allowed there.
+    #[test]
+    fn invalidation_reaches_the_end_with_whole_size() {
+        assert_eq!(
+            invalidate_range(4_000, 96, 64, 4_096),
+            (3_968, vk::WHOLE_SIZE)
+        );
+        assert_eq!(
+            invalidate_range(1_000, 10, 64, 1_020),
+            (960, vk::WHOLE_SIZE)
         );
     }
 }
