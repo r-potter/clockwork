@@ -76,9 +76,13 @@ fn destroy(
 fn more_buffers_than_allocations_share_blocks() {
     let session = TestSession::new();
     let backend = VulkanTestBackend::headless(&session);
-    let device = backend.device.handle();
-    let allocator = MemoryAllocator::new(device, backend.physical_device.memory_properties);
-    let limit = backend.physical_device.limits().max_memory_allocation_count as usize;
+    let device = backend.core.device.handle();
+    let allocator = MemoryAllocator::new(device, backend.core.physical_device.memory_properties);
+    let limit = backend
+        .core
+        .physical_device
+        .limits()
+        .max_memory_allocation_count as usize;
     // Lavapipe's limit is far beyond what's worth creating, so stop at
     // 10,000, which still shows buffers sharing blocks.
     let count = (limit + 1).min(10_000);
@@ -109,8 +113,8 @@ fn more_buffers_than_allocations_share_blocks() {
 fn large_buffers_get_dedicated_memory() {
     let session = TestSession::new();
     let backend = VulkanTestBackend::headless(&session);
-    let device = backend.device.handle();
-    let allocator = MemoryAllocator::new(device, backend.physical_device.memory_properties);
+    let device = backend.core.device.handle();
+    let allocator = MemoryAllocator::new(device, backend.core.physical_device.memory_properties);
 
     // Larger than half of any block, since no block is larger than
     // `DEVICE_BLOCK_SIZE`.
@@ -131,8 +135,8 @@ fn large_buffers_get_dedicated_memory() {
 fn upload_memory_is_mapped() {
     let session = TestSession::new();
     let backend = VulkanTestBackend::headless(&session);
-    let device = backend.device.handle();
-    let allocator = MemoryAllocator::new(device, backend.physical_device.memory_properties);
+    let device = backend.core.device.handle();
+    let allocator = MemoryAllocator::new(device, backend.core.physical_device.memory_properties);
 
     let first_buffer = create_buffer(device, 1_024);
     let first = allocate_and_bind(&allocator, device, first_buffer, MemoryLocation::Upload);

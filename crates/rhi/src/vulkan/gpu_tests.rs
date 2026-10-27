@@ -13,7 +13,7 @@ use clockwork_diagnostics::capture::TestSession;
 use tracing::Level;
 
 use super::test_support::{Capability, VulkanTestBackend};
-use crate::QueueKind;
+use crate::{QueueKind, RenderHardwareInterface};
 
 /// A buffer and the memory bound to it, destroyed when dropped.
 struct TestBuffer<'a> {
@@ -34,7 +34,7 @@ impl<'a> TestBuffer<'a> {
     ///
     /// Panics if any Vulkan call fails.
     fn new(backend: &'a VulkanTestBackend, size: vk::DeviceSize) -> Self {
-        let device = backend.device.handle();
+        let device = backend.core.device.handle();
         let buffer_create_info = vk::BufferCreateInfo::default()
             .size(size)
             .usage(vk::BufferUsageFlags::TRANSFER_DST)
@@ -96,9 +96,9 @@ impl<'a> TestCommands<'a> {
     ///
     /// Panics if any Vulkan call fails.
     fn new(backend: &'a VulkanTestBackend) -> Self {
-        let device = backend.device.handle();
+        let device = backend.core.device.handle();
         let pool_create_info = vk::CommandPoolCreateInfo::default()
-            .queue_family_index(backend.device.queue_families().graphics);
+            .queue_family_index(backend.core.device.queue_families().graphics);
         // SAFETY: `device` is a valid logical device, and `pool_create_info`
         // is valid for the call.
         let pool = unsafe { device.create_command_pool(&pool_create_info, None) }.unwrap();
@@ -138,7 +138,7 @@ fn validation_errors_are_counted() {
         event.message_id.as_deref() == Some("VUID-VkBufferCreateInfo-size-00912")
     });
 
-    let device = backend.device.handle();
+    let device = backend.core.device.handle();
     // A buffer's size must be greater than zero.
     let buffer_create_info = vk::BufferCreateInfo::default()
         .size(0)
@@ -168,7 +168,7 @@ fn sync_hazards_are_reported() {
 
     let buffer = TestBuffer::new(&backend, 256);
     let commands = TestCommands::new(&backend);
-    let device = backend.device.handle();
+    let device = backend.core.device.handle();
     let command_buffer = commands.command_buffer;
     let begin_info =
         vk::CommandBufferBeginInfo::default().flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
@@ -195,8 +195,11 @@ fn sync_hazards_are_reported() {
 fn capabilities_describe_the_selected_device() {
     let session = TestSession::new();
     let backend = VulkanTestBackend::headless(&session);
-    let capabilities = backend.capabilities();
-    assert_eq!(capabilities.device_name, backend.physical_device.name());
+    let capabilities = backend.device().capabilities();
+    assert_eq!(
+        capabilities.device_name,
+        backend.core.physical_device.name()
+    );
     assert!(capabilities.timestamps.contains(QueueKind::Graphics));
     assert!(capabilities.limits.max_push_data_size >= 128);
     assert!(capabilities.limits.timestamp_period_ns > 0.0);
@@ -226,7 +229,7 @@ fn reference_device_reports_required_extensions() {
     let session = TestSession::new();
     let backend = VulkanTestBackend::headless(&session);
 
-    let device = &backend.physical_device;
+    let device = &backend.core.physical_device;
     // Every Vulkan 1.4 device supports `maintenance5`, so it's only unset if
     // the 1.4 features weren't queried.
     assert_eq!(device.features.vulkan14.maintenance5, vk::TRUE);
