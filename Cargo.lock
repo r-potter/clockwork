@@ -461,6 +461,7 @@ dependencies = [
  "ash-window",
  "clockwork-diagnostics",
  "clockwork-gpu-memory",
+ "proptest",
  "raw-window-handle",
  "tracing",
 ]
