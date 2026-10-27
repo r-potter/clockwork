@@ -9,8 +9,8 @@
 use clockwork_diagnostics::capture::TestSession;
 
 use super::VulkanRenderHardwareInterface;
-use crate::Capabilities;
 use crate::test_support::{self, RequiredCapabilities};
+use crate::{Capabilities, RenderHardwareInterface};
 
 /// An optional capability some T1 tests need, which some devices lack.
 ///
@@ -111,7 +111,7 @@ impl VulkanTestBackend {
     ///
     /// Panics if the device lacks `capability` and it's required.
     pub(crate) fn has(&self, capability: Capability) -> bool {
-        let capabilities = self.rhi.capabilities();
+        let capabilities = self.rhi.device().capabilities();
         let supported = capability.is_in(capabilities);
         if !supported {
             test_support::missing_capability(

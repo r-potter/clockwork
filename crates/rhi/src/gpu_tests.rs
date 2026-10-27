@@ -7,6 +7,7 @@
 //! test.
 
 use std::sync::Arc;
+use std::thread;
 
 use clockwork_diagnostics::capture::TestSession;
 use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
@@ -74,5 +75,31 @@ fn headless_backends_ignore_suspend_and_resize_and_reject_resume() {
         };
         assert!(rhi.resume(target).is_err());
         assert!(rhi.is_headless());
+    }
+}
+
+/// Every backend's device can be used from another thread, and outlives the
+/// backend it came from: here the backend is dropped first, and the device
+/// is destroyed with its last `Arc`, on the other thread, with nothing
+/// logged (design 0002, "Ownership and lifetimes").
+#[test]
+fn devices_are_shared_and_outlive_their_backend() {
+    let session = TestSession::new();
+    let options = backend_options(&session);
+    for &api in ALL_GRAPHICS_APIS {
+        let rhi = create(api, None, &options)
+            .unwrap_or_else(|err| panic!("failed to create {api:?} backend: {err:?}"));
+        let device = Arc::clone(rhi.device());
+        let device_name = device.capabilities().device_name.clone();
+        drop(rhi);
+
+        let span = session.span().clone();
+        let name_on_thread = thread::spawn(move || {
+            let _entered = span.entered();
+            device.capabilities().device_name.clone()
+        })
+        .join()
+        .expect("the thread using the device panicked");
+        assert_eq!(name_on_thread, device_name, "{api:?}");
     }
 }
