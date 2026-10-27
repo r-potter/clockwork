@@ -30,6 +30,7 @@ pub(crate) mod test_support;
 mod validation;
 
 use std::ffi::CStr;
+use std::sync::Arc;
 use std::{fmt, slice};
 
 use anyhow::{Context, Result, bail};
@@ -39,7 +40,8 @@ use raw_window_handle::RawDisplayHandle;
 use tracing::{info, warn};
 
 use super::{
-    BackendOptions, Capabilities, GraphicsApi, RenderHardwareInterface, WindowSize, WindowTarget,
+    BackendOptions, Capabilities, Device, GraphicsApi, RenderHardwareInterface, WindowSize,
+    WindowTarget,
 };
 use device::LogicalDevice;
 use device_selection::{Candidate, Selection};
@@ -63,12 +65,14 @@ const CLEAR_COLOUR: [f32; 4] = [0.02, 0.05, 0.1, 1.0];
 
 /// Vulkan render hardware interface.
 ///
-/// Owns the Vulkan instance, the selected physical device, the logical device,
-/// the resources for frames in flight, the triangle's shader objects and,
-/// unless headless or suspended, the window surface and swapchain.
+/// Owns what belongs to the window: unless headless or suspended, the
+/// window surface and swapchain. Also owns, until design 0002 moves them
+/// out, the resources for frames in flight and the triangle's shader
+/// objects. Everything else is in the shared [`VulkanDevice`], which it
+/// hands out as the [`Device`].
 ///
 /// Fields are dropped in declaration order, so each is declared before the
-/// objects it was created from.
+/// objects it was created from, and the core, with the instance, last.
 pub(crate) struct VulkanRenderHardwareInterface {
     /// The window's latest size, from creation, [`resume`] or [`resize`].
     /// `None` when headless or suspended.
@@ -87,10 +91,31 @@ pub(crate) struct VulkanRenderHardwareInterface {
     triangle_shaders: TriangleShaders,
     /// `None` when headless, while suspended, or while the window has no area.
     swapchain: Option<Swapchain>,
-    /// The logical device, and its queues, created on `physical_device`.
-    device: LogicalDevice,
     /// `None` when headless, or while suspended.
     surface: Option<Surface>,
+    /// `core`, as the device the application shares between threads.
+    device: Arc<dyn Device>,
+    /// The instance and devices. Declared last so that this backend's
+    /// reference to it is dropped last, after every object created from it.
+    /// Holders of `device` may keep it alive longer.
+    core: Arc<VulkanDevice>,
+}
+
+/// The Vulkan backend's shared core (design 0002, "Ownership and
+/// lifetimes"): the instance, the selected device and the logical device.
+/// The [`VulkanRenderHardwareInterface`] and every holder of its [`Device`]
+/// share it.
+///
+/// It's destroyed with its last `Arc`, on whichever thread drops it. Fields
+/// are dropped in declaration order, so each is declared before the objects
+/// it was created from.
+///
+/// Its queues aren't locked yet, so only the owner thread submits to them,
+/// through the [`VulkanRenderHardwareInterface`]. Submitting through the
+/// `Device` comes with the locks it needs, in `rhi-commands`.
+pub(crate) struct VulkanDevice {
+    /// The logical device, and its queues, created on `physical_device`.
+    device: LogicalDevice,
     /// The physical device chosen by [`device_selection::select`].
     physical_device: PhysicalDevice,
     /// What `physical_device` can do beyond the requirements.
@@ -178,37 +203,31 @@ impl VulkanRenderHardwareInterface {
         } = device_selection::select(candidates, options.device_filter.as_deref())?;
 
         let device = LogicalDevice::new(&instance.instance, &physical_device, queue_families)?;
+        // Create these before the core takes the instance, so that if either
+        // fails, the surface is still destroyed before the instance.
         let frames = Frames::new(&device)?;
         let triangle_shaders = TriangleShaders::new(&device)?;
 
+        let core = Arc::new(VulkanDevice {
+            device,
+            physical_device,
+            capabilities,
+            instance,
+        });
         let mut rhi = Self {
             window_size,
             swapchain_out_of_date: false,
             frames,
             triangle_shaders,
             swapchain: None,
-            device,
             surface,
-            physical_device,
-            capabilities,
-            instance,
+            device: core.clone(),
+            core,
         };
         if let Some(size) = window_size {
             rhi.recreate_swapchain(size)?;
         }
         Ok(rhi)
-    }
-
-    /// What the selected device can do beyond the requirements.
-    ///
-    /// Design 0002 exposes this through the RHI's `Device` trait, which
-    /// `rhi-resources` adds. Until then, only tests ask.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "exposed by the Device trait later")
-    )]
-    pub(crate) fn capabilities(&self) -> &Capabilities {
-        &self.capabilities
     }
 
     /// Replaces the swapchain with one for the current surface, sized to fit
@@ -225,9 +244,9 @@ impl VulkanRenderHardwareInterface {
         // Pass the old swapchain to the new one so that its resources can be
         // reused, then drop it.
         self.swapchain = Swapchain::new(
-            &self.instance.instance,
-            &self.device,
-            &self.physical_device,
+            &self.core.instance.instance,
+            &self.core.device,
+            &self.core.physical_device,
             surface,
             window_size,
             self.swapchain.as_ref(),
@@ -248,9 +267,10 @@ impl VulkanRenderHardwareInterface {
     /// Returns an error if any Vulkan call fails, other than with
     /// `ERROR_OUT_OF_DATE_KHR`.
     fn draw_frame(&self, swapchain: &Swapchain) -> Result<bool> {
-        let device = self.device.handle();
+        let device = self.core.device.handle();
         let frame = self.frames.current();
         let present_queue = self
+            .core
             .device
             .present_queue()
             .context("a windowed Vulkan backend has no present queue")?;
@@ -330,7 +350,7 @@ impl VulkanRenderHardwareInterface {
         // fence is unsignalled, and the info structures outlive the call.
         unsafe {
             device.queue_submit2(
-                self.device.graphics_queue(),
+                self.core.device.graphics_queue(),
                 slice::from_ref(&submit_info),
                 frame.in_flight,
             )
@@ -588,13 +608,13 @@ impl Drop for VulkanInstance {
 impl fmt::Debug for VulkanRenderHardwareInterface {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("VulkanRenderHardwareInterface")
-            .field("instance", &self.instance.instance.handle())
-            .field("validation", &self.instance.debug_messenger.is_some())
+            .field("instance", &self.core.instance.instance.handle())
+            .field("validation", &self.core.instance.debug_messenger.is_some())
             .field("headless", &self.is_headless())
             .field("suspended", &self.is_suspended())
-            .field("physical_device", &self.physical_device.name())
-            .field("capabilities", &self.capabilities.summary())
-            .field("queue_families", &self.device.queue_families())
+            .field("physical_device", &self.core.physical_device.name())
+            .field("capabilities", &self.core.capabilities.summary())
+            .field("queue_families", &self.core.device.queue_families())
             .field(
                 "swapchain",
                 &self.swapchain.as_ref().map(|swapchain| {
@@ -611,14 +631,34 @@ impl fmt::Debug for VulkanRenderHardwareInterface {
     }
 }
 
+impl fmt::Debug for VulkanDevice {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("VulkanDevice")
+            .field("physical_device", &self.physical_device.name())
+            .field("capabilities", &self.capabilities.summary())
+            .field("queue_families", &self.device.queue_families())
+            .finish_non_exhaustive()
+    }
+}
+
+impl Device for VulkanDevice {
+    fn capabilities(&self) -> &Capabilities {
+        &self.capabilities
+    }
+}
+
 impl RenderHardwareInterface for VulkanRenderHardwareInterface {
     /// Always [`GraphicsApi::Vulkan`].
     fn api(&self) -> GraphicsApi {
         GraphicsApi::Vulkan
     }
 
+    fn device(&self) -> &Arc<dyn Device> {
+        &self.device
+    }
+
     fn is_headless(&self) -> bool {
-        !self.instance.supports_surfaces
+        !self.core.instance.supports_surfaces
     }
 
     fn is_suspended(&self) -> bool {
@@ -642,18 +682,23 @@ impl RenderHardwareInterface for VulkanRenderHardwareInterface {
         // (such as Android) allow only one surface per window at a time.
         self.suspend();
 
-        let surface = Surface::new(&self.instance.entry, &self.instance.instance, target.window)?;
+        let surface = Surface::new(
+            &self.core.instance.entry,
+            &self.core.instance.instance,
+            target.window,
+        )?;
         // The device was selected for the previous surface, so check that it
         // can still present to this one.
         let present_family = self
+            .core
             .device
             .queue_families()
             .present
             .context("a windowed Vulkan backend has no present queue family")?;
-        if !surface.can_present(self.physical_device.handle, present_family)? {
+        if !surface.can_present(self.core.physical_device.handle, present_family)? {
             bail!(
                 "{} cannot present to the resumed window",
-                self.physical_device.name(),
+                self.core.physical_device.name(),
             );
         }
         self.surface = Some(surface);
