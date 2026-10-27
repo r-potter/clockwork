@@ -34,6 +34,7 @@ mod capabilities;
 mod error;
 #[cfg(test)]
 mod gpu_tests;
+mod handle;
 #[cfg(test)]
 mod test_support;
 mod vulkan;
