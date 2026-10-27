@@ -38,6 +38,7 @@ mod gpu_tests;
 mod handle;
 #[cfg(test)]
 mod test_support;
+mod texture;
 mod vulkan;
 
 use std::fmt::{self, Debug};
@@ -51,6 +52,7 @@ use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
 pub use buffer::{Buffer, BufferDesc, BufferUsage, GpuAddress};
 pub use capabilities::{Capabilities, Limits, QueueKind, QueueKindSet};
 pub use error::{RhiError, RhiResult};
+pub use texture::{Extent3d, Format, Texture, TextureDesc, TextureDimension, TextureUsage};
 use vulkan::VulkanRenderHardwareInterface;
 
 /// A window a backend can render to.
