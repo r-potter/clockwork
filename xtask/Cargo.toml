@@ -12,4 +12,5 @@ anyhow.workspace = true
 # The same as the engine's, so the workspace has one `ash`.
 ash.workspace = true
 clap.workspace = true
+serde_json.workspace = true
 xshell.workspace = true

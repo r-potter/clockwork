@@ -2529,6 +2529,7 @@ dependencies = [
  "anyhow",
  "ash",
  "clap",
+ "serde_json",
  "xshell",
 ]
 
