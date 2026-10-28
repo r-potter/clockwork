@@ -15,6 +15,7 @@
 
 mod buffers;
 mod capabilities;
+mod descriptor_heaps;
 mod device;
 mod device_selection;
 mod error;
