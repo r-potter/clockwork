@@ -17,10 +17,7 @@
 //! rather than with `miri`.
 #![cfg_attr(
     not(test),
-    expect(
-        dead_code,
-        reason = "the Device trait's tables arrive in rhi-resources"
-    )
+    expect(dead_code, reason = "GpuResources' tables arrive in rhi-resources")
 )]
 
 use std::fmt;
