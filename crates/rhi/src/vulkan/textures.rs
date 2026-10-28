@@ -126,10 +126,10 @@ impl VulkanDevice {
     /// # Panics
     ///
     /// Panics if the description is invalid (see
-    /// [`TextureDesc::check`]), or the device doesn't support its format for
+    /// [`TextureDesc::validate`]), or the device doesn't support its format for
     /// its usage.
     pub(super) fn create_texture_entry(&self, desc: &TextureDesc<'_>) -> RhiResult<Texture> {
-        desc.check();
+        desc.validate();
         let format = vk_format(desc.format);
         let (usage, features) = usage_flags(desc.usage);
         // SAFETY: The physical device was enumerated from this instance.

@@ -37,6 +37,24 @@ pub struct BufferDesc<'a> {
     pub location: MemoryLocation,
 }
 
+impl BufferDesc<'_> {
+    /// Checks that the description is valid, as
+    /// [`GpuResources::create_buffer`] requires.
+    ///
+    /// [`GpuResources::create_buffer`]: crate::GpuResources::create_buffer
+    ///
+    /// # Panics
+    ///
+    /// Panics if the size is zero, naming the buffer.
+    pub(crate) fn validate(&self) {
+        assert!(
+            self.size > 0,
+            "buffer \"{}\" has a size of zero",
+            self.label
+        );
+    }
+}
+
 /// How a buffer is used, beyond copies and its device address, which every
 /// buffer allows. A set of the constants below, combined with
 /// [`union`](Self::union).
@@ -107,9 +125,20 @@ const _: () = {
 
 #[cfg(test)]
 mod tests {
-    //! T0 tests of buffer usage sets.
+    //! T0 tests of buffer usage sets and descriptions.
 
     use super::*;
+
+    /// The description tests start from, changing a field or two: a valid
+    /// 256-byte storage buffer in device memory.
+    fn test_desc() -> BufferDesc<'static> {
+        BufferDesc {
+            label: "storage",
+            size: 256,
+            usage: BufferUsage::STORAGE,
+            location: MemoryLocation::Device,
+        }
+    }
 
     /// A union contains each of its parts, and no other usage.
     #[test]
@@ -121,5 +150,28 @@ mod tests {
         assert!(usage.contains(BufferUsage::COPIES));
         assert!(!BufferUsage::COPIES.contains(BufferUsage::STORAGE));
         assert_eq!(BufferUsage::default(), BufferUsage::COPIES);
+    }
+
+    /// A buffer of one byte or more is valid.
+    #[test]
+    fn sized_buffers_are_valid() {
+        test_desc().validate();
+        BufferDesc {
+            size: 1,
+            ..test_desc()
+        }
+        .validate();
+    }
+
+    /// A buffer of zero bytes is rejected, naming the buffer.
+    #[test]
+    #[should_panic(expected = "buffer \"empty\" has a size of zero")]
+    fn empty_buffers_are_invalid() {
+        BufferDesc {
+            label: "empty",
+            size: 0,
+            ..test_desc()
+        }
+        .validate();
     }
 }

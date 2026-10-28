@@ -237,7 +237,7 @@ impl TextureDesc<'_> {
     /// # Panics
     ///
     /// Panics on the first problem, naming the texture.
-    pub(crate) fn check(&self) {
+    pub(crate) fn validate(&self) {
         let label = self.label;
         let Extent3d {
             width,
@@ -309,9 +309,9 @@ mod tests {
 
     use super::*;
 
-    /// A valid description of a 256×256 2D texture with a full mip chain,
-    /// for tests to change one field of.
-    fn valid() -> TextureDesc<'static> {
+    /// The description tests start from, changing a field or two: a valid
+    /// 256×256 2D texture with a full mip chain.
+    fn test_desc() -> TextureDesc<'static> {
         TextureDesc {
             label: "albedo",
             dimension: TextureDimension::D2,
@@ -372,19 +372,19 @@ mod tests {
     /// Valid descriptions of each dimension pass.
     #[test]
     fn valid_descriptions_pass() {
-        valid().check();
+        test_desc().validate();
         TextureDesc {
             array_layers: 4,
             mip_levels: 1,
-            ..valid()
+            ..test_desc()
         }
-        .check();
+        .validate();
         TextureDesc {
             dimension: TextureDimension::Cube,
             array_layers: 12,
-            ..valid()
+            ..test_desc()
         }
-        .check();
+        .validate();
         TextureDesc {
             dimension: TextureDimension::D3,
             extent: Extent3d {
@@ -393,22 +393,22 @@ mod tests {
                 depth: 32,
             },
             mip_levels: 6,
-            ..valid()
+            ..test_desc()
         }
-        .check();
+        .validate();
         TextureDesc {
             format: Format::Depth32Float,
             mip_levels: 1,
             usage: TextureUsage::DEPTH_ATTACHMENT.union(TextureUsage::SAMPLED),
-            ..valid()
+            ..test_desc()
         }
-        .check();
+        .validate();
     }
 
     /// Checks that `desc` panics with a message containing `expected`.
     fn assert_rejected(desc: TextureDesc<'_>, expected: &str) {
         let message =
-            std::panic::catch_unwind(|| desc.check()).expect_err("the description was accepted");
+            std::panic::catch_unwind(|| desc.validate()).expect_err("the description was accepted");
         let message = message
             .downcast_ref::<String>()
             .map(String::as_str)
@@ -426,14 +426,14 @@ mod tests {
         assert_rejected(
             TextureDesc {
                 extent: Extent3d::new_2d(0, 4),
-                ..valid()
+                ..test_desc()
             },
             "texture \"albedo\" has an empty extent, 0x4x1",
         );
         assert_rejected(
             TextureDesc {
                 extent: Extent3d::new_2d(4, 0),
-                ..valid()
+                ..test_desc()
             },
             "texture \"albedo\" has an empty extent, 4x0x1",
         );
@@ -446,28 +446,28 @@ mod tests {
                     depth: 0,
                 },
                 mip_levels: 1,
-                ..valid()
+                ..test_desc()
             },
             "texture \"albedo\" has an empty extent, 4x4x0",
         );
         assert_rejected(
             TextureDesc {
                 array_layers: 0,
-                ..valid()
+                ..test_desc()
             },
             "texture \"albedo\" has no layers",
         );
         assert_rejected(
             TextureDesc {
                 mip_levels: 10,
-                ..valid()
+                ..test_desc()
             },
             "has 10 mips, but a 256x256x1 texture has 1 to 9",
         );
         assert_rejected(
             TextureDesc {
                 mip_levels: 0,
-                ..valid()
+                ..test_desc()
             },
             "has 0 mips",
         );
@@ -479,7 +479,7 @@ mod tests {
                     depth: 2,
                 },
                 mip_levels: 1,
-                ..valid()
+                ..test_desc()
             },
             "2D texture \"albedo\" has a depth of 2, not 1",
         );
@@ -487,7 +487,7 @@ mod tests {
             TextureDesc {
                 dimension: TextureDimension::D3,
                 array_layers: 2,
-                ..valid()
+                ..test_desc()
             },
             "3D texture \"albedo\" has 2 layers, not 1",
         );
@@ -496,7 +496,7 @@ mod tests {
                 dimension: TextureDimension::Cube,
                 extent: Extent3d::new_2d(256, 128),
                 array_layers: 6,
-                ..valid()
+                ..test_desc()
             },
             "is 256x128x1, not square",
         );
@@ -504,14 +504,14 @@ mod tests {
             TextureDesc {
                 dimension: TextureDimension::Cube,
                 array_layers: 4,
-                ..valid()
+                ..test_desc()
             },
             "has 4 layers, not a multiple of 6",
         );
         assert_rejected(
             TextureDesc {
                 usage: TextureUsage::NONE,
-                ..valid()
+                ..test_desc()
             },
             "texture \"albedo\" has no usage",
         );
@@ -519,14 +519,14 @@ mod tests {
             TextureDesc {
                 usage: TextureUsage::COLOUR_ATTACHMENT,
                 format: Format::Depth32Float,
-                ..valid()
+                ..test_desc()
             },
             "is a colour attachment with the depth format Depth32Float",
         );
         assert_rejected(
             TextureDesc {
                 usage: TextureUsage::DEPTH_ATTACHMENT,
-                ..valid()
+                ..test_desc()
             },
             "is a depth attachment with the colour format Rgba8Srgb",
         );

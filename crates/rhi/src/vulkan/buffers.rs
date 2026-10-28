@@ -79,13 +79,9 @@ impl VulkanDevice {
     ///
     /// # Panics
     ///
-    /// Panics if `desc.size` is zero.
+    /// Panics if the description is invalid (see [`BufferDesc::validate`]).
     pub(super) fn create_buffer_entry(&self, desc: &BufferDesc<'_>) -> RhiResult<Buffer> {
-        assert!(
-            desc.size > 0,
-            "buffer \"{}\" has a size of zero",
-            desc.label
-        );
+        desc.validate();
         let device = self.device.handle();
         let buffer_create_info = vk::BufferCreateInfo::default()
             .size(desc.size)
