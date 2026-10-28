@@ -6,6 +6,8 @@
 //! types the resource can use, and what the memory is for, so every kind of
 //! device is tested with fake properties.
 
+use std::fmt;
+
 use ash::vk;
 
 use crate::MemoryLocation;
@@ -31,11 +33,17 @@ pub(in crate::vulkan) enum MemoryUse {
     Location(MemoryLocation),
     /// A descriptor heap, which the CPU writes descriptors into and the GPU
     /// reads on every texture and sampler access.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "the heaps are created on the core in the next PR")
-    )]
     DescriptorHeap,
+}
+
+impl fmt::Display for MemoryUse {
+    /// The location, as in `Upload`, or `descriptor heap`, for messages.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Location(location) => write!(f, "{location:?}"),
+            Self::DescriptorHeap => f.write_str("descriptor heap"),
+        }
+    }
 }
 
 impl From<MemoryLocation> for MemoryUse {

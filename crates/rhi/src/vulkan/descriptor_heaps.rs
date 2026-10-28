@@ -1,11 +1,23 @@
-//! The layout of the descriptor heaps, and how their slots are allocated
-//! (design 0002, "Binding model").
+//! The descriptor heaps: their buffers, their layout, and how their slots
+//! are allocated (design 0002, "Binding model").
 //!
-//! Both are pure, so they're tested without a device: [`HeapLayout`] places
-//! each slot's descriptor and the driver's reserved range in a heap's
-//! buffer, and [`SlotAllocator`] hands out slots from a free list.
+//! [`DescriptorHeaps`] holds the core's two heaps, each a buffer in
+//! device-local memory the CPU can write where the device has it, mapped
+//! for as long as the heap lives. The rest is pure, so it's tested without
+//! a device: [`HeapLayout`] places each slot's descriptor and the driver's
+//! reserved range in a heap's buffer, and [`SlotAllocator`] hands out slots
+//! from a free list.
 
+#[cfg(test)]
+mod gpu_tests;
+
+use anyhow::{Context, Result};
 use ash::vk;
+
+use super::memory::{
+    DedicatedAllocationProperties, MemoryAllocation, MemoryAllocator, MemoryRequest, MemoryUse,
+    Resource, buffer_memory_requirements,
+};
 
 /// The descriptors the resource heap holds: one per texture view a shader
 /// can use.
@@ -13,6 +25,214 @@ pub(super) const RESOURCE_HEAP_CAPACITY: u32 = 65_536;
 
 /// The descriptors the sampler heap holds.
 pub(super) const SAMPLER_HEAP_CAPACITY: u32 = 2_048;
+
+/// The core's two descriptor heaps.
+#[derive(Debug)]
+pub(super) struct DescriptorHeaps {
+    /// Texture views, for shaders to sample and write.
+    pub resource: DescriptorHeap,
+    /// Samplers.
+    pub sampler: DescriptorHeap,
+}
+
+impl DescriptorHeaps {
+    /// Creates both heaps on `device`, laid out for its descriptor heap
+    /// `properties`, with memory from `allocator`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if either heap's buffer can't be created, or its
+    /// memory allocated or bound.
+    pub(super) fn new(
+        device: &ash::Device,
+        allocator: &MemoryAllocator,
+        properties: &vk::PhysicalDeviceDescriptorHeapPropertiesEXT<'_>,
+    ) -> Result<Self> {
+        let mut resource = DescriptorHeap::new(
+            device,
+            allocator,
+            "resource heap",
+            HeapLayout::resource(properties),
+        )?;
+        let sampler = DescriptorHeap::new(
+            device,
+            allocator,
+            "sampler heap",
+            HeapLayout::sampler(properties),
+        )
+        .inspect_err(|_| {
+            // SAFETY: The heap was just created on `device`, with memory from
+            // `allocator`, and nothing has used it.
+            unsafe { resource.destroy(device, allocator) };
+        })?;
+        Ok(Self { resource, sampler })
+    }
+
+    /// Destroys both heaps, and frees their memory.
+    ///
+    /// # Safety
+    ///
+    /// The heaps must have been created on `device`, with memory from
+    /// `allocator`, and no submitted work may still use them.
+    pub(super) unsafe fn destroy(&mut self, device: &ash::Device, allocator: &MemoryAllocator) {
+        // SAFETY: The caller's guarantees are the heaps' own.
+        unsafe {
+            self.resource.destroy(device, allocator);
+            self.sampler.destroy(device, allocator);
+        }
+    }
+}
+
+/// A descriptor heap: a buffer that the CPU writes descriptors into, at the
+/// offsets its [`HeapLayout`] gives, and that shaders read through its
+/// device address.
+#[derive(Debug)]
+pub(super) struct DescriptorHeap {
+    /// The heap's name, in messages and debug tools.
+    label: &'static str,
+    /// Where each slot's descriptor is in `buffer`.
+    layout: HeapLayout,
+    /// The buffer that holds the descriptors.
+    buffer: vk::Buffer,
+    /// The buffer's memory: a dedicated allocation, mapped for as long as
+    /// the heap lives. `None` once the heap is destroyed.
+    allocation: Option<MemoryAllocation>,
+    /// The buffer's device address, which command buffers bind the heap at.
+    address: vk::DeviceAddress,
+}
+
+impl DescriptorHeap {
+    /// Creates a heap laid out as `layout` on `device`, and binds it to a
+    /// dedicated allocation from `allocator`, of memory chosen for a
+    /// descriptor heap.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the buffer can't be created, or its memory
+    /// allocated, mapped or bound.
+    fn new(
+        device: &ash::Device,
+        allocator: &MemoryAllocator,
+        label: &'static str,
+        layout: HeapLayout,
+    ) -> Result<Self> {
+        let buffer_create_info = vk::BufferCreateInfo::default()
+            .size(layout.size())
+            .usage(
+                vk::BufferUsageFlags::DESCRIPTOR_HEAP_EXT
+                    | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS,
+            )
+            .sharing_mode(vk::SharingMode::EXCLUSIVE);
+        // SAFETY: `buffer_create_info` is valid for the call, its size is
+        // non-zero, and `descriptorHeap` and `bufferDeviceAddress` are
+        // enabled (device selection requires them).
+        let buffer = unsafe { device.create_buffer(&buffer_create_info, None) }
+            .with_context(|| format!("failed to create the {label}"))?;
+
+        // SAFETY: `buffer` was just created on `device`.
+        let (requirements, dedication) = unsafe { buffer_memory_requirements(device, buffer) };
+        let allocation = allocator
+            .allocate(&MemoryRequest {
+                label,
+                resource: Resource::Buffer(buffer),
+                requirements,
+                // Each heap has memory of its own, whatever the driver
+                // prefers, so that it takes no more of a small BAR window
+                // than its size (design 0002, "Binding model").
+                dedication: DedicatedAllocationProperties {
+                    required: true,
+                    ..dedication
+                },
+                usage: MemoryUse::DescriptorHeap,
+            })
+            .inspect_err(|_| {
+                // SAFETY: The buffer was just created, and nothing uses it.
+                unsafe { device.destroy_buffer(buffer, None) };
+            })?;
+        // SAFETY: The buffer isn't bound yet, and the allocation was made for
+        // its requirements, from memory of a type it allows. A dedicated
+        // allocation starts at offset 0.
+        let bound =
+            unsafe { device.bind_buffer_memory(buffer, allocation.memory(), allocation.offset()) };
+        if let Err(result) = bound {
+            // SAFETY: The buffer was just created, and nothing uses it or its
+            // memory.
+            unsafe { device.destroy_buffer(buffer, None) };
+            allocator.free(allocation);
+            return Err(result).with_context(|| format!("failed to bind memory for the {label}"));
+        }
+        let address_info = vk::BufferDeviceAddressInfo::default().buffer(buffer);
+        // SAFETY: The buffer was created with `SHADER_DEVICE_ADDRESS` usage,
+        // and is bound to memory allocated with `DEVICE_ADDRESS`.
+        let address = unsafe { device.get_buffer_device_address(&address_info) };
+        Ok(Self {
+            label,
+            layout,
+            buffer,
+            allocation: Some(allocation),
+            address,
+        })
+    }
+
+    /// The heap's name, in messages and debug tools.
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "samplers are written to the heap in a later PR")
+    )]
+    pub(super) fn label(&self) -> &'static str {
+        self.label
+    }
+
+    /// Where each slot's descriptor is in the heap.
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "samplers are written to the heap in a later PR")
+    )]
+    pub(super) fn layout(&self) -> HeapLayout {
+        self.layout
+    }
+
+    /// The heap's device address, which command buffers bind it at.
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "command buffers bind the heaps in `rhi-commands`")
+    )]
+    pub(super) fn address(&self) -> vk::DeviceAddress {
+        self.address
+    }
+
+    /// The heap's memory.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the heap has been destroyed.
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "samplers are written to the heap in a later PR")
+    )]
+    pub(super) fn allocation(&self) -> &MemoryAllocation {
+        self.allocation
+            .as_ref()
+            .unwrap_or_else(|| panic!("the {} is destroyed", self.label))
+    }
+
+    /// Destroys the heap's buffer, and frees its memory. Does nothing if
+    /// the heap is already destroyed.
+    ///
+    /// # Safety
+    ///
+    /// The heap must have been created on `device`, with memory from
+    /// `allocator`, and no submitted work may still use it.
+    unsafe fn destroy(&mut self, device: &ash::Device, allocator: &MemoryAllocator) {
+        let Some(allocation) = self.allocation.take() else {
+            return;
+        };
+        // SAFETY: The caller guarantees that the buffer was created on
+        // `device`, and that no submitted work uses it.
+        unsafe { device.destroy_buffer(self.buffer, None) };
+        allocator.free(allocation);
+    }
+}
 
 /// Where a heap's descriptors and reserved range are in its buffer: slot `i`
 /// at `i` strides, then the range the driver reserves after the last slot.

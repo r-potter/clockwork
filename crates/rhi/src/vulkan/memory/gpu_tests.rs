@@ -45,7 +45,7 @@ fn allocate_and_bind(
             resource: Resource::Buffer(buffer),
             requirements,
             dedication,
-            location,
+            usage: location.into(),
         })
         .unwrap();
     // SAFETY: The buffer isn't bound yet, and the allocation was made for
