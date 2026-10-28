@@ -143,9 +143,10 @@ pub(super) struct SlotAllocator {
     next_unused: u32,
     /// Freed slots below `next_unused`, the most recently freed last.
     free: Vec<u32>,
-    /// Whether each slot below `next_unused` is handed out, so that freeing
-    /// a slot twice panics rather than handing it to two objects.
-    in_use: Vec<bool>,
+    /// Whether each slot below `next_unused` is handed out, one bit per
+    /// slot, so that freeing a slot twice panics rather than handing it to
+    /// two objects. Slot `i` is bit `i % 64` of word `i / 64`.
+    in_use: Vec<u64>,
 }
 
 #[cfg_attr(
@@ -168,13 +169,17 @@ impl SlotAllocator {
         let slot = match self.free.pop() {
             Some(slot) => slot,
             None if self.next_unused < self.capacity => {
+                let slot = self.next_unused;
                 self.next_unused += 1;
-                self.in_use.push(false);
-                self.next_unused - 1
+                if slot.is_multiple_of(u64::BITS) {
+                    self.in_use.push(0);
+                }
+                slot
             }
             None => return None,
         };
-        self.in_use[slot as usize] = true;
+        let (word, bit) = Self::bit(slot);
+        self.in_use[word] |= bit;
         Some(slot)
     }
 
@@ -184,11 +189,22 @@ impl SlotAllocator {
     ///
     /// Panics if `slot` isn't in use.
     pub(super) fn free(&mut self, slot: u32) {
-        let Some(in_use) = self.in_use.get_mut(slot as usize).filter(|in_use| **in_use) else {
+        let (word, bit) = Self::bit(slot);
+        let Some(in_use) = self
+            .in_use
+            .get_mut(word)
+            .filter(|in_use| **in_use & bit != 0)
+        else {
             panic!("descriptor heap slot {slot} is freed but isn't in use");
         };
-        *in_use = false;
+        *in_use &= !bit;
         self.free.push(slot);
+    }
+
+    /// Where `slot`'s bit is in `in_use`: the word's index, and the bit as
+    /// a mask.
+    fn bit(slot: u32) -> (usize, u64) {
+        ((slot / u64::BITS) as usize, 1 << (slot % u64::BITS))
     }
 
     /// The number of slots in use.
@@ -276,6 +292,38 @@ mod tests {
         slots.free(0);
         assert_eq!(slots.allocate(), Some(0));
         assert_eq!(slots.allocate(), None);
+    }
+
+    /// Slots in every word of the in-use bits are tracked apart, including
+    /// the first and last bits of a word, and the last slot of a heap whose
+    /// capacity isn't a multiple of 64.
+    #[test]
+    fn slots_are_tracked_across_words() {
+        let mut slots = SlotAllocator::new(130);
+        for slot in 0..130 {
+            assert_eq!(slots.allocate(), Some(slot));
+        }
+        assert_eq!(slots.allocate(), None);
+        for slot in [63, 64, 127, 128, 129] {
+            slots.free(slot);
+        }
+        assert_eq!(slots.in_use(), 125);
+        for slot in [129, 128, 127, 64, 63] {
+            assert_eq!(slots.allocate(), Some(slot));
+        }
+        assert_eq!(slots.allocate(), None);
+    }
+
+    /// A slot past the last one handed out isn't in use, even when its bit
+    /// shares a word with slots that are.
+    #[test]
+    #[should_panic(expected = "descriptor heap slot 70 is freed but isn't in use")]
+    fn freeing_slots_past_the_last_handed_out_panics() {
+        let mut slots = SlotAllocator::new(130);
+        for _ in 0..65 {
+            slots.allocate();
+        }
+        slots.free(70);
     }
 
     /// Freeing a slot twice panics, rather than handing it to two objects.
