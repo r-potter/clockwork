@@ -264,7 +264,7 @@ mod tests {
     #[test]
     fn usages_add_their_flags_and_features() {
         assert_eq!(
-            usage_flags(TextureUsage::SAMPLED.union(TextureUsage::COPY_DESTINATION)),
+            usage_flags(TextureUsage::SAMPLED | TextureUsage::COPY_DESTINATION),
             (
                 vk::ImageUsageFlags::SAMPLED | vk::ImageUsageFlags::TRANSFER_DST,
                 vk::FormatFeatureFlags::SAMPLED_IMAGE | vk::FormatFeatureFlags::TRANSFER_DST,
@@ -272,7 +272,7 @@ mod tests {
         );
         let every_usage = USAGES
             .iter()
-            .fold(TextureUsage::NONE, |all, &(usage, ..)| all.union(usage));
+            .fold(TextureUsage::NONE, |all, &(usage, ..)| all | usage);
         let (usage, features) = usage_flags(every_usage);
         assert_eq!(usage.as_raw().count_ones(), 6);
         assert_eq!(features.as_raw().count_ones(), 6);

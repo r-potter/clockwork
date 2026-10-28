@@ -5,6 +5,8 @@
 //! from upload buffers, and shaders reach them through views in the
 //! descriptor heaps.
 
+use std::ops::{BitOr, BitOrAssign};
+
 use crate::handle::Handle;
 
 /// A texture. Refers to an entry in the backend's texture table, and is
@@ -126,8 +128,9 @@ impl Format {
     }
 }
 
-/// How a texture is used. A set of the constants below, combined with
-/// [`union`](Self::union). A texture must have at least one.
+/// How a texture is used. A set of the constants below, combined with `|`,
+/// or with [`union`](Self::union) in a `const`. A texture must have at least
+/// one.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
 pub struct TextureUsage {
     /// Sampled by shaders.
@@ -205,6 +208,22 @@ impl TextureUsage {
             && (self.depth_attachment || !other.depth_attachment)
             && (self.copy_source || !other.copy_source)
             && (self.copy_destination || !other.copy_destination)
+    }
+}
+
+impl BitOr for TextureUsage {
+    type Output = Self;
+
+    /// The usages in either set, as [`union`](Self::union).
+    fn bitor(self, other: Self) -> Self {
+        self.union(other)
+    }
+}
+
+impl BitOrAssign for TextureUsage {
+    /// Adds the usages in `other`.
+    fn bitor_assign(&mut self, other: Self) {
+        *self = self.union(other);
     }
 }
 
@@ -319,7 +338,7 @@ mod tests {
             extent: Extent3d::new_2d(256, 256),
             mip_levels: 9,
             array_layers: 1,
-            usage: TextureUsage::SAMPLED.union(TextureUsage::COPY_DESTINATION),
+            usage: TextureUsage::SAMPLED | TextureUsage::COPY_DESTINATION,
         }
     }
 
@@ -347,14 +366,19 @@ mod tests {
         assert!(!volume.is_empty());
     }
 
-    /// A union contains each of its parts, and no other usage.
+    /// A union contains each of its parts, and no other usage, whether made
+    /// with `|`, `|=` or `union`.
     #[test]
     fn usage_unions_contain_exactly_their_parts() {
-        let usage = TextureUsage::SAMPLED.union(TextureUsage::STORAGE);
+        let usage = TextureUsage::SAMPLED | TextureUsage::STORAGE;
         assert!(usage.contains(TextureUsage::SAMPLED));
         assert!(usage.contains(TextureUsage::STORAGE));
         assert!(!usage.contains(TextureUsage::COPY_SOURCE));
         assert_eq!(TextureUsage::default(), TextureUsage::NONE);
+        assert_eq!(usage, TextureUsage::SAMPLED.union(TextureUsage::STORAGE));
+        let mut added = TextureUsage::SAMPLED;
+        added |= TextureUsage::STORAGE;
+        assert_eq!(added, usage);
     }
 
     /// Only depth formats are depth formats.
@@ -399,7 +423,7 @@ mod tests {
         TextureDesc {
             format: Format::Depth32Float,
             mip_levels: 1,
-            usage: TextureUsage::DEPTH_ATTACHMENT.union(TextureUsage::SAMPLED),
+            usage: TextureUsage::DEPTH_ATTACHMENT | TextureUsage::SAMPLED,
             ..test_desc()
         }
         .validate();

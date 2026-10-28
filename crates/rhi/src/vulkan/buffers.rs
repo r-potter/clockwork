@@ -341,7 +341,7 @@ mod tests {
             | vk::BufferUsageFlags::TRANSFER_DST;
         assert_eq!(usage_flags(BufferUsage::COPIES), base);
         assert_eq!(
-            usage_flags(BufferUsage::STORAGE.union(BufferUsage::INDEX)),
+            usage_flags(BufferUsage::STORAGE | BufferUsage::INDEX),
             base | vk::BufferUsageFlags::STORAGE_BUFFER | vk::BufferUsageFlags::INDEX_BUFFER,
         );
         assert_eq!(
