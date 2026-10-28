@@ -15,10 +15,6 @@
 //!
 //! This is safe code, so it's checked with property tests against a model
 //! rather than with `miri`.
-#![cfg_attr(
-    not(test),
-    expect(dead_code, reason = "GpuResources' tables arrive in rhi-resources")
-)]
 
 use std::fmt;
 
@@ -138,6 +134,13 @@ impl<T> HandleTable<T> {
     }
 
     /// The number of objects in the table.
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "leak reporting counts objects, later in rhi-resources"
+        )
+    )]
     pub(crate) fn len(&self) -> usize {
         self.len
     }
@@ -187,6 +190,13 @@ impl<T> HandleTable<T> {
     /// # Panics
     ///
     /// Panics if the handle is stale or invalid, naming its object.
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "write_buffer and read_buffer name buffers in panics"
+        )
+    )]
     pub(crate) fn label(&self, handle: Handle) -> &str {
         match self.lookup(handle) {
             Ok((label, _)) => label,
@@ -220,6 +230,25 @@ impl<T> HandleTable<T> {
         }
         self.len -= 1;
         (label, value)
+    }
+
+    /// Removes every object, returning their labels and the objects. Every
+    /// handle the table issued is stale from then on.
+    pub(crate) fn drain(&mut self) -> Vec<(Box<str>, T)> {
+        let handles: Vec<_> = self
+            .slots
+            .iter()
+            .enumerate()
+            .filter(|(_, slot)| matches!(slot.state, SlotState::Occupied { .. }))
+            .map(|(index, slot)| Handle {
+                index: u32::try_from(index).expect("a table has fewer than 2^32 slots"),
+                generation: slot.generation,
+            })
+            .collect();
+        handles
+            .into_iter()
+            .map(|handle| self.remove(handle))
+            .collect()
     }
 
     /// The label and object `handle` refers to, or why it doesn't refer to
@@ -322,6 +351,22 @@ mod tests {
             table.lookup(second).unwrap_err().to_string(),
             "stale texture handle: \"second\" was destroyed",
         );
+    }
+
+    /// Draining returns every object, in slot order, and leaves every
+    /// handle stale and the table empty.
+    #[test]
+    fn draining_removes_everything() {
+        let mut table = HandleTable::new("buffer");
+        let first = table.insert("first", 1);
+        let second = table.insert("second", 2);
+        let third = table.insert("third", 3);
+        table.remove(second);
+        assert_eq!(table.drain(), [("first".into(), 1), ("third".into(), 3)],);
+        assert_eq!(table.len(), 0);
+        for handle in [first, second, third] {
+            assert!(table.lookup(handle).is_err());
+        }
     }
 
     /// Removing an object twice panics, rather than freeing its slot twice.

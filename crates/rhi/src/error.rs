@@ -15,6 +15,12 @@ use std::fmt;
 /// implements [`Error`] and is `Send + Sync + 'static`.
 #[derive(Debug)]
 pub enum RhiError {
+    /// Device memory ran out while creating the named object. Streaming can
+    /// evict resources and try again, or load a lower mip level.
+    OutOfDeviceMemory {
+        /// The label of the object being created.
+        label: String,
+    },
     /// Anything with no specific recovery, with its context.
     Other(anyhow::Error),
 }
@@ -23,11 +29,15 @@ pub enum RhiError {
 pub type RhiResult<T> = Result<T, RhiError>;
 
 impl fmt::Display for RhiError {
-    /// Formats the error. For [`Other`](Self::Other), this is the outermost
-    /// context only, as for an [`anyhow::Error`], and the rest of the chain
-    /// is its [`source`](Error::source).
+    /// Formats the error, naming the label involved. For
+    /// [`Other`](Self::Other), this is the outermost context only, as for an
+    /// [`anyhow::Error`], and the rest of the chain is its
+    /// [`source`](Error::source).
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::OutOfDeviceMemory { label } => {
+                write!(f, "failed to create \"{label}\": out of device memory")
+            }
             Self::Other(err) => fmt::Display::fmt(err, f),
         }
     }
@@ -35,9 +45,11 @@ impl fmt::Display for RhiError {
 
 impl Error for RhiError {
     /// The cause of an [`Other`](Self::Other) error, from its context chain.
+    /// The other variants have none.
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
             Self::Other(err) => err.source(),
+            Self::OutOfDeviceMemory { .. } => None,
         }
     }
 }
@@ -65,6 +77,19 @@ mod tests {
     use anyhow::{Context, anyhow};
 
     use super::*;
+
+    /// Running out of device memory names the object being created.
+    #[test]
+    fn out_of_device_memory_names_the_object() {
+        let err = RhiError::OutOfDeviceMemory {
+            label: "triangle vertices".into(),
+        };
+        assert_eq!(
+            err.to_string(),
+            "failed to create \"triangle vertices\": out of device memory",
+        );
+        assert!(err.source().is_none());
+    }
 
     /// `Other` keeps its `anyhow` context chain, through `?` into an
     /// `anyhow::Error` and back out again.
