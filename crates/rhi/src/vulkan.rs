@@ -13,6 +13,7 @@
 //! on [`VALIDATION_TARGET`](clockwork_diagnostics::VALIDATION_TARGET), attributed
 //! to [`BackendOptions::session`]. See the [`validation`] module.
 
+mod buffers;
 mod capabilities;
 mod device;
 mod device_selection;
@@ -30,7 +31,7 @@ pub(crate) mod test_support;
 mod validation;
 
 use std::ffi::CStr;
-use std::sync::Arc;
+use std::sync::{Arc, PoisonError, RwLock};
 use std::{fmt, slice};
 
 use anyhow::{Context, Result, bail};
@@ -40,12 +41,15 @@ use raw_window_handle::RawDisplayHandle;
 use tracing::{info, warn};
 
 use super::{
-    BackendOptions, Capabilities, GpuResources, GraphicsApi, PresentCapabilities,
-    RenderHardwareInterface, WindowSize, WindowTarget,
+    BackendOptions, Buffer, BufferDesc, Capabilities, GpuAddress, GpuResources, GraphicsApi,
+    PresentCapabilities, RenderHardwareInterface, RhiResult, WindowSize, WindowTarget,
 };
+use crate::handle::HandleTable;
+use buffers::BufferEntry;
 use device::LogicalDevice;
 use device_selection::{Candidate, Selection};
 use frames::Frames;
+use memory::MemoryAllocator;
 use physical_device::PhysicalDevice;
 use shaders::TriangleShaders;
 use surface::Surface;
@@ -104,18 +108,24 @@ pub(crate) struct VulkanRenderHardwareInterface {
 }
 
 /// The Vulkan backend's shared core (design 0002, "Ownership and
-/// lifetimes"): the instance, the selected device and the logical device.
-/// The [`VulkanRenderHardwareInterface`] and every holder of its
+/// lifetimes"): the instance, the selected device and the logical device,
+/// the memory allocator, and the resource tables. The
+/// [`VulkanRenderHardwareInterface`] and every holder of its
 /// [`GpuResources`] share it.
 ///
-/// It's destroyed with its last `Arc`, on whichever thread drops it. Fields
-/// are dropped in declaration order, so each is declared before the objects
-/// it was created from.
+/// It's destroyed with its last `Arc`, on whichever thread drops it: it
+/// waits for the device to be idle, destroys every resource left in its
+/// tables, then drops its fields in declaration order, so each is declared
+/// before the objects it was created from.
 ///
 /// Its queues aren't locked yet, so only the owner thread submits to them,
 /// through the [`VulkanRenderHardwareInterface`]. Submitting through a
 /// `Queue` comes with the locks it needs, in `rhi-commands`.
 pub(crate) struct VulkanDevice {
+    /// Every live buffer.
+    buffers: RwLock<HandleTable<BufferEntry>>,
+    /// Allocates memory for resources on `device`.
+    allocator: MemoryAllocator,
     /// The logical device, and its queues, created on `physical_device`.
     device: LogicalDevice,
     /// The physical device chosen by [`device_selection::select`].
@@ -211,7 +221,10 @@ impl VulkanRenderHardwareInterface {
         let frames = Frames::new(&device)?;
         let triangle_shaders = TriangleShaders::new(&device)?;
 
+        let allocator = MemoryAllocator::new(device.handle(), physical_device.memory_properties);
         let core = Arc::new(VulkanDevice {
+            buffers: RwLock::new(HandleTable::new("buffer")),
+            allocator,
             device,
             physical_device,
             capabilities,
@@ -648,9 +661,40 @@ impl fmt::Debug for VulkanDevice {
     }
 }
 
+impl Drop for VulkanDevice {
+    fn drop(&mut self) {
+        // Nothing useful can be done if this fails while dropping.
+        // SAFETY: The device was created on this core's instance, and is
+        // still alive.
+        let _ = unsafe { self.device.handle().device_wait_idle() };
+        let buffers = self
+            .buffers
+            .get_mut()
+            .unwrap_or_else(PoisonError::into_inner)
+            .drain();
+        for (_, entry) in buffers {
+            // SAFETY: The device is idle, so no submitted work uses the
+            // buffer.
+            unsafe { self.free_buffer(entry) };
+        }
+    }
+}
+
 impl GpuResources for VulkanDevice {
     fn capabilities(&self) -> &Capabilities {
         &self.capabilities
+    }
+
+    fn create_buffer(&self, desc: &BufferDesc<'_>) -> RhiResult<Buffer> {
+        self.create_buffer_entry(desc)
+    }
+
+    fn destroy_buffer(&self, buffer: Buffer) {
+        self.destroy_buffer_entry(buffer);
+    }
+
+    fn buffer_address(&self, buffer: Buffer) -> GpuAddress {
+        self.buffer_entry_address(buffer)
     }
 }
 

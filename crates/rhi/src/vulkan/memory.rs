@@ -13,7 +13,10 @@
 //! resources that need or suit them.
 #![cfg_attr(
     not(test),
-    expect(dead_code, reason = "resources are allocated from rhi-resources")
+    expect(
+        dead_code,
+        reason = "mappings and images are used later in rhi-resources, and statistics by tests"
+    )
 )]
 
 #[cfg(test)]
