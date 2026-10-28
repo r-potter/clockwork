@@ -20,6 +20,7 @@ use tracing::info;
 
 use super::API_VERSION;
 use super::capabilities;
+use super::descriptor_heaps::HeapLayout;
 use super::physical_device::PhysicalDevice;
 use super::surface::SurfaceSupport;
 use crate::{Capabilities, MAX_PUSH_DATA_SIZE, PresentCapabilities};
@@ -56,13 +57,6 @@ pub(super) struct QueueFamilies {
     /// same family as `graphics`.
     pub present: Option<u32>,
 }
-
-/// The descriptors the resource heap holds: one per texture view a shader
-/// can use (design 0002, "Binding model").
-pub(super) const RESOURCE_HEAP_CAPACITY: u64 = 65_536;
-
-/// The descriptors the sampler heap holds (design 0002, "Binding model").
-pub(super) const SAMPLER_HEAP_CAPACITY: u64 = 2_048;
 
 /// The push data, in bytes, that each draw or dispatch can carry (design
 /// 0002, "Binding model"): [`MAX_PUSH_DATA_SIZE`], which recording checks
@@ -149,20 +143,8 @@ const REQUIREMENTS: &[Requirement] = &[
         description: "supports large enough descriptor heaps",
         is_met: |candidate| {
             let properties = &candidate.device.properties.descriptor_heap;
-            let resource_heap = heap_size(
-                RESOURCE_HEAP_CAPACITY,
-                properties.image_descriptor_size,
-                properties.image_descriptor_alignment,
-                properties.min_resource_heap_reserved_range,
-            );
-            let sampler_heap = heap_size(
-                SAMPLER_HEAP_CAPACITY,
-                properties.sampler_descriptor_size,
-                properties.sampler_descriptor_alignment,
-                properties.min_sampler_heap_reserved_range,
-            );
-            resource_heap <= properties.max_resource_heap_size
-                && sampler_heap <= properties.max_sampler_heap_size
+            HeapLayout::resource(properties).size() <= properties.max_resource_heap_size
+                && HeapLayout::sampler(properties).size() <= properties.max_sampler_heap_size
         },
     },
     Requirement {
@@ -196,24 +178,6 @@ const REQUIREMENTS: &[Requirement] = &[
         },
     },
 ];
-
-/// The size, in bytes, of a descriptor heap holding `capacity` descriptors
-/// of `descriptor_size` bytes, each at a multiple of `alignment`, after the
-/// `reserved` bytes the driver needs for itself.
-///
-/// Saturates rather than overflowing, so that a driver reporting absurd
-/// sizes fails the requirement instead of wrapping around to pass it.
-fn heap_size(
-    capacity: u64,
-    descriptor_size: vk::DeviceSize,
-    alignment: vk::DeviceSize,
-    reserved: vk::DeviceSize,
-) -> vk::DeviceSize {
-    let stride = descriptor_size
-        .checked_next_multiple_of(alignment.max(1))
-        .unwrap_or(vk::DeviceSize::MAX);
-    capacity.saturating_mul(stride).saturating_add(reserved)
-}
 
 /// Chooses the best of `candidates` that matches `device_filter` (if any)
 /// and meets every requirement, and the queue families to use on it.
@@ -425,6 +389,7 @@ mod tests {
 
     use super::*;
 
+    use crate::vulkan::descriptor_heaps::{RESOURCE_HEAP_CAPACITY, SAMPLER_HEAP_CAPACITY};
     use crate::vulkan::physical_device::{Features, Properties};
 
     /// One gibibyte.
@@ -752,31 +717,16 @@ mod tests {
     fn requires_large_enough_descriptor_heaps() {
         assert_rejected(|device| {
             let heap = &mut device.properties.descriptor_heap;
-            heap.max_resource_heap_size = RESOURCE_HEAP_CAPACITY * heap.image_descriptor_size - 1;
+            heap.max_resource_heap_size =
+                u64::from(RESOURCE_HEAP_CAPACITY) * heap.image_descriptor_size - 1;
             heap.min_resource_heap_reserved_range = 0;
         });
         assert_rejected(|device| {
             let heap = &mut device.properties.descriptor_heap;
-            heap.max_sampler_heap_size = SAMPLER_HEAP_CAPACITY * heap.sampler_descriptor_size;
+            heap.max_sampler_heap_size =
+                u64::from(SAMPLER_HEAP_CAPACITY) * heap.sampler_descriptor_size;
             heap.min_sampler_heap_reserved_range = 1;
         });
-    }
-
-    /// A heap's size counts each descriptor at its aligned stride, plus the
-    /// reserved range.
-    #[test]
-    fn heap_size_aligns_each_descriptor() {
-        assert_eq!(heap_size(4, 32, 32, 0), 128);
-        assert_eq!(heap_size(4, 24, 32, 0), 128);
-        assert_eq!(heap_size(4, 32, 0, 512), 640);
-    }
-
-    /// Absurd sizes saturate rather than wrapping around to a small heap.
-    #[test]
-    fn heap_size_saturates() {
-        assert_eq!(heap_size(2, u64::MAX, 1, 0), u64::MAX);
-        assert_eq!(heap_size(1, u64::MAX - 1, 4, 0), u64::MAX);
-        assert_eq!(heap_size(1, 1, 1, u64::MAX), u64::MAX);
     }
 
     /// Rendering's timings need timestamps on the graphics queue (design
