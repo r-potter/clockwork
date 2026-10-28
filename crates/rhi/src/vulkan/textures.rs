@@ -20,7 +20,7 @@ use ash::vk;
 
 use super::VulkanDevice;
 use super::error::{error, error_from_chain};
-use super::memory::{MemoryAllocation, MemoryRequest, Resource, image_requirements};
+use super::memory::{MemoryAllocation, MemoryRequest, Resource, image_memory_requirements};
 use crate::handle::HandleTable;
 use crate::{
     Format, MemoryLocation, RhiResult, Texture, TextureDesc, TextureDimension, TextureUsage,
@@ -173,7 +173,7 @@ impl VulkanDevice {
             .map_err(|result| error(result, "create texture", desc.label))?;
 
         // SAFETY: `image` was just created on `device`.
-        let (requirements, dedication) = unsafe { image_requirements(device, image) };
+        let (requirements, dedication) = unsafe { image_memory_requirements(device, image) };
         let allocation = match self.allocator.allocate(&MemoryRequest {
             label: desc.label,
             resource: Resource::Image(image),

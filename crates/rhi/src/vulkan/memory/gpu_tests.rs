@@ -9,7 +9,7 @@ use clockwork_diagnostics::capture::TestSession;
 
 use super::{
     DEVICE_BLOCK_SIZE, MemoryAllocation, MemoryAllocator, MemoryRequest, Resource,
-    buffer_requirements,
+    buffer_memory_requirements,
 };
 use crate::MemoryLocation;
 use crate::vulkan::test_support::VulkanTestBackend;
@@ -38,7 +38,7 @@ fn allocate_and_bind(
     location: MemoryLocation,
 ) -> MemoryAllocation {
     // SAFETY: `buffer` was just created on `device`.
-    let (requirements, dedication) = unsafe { buffer_requirements(device, buffer) };
+    let (requirements, dedication) = unsafe { buffer_memory_requirements(device, buffer) };
     let allocation = allocator
         .allocate(&MemoryRequest {
             label: "test buffer",
