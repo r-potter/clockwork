@@ -4,6 +4,8 @@
 //! A buffer is never bound. Shaders, copies, index buffers and indirect
 //! arguments all reach it through its [`GpuAddress`].
 
+use std::ops::{BitOr, BitOrAssign};
+
 use crate::MemoryLocation;
 use crate::handle::Handle;
 
@@ -56,8 +58,8 @@ impl BufferDesc<'_> {
 }
 
 /// How a buffer is used, beyond copies and its device address, which every
-/// buffer allows. A set of the constants below, combined with
-/// [`union`](Self::union).
+/// buffer allows. A set of the constants below, combined with `|`, or
+/// with [`union`](Self::union) in a `const`.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
 pub struct BufferUsage {
     /// Read and written by shaders, through its address.
@@ -108,6 +110,22 @@ impl BufferUsage {
     }
 }
 
+impl BitOr for BufferUsage {
+    type Output = Self;
+
+    /// The usages in either set, as [`union`](Self::union).
+    fn bitor(self, other: Self) -> Self {
+        self.union(other)
+    }
+}
+
+impl BitOrAssign for BufferUsage {
+    /// Adds the usages in `other`.
+    fn bitor_assign(&mut self, other: Self) {
+        *self = self.union(other);
+    }
+}
+
 /// A buffer's address on the GPU, for shaders, copies and indirect
 /// arguments.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -140,16 +158,21 @@ mod tests {
         }
     }
 
-    /// A union contains each of its parts, and no other usage.
+    /// A union contains each of its parts, and no other usage, whether made
+    /// with `|`, `|=` or `union`.
     #[test]
     fn unions_contain_exactly_their_parts() {
-        let usage = BufferUsage::STORAGE.union(BufferUsage::INDIRECT);
+        let usage = BufferUsage::STORAGE | BufferUsage::INDIRECT;
         assert!(usage.contains(BufferUsage::STORAGE));
         assert!(usage.contains(BufferUsage::INDIRECT));
         assert!(!usage.contains(BufferUsage::INDEX));
         assert!(usage.contains(BufferUsage::COPIES));
         assert!(!BufferUsage::COPIES.contains(BufferUsage::STORAGE));
         assert_eq!(BufferUsage::default(), BufferUsage::COPIES);
+        assert_eq!(usage, BufferUsage::STORAGE.union(BufferUsage::INDIRECT));
+        let mut added = BufferUsage::STORAGE;
+        added |= BufferUsage::INDIRECT;
+        assert_eq!(added, usage);
     }
 
     /// A buffer of one byte or more is valid.

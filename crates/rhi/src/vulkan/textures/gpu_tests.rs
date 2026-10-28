@@ -18,7 +18,7 @@ fn desc_2d(label: &str, width: u32, height: u32) -> TextureDesc<'_> {
         extent: Extent3d::new_2d(width, height),
         mip_levels: 1,
         array_layers: 1,
-        usage: TextureUsage::SAMPLED.union(TextureUsage::COPY_DESTINATION),
+        usage: TextureUsage::SAMPLED | TextureUsage::COPY_DESTINATION,
     }
 }
 
@@ -46,15 +46,15 @@ fn textures_of_every_dimension_are_created() {
         TextureDesc {
             mip_levels: 9,
             usage: TextureUsage::SAMPLED
-                .union(TextureUsage::STORAGE)
-                .union(TextureUsage::COPY_SOURCE)
-                .union(TextureUsage::COPY_DESTINATION),
+                | TextureUsage::STORAGE
+                | TextureUsage::COPY_SOURCE
+                | TextureUsage::COPY_DESTINATION,
             ..desc_2d("mipped", 256, 256)
         },
         TextureDesc {
             array_layers: 4,
             format: Format::Rgba16Float,
-            usage: TextureUsage::COLOUR_ATTACHMENT.union(TextureUsage::SAMPLED),
+            usage: TextureUsage::COLOUR_ATTACHMENT | TextureUsage::SAMPLED,
             ..desc_2d("cascades", 512, 512)
         },
         TextureDesc {
@@ -73,7 +73,7 @@ fn textures_of_every_dimension_are_created() {
         },
         TextureDesc {
             format: Format::Depth32Float,
-            usage: TextureUsage::DEPTH_ATTACHMENT.union(TextureUsage::SAMPLED),
+            usage: TextureUsage::DEPTH_ATTACHMENT | TextureUsage::SAMPLED,
             ..desc_2d("depth", 640, 480)
         },
     ];
