@@ -13,7 +13,7 @@ use clockwork_diagnostics::capture::TestSession;
 use tracing::Level;
 
 use super::test_support::{Capability, VulkanTestBackend};
-use crate::{QueueKind, RenderHardwareInterface};
+use crate::{MAX_PUSH_DATA_SIZE, QueueKind, RenderHardwareInterface};
 
 /// A buffer and the memory bound to it, destroyed when dropped.
 struct TestBuffer<'a> {
@@ -201,7 +201,13 @@ fn capabilities_describe_the_selected_device() {
         backend.core.physical_device.name()
     );
     assert!(capabilities.timestamps.contains(QueueKind::Graphics));
-    assert!(capabilities.limits.max_push_data_size >= 128);
+    let push_data_size = backend
+        .core
+        .physical_device
+        .properties
+        .descriptor_heap
+        .max_push_data_size;
+    assert!(push_data_size >= u64::from(MAX_PUSH_DATA_SIZE));
     assert!(capabilities.limits.timestamp_period_ns > 0.0);
 }
 

@@ -22,7 +22,7 @@ use super::API_VERSION;
 use super::capabilities;
 use super::physical_device::PhysicalDevice;
 use super::surface::SurfaceSupport;
-use crate::Capabilities;
+use crate::{Capabilities, MAX_PUSH_DATA_SIZE, PresentCapabilities};
 
 /// A device being considered for selection.
 pub(super) struct Candidate {
@@ -43,6 +43,8 @@ pub(super) struct Selection {
     /// What the device can do beyond the requirements, using
     /// `queue_families`.
     pub capabilities: Capabilities,
+    /// What presenting can do on the device.
+    pub present_capabilities: PresentCapabilities,
 }
 
 /// Indices of the queue families to use on a device.
@@ -63,8 +65,9 @@ pub(super) const RESOURCE_HEAP_CAPACITY: u64 = 65_536;
 pub(super) const SAMPLER_HEAP_CAPACITY: u64 = 2_048;
 
 /// The push data, in bytes, that each draw or dispatch can carry (design
-/// 0002, "Binding model").
-pub(super) const MIN_PUSH_DATA_SIZE: u64 = 128;
+/// 0002, "Binding model"): [`MAX_PUSH_DATA_SIZE`], which recording checks
+/// against.
+pub(super) const MIN_PUSH_DATA_SIZE: u64 = MAX_PUSH_DATA_SIZE as u64;
 
 /// A minimum requirement a device must meet to be selected.
 struct Requirement {
@@ -248,15 +251,17 @@ pub(super) fn select(candidates: Vec<Candidate>, device_filter: Option<&str>) ->
     };
     let queue_families = queue_families(&selected);
     let capabilities = capabilities::derive(&selected.device, queue_families);
+    let present_capabilities = capabilities::derive_present(&selected.device);
     info!(
         "selected {} ({}), with queue families {queue_families:?}",
         selected.device.name(),
-        capabilities.summary(),
+        crate::capabilities::summary(&capabilities, &present_capabilities),
     );
     Ok(Selection {
         device: selected.device,
         queue_families,
         capabilities,
+        present_capabilities,
     })
 }
 

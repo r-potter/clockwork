@@ -20,7 +20,8 @@
 //! differs.
 //!
 //! What the selected device can do beyond the baseline is described by
-//! [`Capabilities`] (design 0002, "Capabilities").
+//! [`Capabilities`] and [`PresentCapabilities`] (design 0002,
+//! "Capabilities").
 //!
 //! RHI calls return an [`RhiError`], which tells apart the failures a caller
 //! can act on (design 0002, "Error handling").
@@ -47,7 +48,9 @@ use anyhow::{Result, bail};
 use clockwork_diagnostics::SessionId;
 use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
 
-pub use capabilities::{Capabilities, Limits, QueueKind, QueueKindSet};
+pub use capabilities::{
+    Capabilities, Limits, MAX_PUSH_DATA_SIZE, PresentCapabilities, QueueKind, QueueKindSet,
+};
 pub use error::{RhiError, RhiResult};
 use vulkan::VulkanRenderHardwareInterface;
 
@@ -323,6 +326,10 @@ pub trait RenderHardwareInterface: Debug {
 
     /// The GPU resources, to share with other threads.
     fn resources(&self) -> &Arc<dyn GpuResources>;
+
+    /// What presenting to a window can do on the selected device. A headless
+    /// backend reports it too, since it describes the device.
+    fn present_capabilities(&self) -> &PresentCapabilities;
 
     /// Returns whether this backend was created without a window.
     ///

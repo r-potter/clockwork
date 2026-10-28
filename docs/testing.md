@@ -378,7 +378,7 @@ let backend = VulkanTestBackend::headless(&session);
 require_capabilities!(backend, Capability::DedicatedTransferQueue);
 ```
 
-The capabilities are listed in `Capability`, in `crates/rhi/src/vulkan/test_support.rs`, with the names used below: `present-timing`, `swapchain-maintenance`, `dedicated-compute-queue`, `dedicated-transfer-queue` and `bc-compression`. Each names an optional part of the RHI's `Capabilities` (design 0002), and a device has it when its `Capabilities` say so, so tests see the device as the RHI's users do. What device selection requires, such as descriptor heaps, isn't listed: every selected device has it.
+The capabilities are listed in `Capability`, in `crates/rhi/src/vulkan/test_support.rs`, with the names used below: `present-timing`, `swapchain-maintenance`, `dedicated-compute-queue`, `dedicated-transfer-queue` and `bc-compression`. Each names an optional part of the RHI's `Capabilities` or `PresentCapabilities` (design 0002), and a device has it when the object that reports it says so, so tests see the device as the RHI's users do. What device selection requires, such as descriptor heaps, isn't listed: every selected device has it.
 
 A skipped test passes, but prints a banner to stderr, even when the test passes, so skips are visible:
 
