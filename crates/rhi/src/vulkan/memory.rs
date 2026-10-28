@@ -23,6 +23,8 @@
 mod gpu_tests;
 mod memory_types;
 
+pub(super) use memory_types::MemoryUse;
+
 use std::collections::HashSet;
 use std::ptr::NonNull;
 use std::sync::{Mutex, PoisonError};
@@ -32,8 +34,6 @@ use ash::vk;
 use ash::vk::TaggedStructure;
 use clockwork_gpu_memory::{Pool, PoolAllocation, PoolStatistics, ResourceKind};
 use tracing::{debug, warn};
-
-use crate::MemoryLocation;
 
 /// The block size for device-local memory types, in bytes.
 const DEVICE_BLOCK_SIZE: u64 = 256 << 20;
@@ -130,8 +130,8 @@ pub(super) struct MemoryRequest<'a> {
     pub requirements: vk::MemoryRequirements,
     /// Whether the driver wants the resource to have memory of its own.
     pub dedication: DedicatedAllocationProperties,
-    /// Where the memory should be.
-    pub location: MemoryLocation,
+    /// What the memory is for, which decides its type.
+    pub usage: MemoryUse,
 }
 
 /// Memory allocated for a resource, to bind it to, and to give back to
@@ -299,12 +299,12 @@ impl MemoryAllocator {
         let memory_type = memory_types::choose_memory_type_index(
             &self.memory_properties,
             requirements.memory_type_bits,
-            request.location.into(),
+            request.usage,
         )
         .with_context(|| {
             format!(
-                "no memory type for \"{}\" suits {:?} memory",
-                request.label, request.location
+                "no memory type for \"{}\" suits {} memory",
+                request.label, request.usage
             )
         })?;
         let coherent = self.memory_properties.memory_types[memory_type as usize]

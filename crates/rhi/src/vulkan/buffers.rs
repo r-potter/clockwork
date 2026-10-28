@@ -100,7 +100,7 @@ impl VulkanDevice {
             resource: Resource::Buffer(buffer),
             requirements,
             dedication,
-            location: desc.location,
+            usage: desc.location.into(),
         }) {
             Ok(allocation) => allocation,
             Err(err) => {

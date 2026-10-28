@@ -49,6 +49,7 @@ use super::{
 };
 use crate::handle::HandleTable;
 use buffers::BufferEntry;
+use descriptor_heaps::DescriptorHeaps;
 use device::LogicalDevice;
 use device_selection::{Candidate, Selection};
 use frames::Frames;
@@ -130,6 +131,9 @@ pub(crate) struct VulkanDevice {
     buffers: RwLock<HandleTable<BufferEntry>>,
     /// Every live texture.
     textures: RwLock<HandleTable<TextureEntry>>,
+    /// The resource and sampler heaps. Destroyed in `drop`, after the
+    /// tables, so that no entry's slot outlives its heap.
+    heaps: DescriptorHeaps,
     /// Allocates memory for resources on `device`.
     allocator: MemoryAllocator,
     /// The logical device, and its queues, created on `physical_device`.
@@ -228,9 +232,15 @@ impl VulkanRenderHardwareInterface {
         let triangle_shaders = TriangleShaders::new(&device)?;
 
         let allocator = MemoryAllocator::new(device.handle(), physical_device.memory_properties);
+        let heaps = DescriptorHeaps::new(
+            device.handle(),
+            &allocator,
+            &physical_device.properties.descriptor_heap,
+        )?;
         let core = Arc::new(VulkanDevice {
             buffers: RwLock::new(HandleTable::new("buffer")),
             textures: RwLock::new(HandleTable::new("texture")),
+            heaps,
             allocator,
             device,
             physical_device,
@@ -693,6 +703,9 @@ impl Drop for VulkanDevice {
             // SAFETY: As above.
             unsafe { self.free_texture(entry) };
         }
+        // SAFETY: The heaps were created on this device, with memory from
+        // this allocator, and the device is idle.
+        unsafe { self.heaps.destroy(self.device.handle(), &self.allocator) };
     }
 }
 

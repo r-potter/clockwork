@@ -179,7 +179,7 @@ impl VulkanDevice {
             resource: Resource::Image(image),
             requirements,
             dedication,
-            location: MemoryLocation::Device,
+            usage: MemoryLocation::Device.into(),
         }) {
             Ok(allocation) => allocation,
             Err(err) => {

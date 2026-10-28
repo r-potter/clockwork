@@ -41,6 +41,17 @@ fn textures_of_every_dimension_are_created() {
     let session = TestSession::new();
     let backend = VulkanTestBackend::headless(&session);
     let resources = backend.resources();
+    // The core's own memory, such as the descriptor heaps, may share a
+    // type with the textures, as on lavapipe's only type, so destroying
+    // the textures returns each type to what it held before.
+    let statistics = |memory_type| backend.core.allocator.statistics(memory_type);
+    let before: Vec<_> = (0..backend
+        .core
+        .physical_device
+        .memory_properties
+        .memory_type_count)
+        .map(statistics)
+        .collect();
 
     let descs = [
         TextureDesc {
@@ -89,9 +100,12 @@ fn textures_of_every_dimension_are_created() {
         resources.destroy_texture(texture);
     }
     for memory_type in memory_types {
-        let statistics = backend.core.allocator.statistics(memory_type);
-        assert_eq!(statistics.pool.allocated, 0, "memory type {memory_type}");
-        assert_eq!(statistics.dedicated_count, 0, "memory type {memory_type}");
+        let (before, after) = (before[memory_type as usize], statistics(memory_type));
+        assert_eq!(
+            (after.pool.allocated, after.dedicated_count),
+            (before.pool.allocated, before.dedicated_count),
+            "memory type {memory_type}",
+        );
     }
 }
 
