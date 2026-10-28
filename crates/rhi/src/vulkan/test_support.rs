@@ -1,16 +1,17 @@
 //! Fixtures for the Vulkan backend's T1 tests: [`VulkanTestBackend`], the
 //! test-only [`Capability`] list, and [`require_capabilities!`].
 //!
-//! [`Capability`] names the optional parts of the RHI's [`Capabilities`], so
-//! that tests can require them by name in `CLOCKWORK_REQUIRED_CAPABILITIES`.
-//! Whether a device has one is read from its [`Capabilities`], as the RHI's
-//! users read it (design 0002, "Capabilities").
+//! [`Capability`] names the optional parts of the RHI's [`Capabilities`] and
+//! [`PresentCapabilities`], so that tests can require them by name in
+//! `CLOCKWORK_REQUIRED_CAPABILITIES`. Whether a device has one is read from
+//! the object that reports it, as the RHI's users read it (design 0002,
+//! "Capabilities").
 
 use clockwork_diagnostics::capture::TestSession;
 
 use super::VulkanRenderHardwareInterface;
 use crate::test_support::{self, RequiredCapabilities};
-use crate::{Capabilities, RenderHardwareInterface};
+use crate::{Capabilities, PresentCapabilities, RenderHardwareInterface};
 
 /// An optional capability some T1 tests need, which some devices lack.
 ///
@@ -22,9 +23,9 @@ use crate::{Capabilities, RenderHardwareInterface};
 /// aren't listed: every selected device has them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Capability {
-    /// [`Capabilities::present_timing`].
+    /// [`PresentCapabilities::present_timing`].
     PresentTiming,
-    /// [`Capabilities::swapchain_maintenance`].
+    /// [`PresentCapabilities::swapchain_maintenance`].
     SwapchainMaintenance,
     /// [`Capabilities::dedicated_compute_queue`].
     DedicatedComputeQueue,
@@ -56,11 +57,12 @@ impl Capability {
         }
     }
 
-    /// Whether a device with `capabilities` has the capability.
-    pub(crate) fn is_in(self, capabilities: &Capabilities) -> bool {
+    /// Whether a device with `capabilities` and `present` has the
+    /// capability.
+    pub(crate) fn is_in(self, capabilities: &Capabilities, present: &PresentCapabilities) -> bool {
         match self {
-            Self::PresentTiming => capabilities.present_timing,
-            Self::SwapchainMaintenance => capabilities.swapchain_maintenance,
+            Self::PresentTiming => present.present_timing,
+            Self::SwapchainMaintenance => present.swapchain_maintenance,
             Self::DedicatedComputeQueue => capabilities.dedicated_compute_queue,
             Self::DedicatedTransferQueue => capabilities.dedicated_transfer_queue,
             Self::BcCompression => capabilities.bc_compression,
@@ -112,7 +114,7 @@ impl VulkanTestBackend {
     /// Panics if the device lacks `capability` and it's required.
     pub(crate) fn has(&self, capability: Capability) -> bool {
         let capabilities = self.rhi.resources().capabilities();
-        let supported = capability.is_in(capabilities);
+        let supported = capability.is_in(capabilities, self.rhi.present_capabilities());
         if !supported {
             test_support::missing_capability(
                 capability.name(),
@@ -176,22 +178,24 @@ mod tests {
     }
 
     /// Capabilities with every optional one set to `has`.
-    fn capabilities(has: bool) -> Capabilities {
-        Capabilities {
+    fn capabilities(has: bool) -> (Capabilities, PresentCapabilities) {
+        let capabilities = Capabilities {
             device_name: "device".to_owned(),
-            present_timing: has,
-            swapchain_maintenance: has,
             dedicated_compute_queue: has,
             dedicated_transfer_queue: has,
             timestamps: QueueKindSet::EMPTY.with(QueueKind::Graphics),
             bc_compression: has,
             limits: Limits {
-                max_push_data_size: 128,
                 max_texture_dimension_2d: 16_384,
                 max_compute_workgroup_size: [1_024, 1_024, 64],
                 timestamp_period_ns: 1.0,
             },
-        }
+        };
+        let present = PresentCapabilities {
+            present_timing: has,
+            swapchain_maintenance: has,
+        };
+        (capabilities, present)
     }
 
     /// Each capability reads its own field: a device has it when that
@@ -199,18 +203,23 @@ mod tests {
     #[test]
     fn each_capability_reads_its_field() {
         for capability in Capability::ALL {
-            assert!(capability.is_in(&capabilities(true)), "{capability:?}");
-            assert!(!capability.is_in(&capabilities(false)), "{capability:?}");
+            let (with, with_present) = capabilities(true);
+            assert!(capability.is_in(&with, &with_present), "{capability:?}");
+            let (without, without_present) = capabilities(false);
+            assert!(
+                !capability.is_in(&without, &without_present),
+                "{capability:?}"
+            );
             for other in Capability::ALL
                 .into_iter()
                 .filter(|&other| other != capability)
             {
                 // Clearing another capability's field doesn't change this
                 // one.
-                let mut capabilities = capabilities(true);
+                let (mut capabilities, mut present) = capabilities(true);
                 match other {
-                    Capability::PresentTiming => capabilities.present_timing = false,
-                    Capability::SwapchainMaintenance => capabilities.swapchain_maintenance = false,
+                    Capability::PresentTiming => present.present_timing = false,
+                    Capability::SwapchainMaintenance => present.swapchain_maintenance = false,
                     Capability::DedicatedComputeQueue => {
                         capabilities.dedicated_compute_queue = false;
                     }
@@ -219,7 +228,10 @@ mod tests {
                     }
                     Capability::BcCompression => capabilities.bc_compression = false,
                 }
-                assert!(capability.is_in(&capabilities), "{capability:?}, {other:?}");
+                assert!(
+                    capability.is_in(&capabilities, &present),
+                    "{capability:?}, {other:?}"
+                );
             }
         }
     }

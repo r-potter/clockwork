@@ -1,10 +1,11 @@
-//! Deriving the RHI's [`Capabilities`] from the selected Vulkan device.
+//! Deriving the RHI's [`Capabilities`] and [`PresentCapabilities`] from the
+//! selected Vulkan device.
 
 use ash::{ext, khr, vk};
 
 use super::device_selection::{self, QueueFamilies};
 use super::physical_device::PhysicalDevice;
-use crate::{Capabilities, Limits, QueueKind, QueueKindSet};
+use crate::{Capabilities, Limits, PresentCapabilities, QueueKind, QueueKindSet};
 
 /// The capabilities of `device`, when it renders on the graphics family in
 /// `queue_families`. Pure, so it's tested with fake devices.
@@ -37,25 +38,30 @@ pub(super) fn derive(device: &PhysicalDevice, queue_families: QueueFamilies) -> 
     let limits = device.limits();
     Capabilities {
         device_name: device.name().into_owned(),
-        present_timing: device.supports_extension(ext::present_timing::NAME)
-            && features.present_timing.present_timing == vk::TRUE,
-        swapchain_maintenance: device.supports_extension(khr::swapchain_maintenance1::NAME)
-            && features.swapchain_maintenance1.swapchain_maintenance1 == vk::TRUE,
         dedicated_compute_queue: dedicated_compute.is_some(),
         dedicated_transfer_queue: dedicated_transfer.is_some(),
         timestamps,
         bc_compression: features.core.texture_compression_bc == vk::TRUE,
         limits: Limits {
-            max_push_data_size: device
-                .properties
-                .descriptor_heap
-                .max_push_data_size
-                .try_into()
-                .unwrap_or(u32::MAX),
             max_texture_dimension_2d: limits.max_image_dimension2_d,
             max_compute_workgroup_size: limits.max_compute_work_group_size,
             timestamp_period_ns: limits.timestamp_period,
         },
+    }
+}
+
+/// What presenting can do on `device`. Pure, so it's tested with fake
+/// devices.
+///
+/// An optional extension's capability needs both the extension and its
+/// feature, since a driver may advertise one without the other.
+pub(super) fn derive_present(device: &PhysicalDevice) -> PresentCapabilities {
+    let features = &device.features;
+    PresentCapabilities {
+        present_timing: device.supports_extension(ext::present_timing::NAME)
+            && features.present_timing.present_timing == vk::TRUE,
+        swapchain_maintenance: device.supports_extension(khr::swapchain_maintenance1::NAME)
+            && features.swapchain_maintenance1.swapchain_maintenance1 == vk::TRUE,
     }
 }
 
@@ -171,19 +177,23 @@ mod tests {
             .features
             .swapchain_maintenance1
             .swapchain_maintenance1 = vk::TRUE;
-        let capabilities = derive(&with_both, FAMILY_0);
-        assert!(capabilities.present_timing);
-        assert!(capabilities.swapchain_maintenance);
+        assert_eq!(
+            derive_present(&with_both),
+            PresentCapabilities {
+                present_timing: true,
+                swapchain_maintenance: true,
+            },
+        );
 
-        let capabilities = derive(&device(&names), FAMILY_0);
-        assert!(!capabilities.present_timing);
-        assert!(!capabilities.swapchain_maintenance);
+        let none = PresentCapabilities {
+            present_timing: false,
+            swapchain_maintenance: false,
+        };
+        assert_eq!(derive_present(&device(&names)), none);
 
         let mut features_only = device(&[]);
         features_only.features = with_both.features;
-        let capabilities = derive(&features_only, FAMILY_0);
-        assert!(!capabilities.present_timing);
-        assert!(!capabilities.swapchain_maintenance);
+        assert_eq!(derive_present(&features_only), none);
     }
 
     /// BC compression, the name and the limits come from the device's
@@ -192,7 +202,6 @@ mod tests {
     fn features_names_and_limits_are_copied() {
         let mut device = device(&[]);
         device.features.core.texture_compression_bc = vk::TRUE;
-        device.properties.descriptor_heap.max_push_data_size = 256;
         let limits = &mut device.properties.core.limits;
         limits.max_image_dimension2_d = 32_768;
         limits.max_compute_work_group_size = [1_024, 1_024, 64];
@@ -201,8 +210,6 @@ mod tests {
             derive(&device, FAMILY_0),
             Capabilities {
                 device_name: "device".to_owned(),
-                present_timing: false,
-                swapchain_maintenance: false,
                 dedicated_compute_queue: false,
                 dedicated_transfer_queue: false,
                 timestamps: QueueKindSet::EMPTY
@@ -211,23 +218,11 @@ mod tests {
                     .with(QueueKind::Transfer),
                 bc_compression: true,
                 limits: Limits {
-                    max_push_data_size: 256,
                     max_texture_dimension_2d: 32_768,
                     max_compute_workgroup_size: [1_024, 1_024, 64],
                     timestamp_period_ns: 1.5,
                 },
             },
-        );
-    }
-
-    /// A push-data limit too large for a `u32` is clamped, not truncated.
-    #[test]
-    fn huge_push_data_limits_are_clamped() {
-        let mut device = device(&[]);
-        device.properties.descriptor_heap.max_push_data_size = u64::from(u32::MAX) + 1;
-        assert_eq!(
-            derive(&device, FAMILY_0).limits.max_push_data_size,
-            u32::MAX
         );
     }
 }

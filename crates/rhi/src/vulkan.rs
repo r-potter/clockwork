@@ -40,8 +40,8 @@ use raw_window_handle::RawDisplayHandle;
 use tracing::{info, warn};
 
 use super::{
-    BackendOptions, Capabilities, GpuResources, GraphicsApi, RenderHardwareInterface, WindowSize,
-    WindowTarget,
+    BackendOptions, Capabilities, GpuResources, GraphicsApi, PresentCapabilities,
+    RenderHardwareInterface, WindowSize, WindowTarget,
 };
 use device::LogicalDevice;
 use device_selection::{Candidate, Selection};
@@ -93,6 +93,8 @@ pub(crate) struct VulkanRenderHardwareInterface {
     swapchain: Option<Swapchain>,
     /// `None` when headless, or while suspended.
     surface: Option<Surface>,
+    /// What presenting can do on the selected device.
+    present_capabilities: PresentCapabilities,
     /// `core`, as the resources the application shares between threads.
     resources: Arc<dyn GpuResources>,
     /// The instance and devices. Declared last so that this backend's
@@ -200,6 +202,7 @@ impl VulkanRenderHardwareInterface {
             device: physical_device,
             queue_families,
             capabilities,
+            present_capabilities,
         } = device_selection::select(candidates, options.device_filter.as_deref())?;
 
         let device = LogicalDevice::new(&instance.instance, &physical_device, queue_families)?;
@@ -221,6 +224,7 @@ impl VulkanRenderHardwareInterface {
             triangle_shaders,
             swapchain: None,
             surface,
+            present_capabilities,
             resources: core.clone(),
             core,
         };
@@ -613,7 +617,10 @@ impl fmt::Debug for VulkanRenderHardwareInterface {
             .field("headless", &self.is_headless())
             .field("suspended", &self.is_suspended())
             .field("physical_device", &self.core.physical_device.name())
-            .field("capabilities", &self.core.capabilities.summary())
+            .field(
+                "capabilities",
+                &crate::capabilities::summary(&self.core.capabilities, &self.present_capabilities),
+            )
             .field("queue_families", &self.core.device.queue_families())
             .field(
                 "swapchain",
@@ -635,7 +642,7 @@ impl fmt::Debug for VulkanDevice {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("VulkanDevice")
             .field("physical_device", &self.physical_device.name())
-            .field("capabilities", &self.capabilities.summary())
+            .field("capabilities", &self.capabilities)
             .field("queue_families", &self.device.queue_families())
             .finish_non_exhaustive()
     }
@@ -655,6 +662,10 @@ impl RenderHardwareInterface for VulkanRenderHardwareInterface {
 
     fn resources(&self) -> &Arc<dyn GpuResources> {
         &self.resources
+    }
+
+    fn present_capabilities(&self) -> &PresentCapabilities {
+        &self.present_capabilities
     }
 
     fn is_headless(&self) -> bool {
