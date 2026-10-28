@@ -28,7 +28,7 @@ use ash::vk;
 
 use super::VulkanDevice;
 use super::error::{error, error_from_chain};
-use super::memory::{MemoryAllocation, MemoryRequest, Resource, buffer_requirements};
+use super::memory::{MemoryAllocation, MemoryRequest, Resource, buffer_memory_requirements};
 use crate::handle::HandleTable;
 use crate::{Buffer, BufferDesc, BufferUsage, GpuAddress, MemoryLocation, RhiError, RhiResult};
 
@@ -94,7 +94,7 @@ impl VulkanDevice {
             .map_err(|result| error(result, "create buffer", desc.label))?;
 
         // SAFETY: `buffer` was just created on `device`.
-        let (requirements, dedication) = unsafe { buffer_requirements(device, buffer) };
+        let (requirements, dedication) = unsafe { buffer_memory_requirements(device, buffer) };
         let allocation = match self.allocator.allocate(&MemoryRequest {
             label: desc.label,
             resource: Resource::Buffer(buffer),

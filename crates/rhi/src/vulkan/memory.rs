@@ -541,7 +541,7 @@ fn needs_dedicated(dedication: DedicatedAllocationProperties, size: u64, block_s
 /// # Safety
 ///
 /// `buffer` must be a live buffer on `device`.
-pub(super) unsafe fn buffer_requirements(
+pub(super) unsafe fn buffer_memory_requirements(
     device: &ash::Device,
     buffer: vk::Buffer,
 ) -> (vk::MemoryRequirements, DedicatedAllocationProperties) {
@@ -567,7 +567,7 @@ pub(super) unsafe fn buffer_requirements(
 /// # Safety
 ///
 /// `image` must be a live image on `device`.
-pub(super) unsafe fn image_requirements(
+pub(super) unsafe fn image_memory_requirements(
     device: &ash::Device,
     image: vk::Image,
 ) -> (vk::MemoryRequirements, DedicatedAllocationProperties) {
