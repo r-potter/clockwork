@@ -146,6 +146,11 @@ pub(super) struct MemoryAllocation {
     size: u64,
     /// The memory type.
     memory_type: u32,
+    /// The size of `memory`: the block, or the dedicated allocation.
+    memory_size: u64,
+    /// Whether the memory type is host-coherent, so that host accesses
+    /// need no flushes or invalidations.
+    coherent: bool,
     /// Where the resource's memory is mapped, if it's host-visible.
     mapped: Option<MappedPointer>,
     /// Where the memory came from.
@@ -180,6 +185,19 @@ impl MemoryAllocation {
     /// The memory type the memory is of.
     pub(super) fn memory_type(&self) -> u32 {
         self.memory_type
+    }
+
+    /// The size of the memory the resource is in: its block, or its
+    /// dedicated allocation. A range of it to flush or invalidate must end
+    /// on a multiple of `nonCoherentAtomSize`, or at this size.
+    pub(super) fn memory_size(&self) -> u64 {
+        self.memory_size
+    }
+
+    /// Whether the memory type is host-coherent, so that host accesses need
+    /// no flushes or invalidations.
+    pub(super) fn is_coherent(&self) -> bool {
+        self.coherent
     }
 
     /// Where the resource's memory is mapped, if its type is host-visible:
@@ -289,6 +307,9 @@ impl MemoryAllocator {
                 request.label, request.location
             )
         })?;
+        let coherent = self.memory_properties.memory_types[memory_type as usize]
+            .property_flags
+            .contains(vk::MemoryPropertyFlags::HOST_COHERENT);
         let mut type_pool = self.lock(memory_type);
 
         let block_size = type_pool.pool.block_size();
@@ -312,6 +333,8 @@ impl MemoryAllocator {
                 offset: 0,
                 size: requirements.size,
                 memory_type,
+                memory_size: requirements.size,
+                coherent,
                 mapped: memory.mapped,
                 source: Source::Dedicated,
             });
@@ -339,6 +362,8 @@ impl MemoryAllocator {
             offset: allocation.offset(),
             size: allocation.size(),
             memory_type,
+            memory_size: block_size,
+            coherent,
             mapped,
             source: Source::Pool(allocation),
         })

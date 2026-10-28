@@ -142,3 +142,87 @@ fn buffers_left_at_drop_are_destroyed() {
     }
     drop(backend);
 }
+
+/// A copy of `len` bytes of `buffer`'s mapped memory, read directly.
+fn mapped_bytes(backend: &VulkanTestBackend, buffer: Buffer, len: usize) -> Vec<u8> {
+    let buffers = backend.core.lock_buffers_for_reading();
+    let mapped = buffers.get(buffer.handle()).allocation.mapped().unwrap();
+    // SAFETY: The buffer is mapped and at least `len` bytes long, and
+    // nothing else accesses it while the table is locked.
+    unsafe { std::slice::from_raw_parts(mapped.as_ptr(), len) }.to_vec()
+}
+
+/// Writing an upload buffer puts the bytes at the offset in its mapped
+/// memory, and leaves the rest alone (R4).
+#[test]
+fn writes_reach_upload_memory() {
+    let session = TestSession::new();
+    let backend = VulkanTestBackend::headless(&session);
+    let resources = backend.resources();
+    let buffer = resources
+        .create_buffer(&desc("upload", 16, MemoryLocation::Upload))
+        .unwrap();
+    resources.write_buffer(buffer, 0, &[0; 16]);
+    resources.write_buffer(buffer, 4, &[1, 2, 3, 4]);
+    assert_eq!(
+        mapped_bytes(&backend, buffer, 16),
+        [0, 0, 0, 0, 1, 2, 3, 4, 0, 0, 0, 0, 0, 0, 0, 0],
+    );
+    resources.destroy_buffer(buffer);
+}
+
+/// Reading a readback buffer returns what its memory holds, from the
+/// offset, after any invalidation it needs (R4). The host writes the
+/// memory here, and flushes it if it isn't coherent, standing in for the
+/// GPU copies `rhi-commands` adds.
+#[test]
+fn reads_come_from_readback_memory() {
+    let session = TestSession::new();
+    let backend = VulkanTestBackend::headless(&session);
+    let resources = backend.resources();
+    let buffer = resources
+        .create_buffer(&desc("readback", 256, MemoryLocation::Readback))
+        .unwrap();
+    {
+        let buffers = backend.core.lock_buffers_for_reading();
+        let allocation = &buffers.get(buffer.handle()).allocation;
+        let mapped = allocation.mapped().unwrap();
+        // SAFETY: The buffer is mapped and 256 bytes long, and nothing else
+        // accesses it.
+        let bytes = unsafe { std::slice::from_raw_parts_mut(mapped.as_ptr(), 256) };
+        for (index, byte) in bytes.iter_mut().enumerate() {
+            *byte = index as u8;
+        }
+        if !allocation.is_coherent() {
+            let range = ash::vk::MappedMemoryRange::default()
+                .memory(allocation.memory())
+                .size(ash::vk::WHOLE_SIZE);
+            // SAFETY: The memory is mapped whole.
+            unsafe {
+                backend
+                    .core
+                    .device
+                    .handle()
+                    .flush_mapped_memory_ranges(&[range])
+            }
+            .unwrap();
+        }
+    }
+    let mut out = [0; 8];
+    resources.read_buffer(buffer, 100, &mut out).unwrap();
+    assert_eq!(out, [100, 101, 102, 103, 104, 105, 106, 107]);
+    resources.destroy_buffer(buffer);
+}
+
+/// Reading a buffer that isn't in readback memory panics, naming it.
+#[test]
+#[should_panic(expected = "cannot read buffer \"upload\": it's in Upload memory, not Readback")]
+fn reads_outside_readback_memory_panic() {
+    let session = TestSession::new();
+    let backend = VulkanTestBackend::headless(&session);
+    let resources = backend.resources();
+    let buffer = resources
+        .create_buffer(&desc("upload", 16, MemoryLocation::Upload))
+        .unwrap();
+    let _ = resources.read_buffer(buffer, 0, &mut [0; 4]);
+}
