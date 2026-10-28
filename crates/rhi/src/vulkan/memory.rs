@@ -296,10 +296,10 @@ impl MemoryAllocator {
     /// location, or if allocating or mapping memory fails.
     pub(super) fn allocate(&self, request: &MemoryRequest<'_>) -> Result<MemoryAllocation> {
         let requirements = request.requirements;
-        let memory_type = memory_types::choose(
+        let memory_type = memory_types::choose_memory_type_index(
             &self.memory_properties,
             requirements.memory_type_bits,
-            request.location,
+            request.location.into(),
         )
         .with_context(|| {
             format!(
