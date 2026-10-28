@@ -561,6 +561,32 @@ pub(super) unsafe fn buffer_requirements(
     )
 }
 
+/// The memory requirements of `image`, and whether its driver wants it to
+/// have memory of its own.
+///
+/// # Safety
+///
+/// `image` must be a live image on `device`.
+pub(super) unsafe fn image_requirements(
+    device: &ash::Device,
+    image: vk::Image,
+) -> (vk::MemoryRequirements, DedicatedAllocationProperties) {
+    let info = vk::ImageMemoryRequirementsInfo2::default().image(image);
+    let mut dedicated = vk::MemoryDedicatedRequirements::default();
+    let mut requirements = vk::MemoryRequirements2::default().push(&mut dedicated);
+    // SAFETY: The caller guarantees that `image` is live on `device`, and
+    // the structures are valid for the call.
+    unsafe { device.get_image_memory_requirements2(&info, &mut requirements) };
+    let memory_requirements = requirements.memory_requirements;
+    (
+        memory_requirements,
+        DedicatedAllocationProperties {
+            preferred: dedicated.prefers_dedicated_allocation == vk::TRUE,
+            required: dedicated.requires_dedicated_allocation == vk::TRUE,
+        },
+    )
+}
+
 #[cfg(test)]
 mod tests {
     //! T0 tests of the allocator's pure rules: block sizes and when memory
