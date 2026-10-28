@@ -332,6 +332,36 @@ pub trait GpuResources: Debug + Send + Sync {
     ///
     /// Panics if the handle is stale.
     fn buffer_address(&self, buffer: Buffer) -> GpuAddress;
+
+    /// Copies `data` into an upload buffer at `offset`.
+    ///
+    /// It doesn't synchronize with the GPU: the caller makes sure no
+    /// submitted work still uses the range, as Vulkan requires. Upload
+    /// memory is coherent, so the GPU sees the bytes in work submitted
+    /// afterwards. Overlapping writes from two threads are serialized, in
+    /// no particular order.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the handle is stale, the buffer isn't in upload memory, or
+    /// the range is out of bounds.
+    fn write_buffer(&self, buffer: Buffer, offset: u64, data: &[u8]);
+
+    /// Copies from a readback buffer at `offset` into `out`.
+    ///
+    /// It doesn't synchronize with the GPU: the caller waits for the work
+    /// that last wrote the range first, as Vulkan requires.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RhiError::Other`] if memory that isn't coherent can't be
+    /// invalidated before it's read.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the handle is stale, the buffer isn't in readback memory,
+    /// or the range is out of bounds.
+    fn read_buffer(&self, buffer: Buffer, offset: u64, out: &mut [u8]) -> RhiResult<()>;
 }
 
 // The resources are shared between threads, as an `Arc<dyn GpuResources>`

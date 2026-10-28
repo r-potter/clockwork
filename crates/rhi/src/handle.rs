@@ -190,13 +190,6 @@ impl<T> HandleTable<T> {
     /// # Panics
     ///
     /// Panics if the handle is stale or invalid, naming its object.
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "write_buffer and read_buffer name buffers in panics"
-        )
-    )]
     pub(crate) fn label(&self, handle: Handle) -> &str {
         match self.lookup(handle) {
             Ok((label, _)) => label,
