@@ -1,9 +1,10 @@
-//! Choosing a memory type for a resource in each [`MemoryLocation`]
-//! (design 0002, "Memory allocator").
+//! Choosing a memory type for a resource in each [`MemoryLocation`], and
+//! for the descriptor heaps (design 0002, "Memory allocator" and "Binding
+//! model").
 //!
 //! The choice is a pure function of the device's memory properties, the
-//! types the resource can use, and the location, so every kind of device is
-//! tested with fake properties.
+//! types the resource can use, and what the memory is for, so every kind of
+//! device is tested with fake properties.
 
 use ash::vk;
 
@@ -21,20 +22,42 @@ const EXCLUDED: vk::MemoryPropertyFlags = vk::MemoryPropertyFlags::from_raw(
         | vk::MemoryPropertyFlags::DEVICE_UNCACHED_AMD.as_raw(),
 );
 
-/// The flags a memory type must have to hold resources in `location`.
-fn required(location: MemoryLocation) -> vk::MemoryPropertyFlags {
-    match location {
-        MemoryLocation::Device => vk::MemoryPropertyFlags::DEVICE_LOCAL,
-        MemoryLocation::Upload => {
-            vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT
-        }
-        MemoryLocation::Readback => vk::MemoryPropertyFlags::HOST_VISIBLE,
+/// What memory is for: a resource in one of the RHI's locations, or one of
+/// the backend's descriptor heaps, which have a rule of their own rather
+/// than another public location.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(in crate::vulkan) enum MemoryUse {
+    /// A buffer or texture in a [`MemoryLocation`].
+    Location(MemoryLocation),
+    /// A descriptor heap, which the CPU writes descriptors into and the GPU
+    /// reads on every texture and sampler access.
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "the heaps are created on the core in the next PR")
+    )]
+    DescriptorHeap,
+}
+
+impl From<MemoryLocation> for MemoryUse {
+    fn from(location: MemoryLocation) -> Self {
+        Self::Location(location)
     }
 }
 
-/// Chooses the memory type for a resource in `location`, from the types in
-/// `type_bits` (the resource's `memoryTypeBits`), or returns `None` if none
-/// of them has the flags `location` requires.
+/// The flags a memory type must have to hold memory for `usage`.
+fn required_flags(usage: MemoryUse) -> vk::MemoryPropertyFlags {
+    match usage {
+        MemoryUse::Location(MemoryLocation::Device) => vk::MemoryPropertyFlags::DEVICE_LOCAL,
+        MemoryUse::Location(MemoryLocation::Upload) | MemoryUse::DescriptorHeap => {
+            vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT
+        }
+        MemoryUse::Location(MemoryLocation::Readback) => vk::MemoryPropertyFlags::HOST_VISIBLE,
+    }
+}
+
+/// Chooses the memory type for `usage`, from the types in `type_bits` (the
+/// resource's `memoryTypeBits`), or returns `None` if none of them has the
+/// flags `usage` requires.
 ///
 /// Among the types that qualify, the preferences in design 0002's table
 /// decide, in order:
@@ -44,16 +67,17 @@ fn required(location: MemoryLocation) -> vk::MemoryPropertyFlags {
 /// | `Device` | not host-visible, so that host-visible device memory is left for uploads |
 /// | `Upload` | device-local if its heap holds at least half the device's local memory, as with resizable BAR or an integrated GPU; otherwise not device-local, since a small BAR window is too precious to spend on uploads |
 /// | `Readback` | host-cached, then host-coherent |
+/// | descriptor heaps | device-local, in any heap, even a small BAR window, since the heaps are a few MiB and the GPU reads them constantly; otherwise system memory |
 ///
 /// Types that remain tied are taken in the driver's order, which Vulkan
 /// arranges from best to worst for each set of flags.
-pub(super) fn choose(
+pub(super) fn choose_memory_type_index(
     properties: &vk::PhysicalDeviceMemoryProperties,
     type_bits: u32,
-    location: MemoryLocation,
+    usage: MemoryUse,
 ) -> Option<u32> {
     let types = properties.memory_types_as_slice();
-    let required = required(location);
+    let required = required_flags(usage);
     (0..types.len() as u32)
         .filter(|&index| type_bits & (1 << index) != 0)
         .filter(|&index| {
@@ -63,34 +87,46 @@ pub(super) fn choose(
         // `max_by_key` keeps the last of equal keys, so search from the end
         // to keep the driver's first.
         .rev()
-        .max_by_key(|&index| preference(properties, index, location))
+        .max_by_key(|&index| preference(properties, index, usage))
 }
 
-/// How much `location` prefers the memory type `index`, as a key that
-/// sorts higher for better types. See [`choose`].
+/// How much `usage` prefers the memory type `index`, as a key that sorts
+/// higher for better types. See [`choose_memory_type_index`].
+///
+/// The key is two preferences, compared in order: the first decides, and
+/// the second only breaks ties in the first. Each is `true` when the type
+/// has what `usage` prefers:
+///
+/// | Usage | First | Second |
+/// |---|---|---|
+/// | `Device` | not host-visible | unused, always `false` |
+/// | `Upload` | device-local, in a heap that holds most of the local memory | not device-local, so system memory beats a small BAR window |
+/// | `Readback` | host-cached | host-coherent |
+/// | descriptor heaps | device-local | unused, always `false` |
 fn preference(
     properties: &vk::PhysicalDeviceMemoryProperties,
     index: u32,
-    location: MemoryLocation,
+    usage: MemoryUse,
 ) -> (bool, bool) {
     let memory_type = properties.memory_types[index as usize];
     let flags = memory_type.property_flags;
     let device_local = flags.contains(vk::MemoryPropertyFlags::DEVICE_LOCAL);
-    match location {
-        MemoryLocation::Device => (
+    match usage {
+        MemoryUse::Location(MemoryLocation::Device) => (
             !flags.contains(vk::MemoryPropertyFlags::HOST_VISIBLE),
             false,
         ),
-        MemoryLocation::Upload => {
+        MemoryUse::Location(MemoryLocation::Upload) => {
             let large_heap = holds_most_local_memory(properties, memory_type.heap_index);
             // Best: device-local in a large heap. Then system memory. Last,
             // a small BAR window.
             (device_local && large_heap, !device_local)
         }
-        MemoryLocation::Readback => (
+        MemoryUse::Location(MemoryLocation::Readback) => (
             flags.contains(vk::MemoryPropertyFlags::HOST_CACHED),
             flags.contains(vk::MemoryPropertyFlags::HOST_COHERENT),
         ),
+        MemoryUse::DescriptorHeap => (device_local, false),
     }
 }
 
@@ -211,7 +247,9 @@ mod tests {
 
     /// The type chosen for each location, as `(device, upload, readback)`.
     fn choices(properties: &vk::PhysicalDeviceMemoryProperties) -> (u32, u32, u32) {
-        let choose = |location| choose(properties, ALL, location).unwrap();
+        let choose = |location: MemoryLocation| {
+            choose_memory_type_index(properties, ALL, location.into()).unwrap()
+        };
         (
             choose(MemoryLocation::Device),
             choose(MemoryLocation::Upload),
@@ -252,15 +290,15 @@ mod tests {
         let properties = discrete_without_rebar();
         let without = |index: u32| ALL & !(1 << index);
         assert_eq!(
-            choose(&properties, without(1), MemoryLocation::Device),
+            choose_memory_type_index(&properties, without(1), MemoryLocation::Device.into()),
             Some(4)
         );
         assert_eq!(
-            choose(&properties, without(2), MemoryLocation::Upload),
+            choose_memory_type_index(&properties, without(2), MemoryLocation::Upload.into()),
             Some(3)
         );
         assert_eq!(
-            choose(&properties, without(3), MemoryLocation::Readback),
+            choose_memory_type_index(&properties, without(3), MemoryLocation::Readback.into()),
             Some(2)
         );
     }
@@ -270,7 +308,10 @@ mod tests {
     #[test]
     fn a_small_bar_window_is_the_last_resort_for_uploads() {
         let properties = discrete_without_rebar();
-        assert_eq!(choose(&properties, 1 << 4, MemoryLocation::Upload), Some(4));
+        assert_eq!(
+            choose_memory_type_index(&properties, 1 << 4, MemoryLocation::Upload.into()),
+            Some(4)
+        );
     }
 
     /// A readback type that's cached but not coherent is preferred to one
@@ -284,14 +325,20 @@ mod tests {
                 (HOST_VISIBLE | HOST_CACHED, 0),
             ],
         );
-        assert_eq!(choose(&properties, ALL, MemoryLocation::Readback), Some(1));
+        assert_eq!(
+            choose_memory_type_index(&properties, ALL, MemoryLocation::Readback.into()),
+            Some(1)
+        );
     }
 
     /// Ties go to the driver's first type.
     #[test]
     fn ties_keep_the_drivers_order() {
         let properties = properties(&[(GIB, true)], &[(DEVICE_LOCAL, 0), (DEVICE_LOCAL, 0)]);
-        assert_eq!(choose(&properties, ALL, MemoryLocation::Device), Some(0));
+        assert_eq!(
+            choose_memory_type_index(&properties, ALL, MemoryLocation::Device.into()),
+            Some(0)
+        );
     }
 
     /// Protected, lazily allocated and AMD device-coherent types are never
@@ -309,7 +356,7 @@ mod tests {
                 &[(DEVICE_LOCAL | excluded, 0), (DEVICE_LOCAL, 0)],
             );
             assert_eq!(
-                choose(&properties, ALL, MemoryLocation::Device),
+                choose_memory_type_index(&properties, ALL, MemoryLocation::Device.into()),
                 Some(1),
                 "{excluded:?}"
             );
@@ -320,8 +367,44 @@ mod tests {
     #[test]
     fn no_qualifying_type_is_none() {
         let properties = properties(&[(GIB, true)], &[(DEVICE_LOCAL, 0)]);
-        assert_eq!(choose(&properties, ALL, MemoryLocation::Upload), None);
-        assert_eq!(choose(&properties, 0, MemoryLocation::Device), None);
+        assert_eq!(
+            choose_memory_type_index(&properties, ALL, MemoryLocation::Upload.into()),
+            None
+        );
+        assert_eq!(
+            choose_memory_type_index(&properties, 0, MemoryLocation::Device.into()),
+            None
+        );
+    }
+
+    /// The descriptor heaps go in device-local memory the CPU can write on
+    /// every kind of device, even a small BAR window, which uploads avoid.
+    #[test]
+    fn descriptor_heaps_are_device_local() {
+        let choose =
+            |properties| choose_memory_type_index(&properties, ALL, MemoryUse::DescriptorHeap);
+        assert_eq!(choose(discrete_without_rebar()), Some(4));
+        assert_eq!(choose(discrete_with_rebar()), Some(4));
+        assert_eq!(choose(integrated()), Some(1));
+        assert_eq!(choose(lavapipe()), Some(0));
+    }
+
+    /// A device with no device-local memory the CPU can write puts the
+    /// descriptor heaps in coherent system memory instead.
+    #[test]
+    fn descriptor_heaps_fall_back_to_system_memory() {
+        let properties = properties(
+            &[(24 * GIB, true), (64 * GIB, false)],
+            &[
+                (DEVICE_LOCAL, 0),
+                (HOST_VISIBLE | HOST_CACHED, 1),
+                (HOST_VISIBLE | HOST_COHERENT, 1),
+            ],
+        );
+        assert_eq!(
+            choose_memory_type_index(&properties, ALL, MemoryUse::DescriptorHeap),
+            Some(2)
+        );
     }
 
     /// A heap counts as most of the local memory from half of it up.
