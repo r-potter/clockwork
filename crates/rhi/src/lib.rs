@@ -282,29 +282,30 @@ pub enum MemoryLocation {
     Readback,
 }
 
-/// The GPU device, shared by every thread that creates resources, translates
-/// commands or submits work (design 0002, "Architecture").
+/// The GPU's resources, shared by every thread that creates, fills or
+/// destroys them (design 0002, "Architecture").
 ///
-/// Obtained from [`RenderHardwareInterface::device`], and shared as an
-/// `Arc<dyn Device>`. Every method may be called from any thread. The device
-/// lives as long as its last `Arc`, which may be after the
-/// [`RenderHardwareInterface`] it came from is dropped.
+/// Obtained from [`RenderHardwareInterface::resources`], and shared as an
+/// `Arc<dyn GpuResources>`. Every method may be called from any thread. The
+/// resources live as long as their last `Arc`, which may be after the
+/// [`RenderHardwareInterface`] they came from is dropped.
 ///
 /// Used as a trait object, so it must stay object-safe, as
 /// [`RenderHardwareInterface`] describes. Methods are added with the code
 /// that implements them.
-pub trait Device: Debug + Send + Sync {
-    /// The selected device's optional features and limits.
+pub trait GpuResources: Debug + Send + Sync {
+    /// The device's name, and its optional features and limits for resources
+    /// and shaders.
     fn capabilities(&self) -> &Capabilities;
 }
 
-// The device is shared between threads, as an `Arc<dyn Device>` (design
-// 0002, "Threading", R15).
+// The resources are shared between threads, as an `Arc<dyn GpuResources>`
+// (design 0002, "Threading", R15).
 const _: () = {
     /// Compiles only for types that are `Send` and `Sync`.
     const fn assert_send_sync<T: Send + Sync + ?Sized>() {}
-    assert_send_sync::<dyn Device>();
-    assert_send_sync::<Arc<dyn Device>>();
+    assert_send_sync::<dyn GpuResources>();
+    assert_send_sync::<Arc<dyn GpuResources>>();
 };
 
 /// Operations every graphics API backend must provide.
@@ -315,13 +316,13 @@ const _: () = {
 /// opaque handles rather than as backend-specific associated types.
 ///
 /// A backend stays on the thread that created it, since it owns the window's
-/// surface and swapchain. What other threads need is its [`Device`].
+/// surface and swapchain. What other threads need is its [`GpuResources`].
 pub trait RenderHardwareInterface: Debug {
     /// Returns the graphics API this backend implements.
     fn api(&self) -> GraphicsApi;
 
-    /// The device, to share with other threads.
-    fn device(&self) -> &Arc<dyn Device>;
+    /// The GPU resources, to share with other threads.
+    fn resources(&self) -> &Arc<dyn GpuResources>;
 
     /// Returns whether this backend was created without a window.
     ///

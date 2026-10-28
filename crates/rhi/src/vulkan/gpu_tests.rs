@@ -195,7 +195,7 @@ fn sync_hazards_are_reported() {
 fn capabilities_describe_the_selected_device() {
     let session = TestSession::new();
     let backend = VulkanTestBackend::headless(&session);
-    let capabilities = backend.device().capabilities();
+    let capabilities = backend.resources().capabilities();
     assert_eq!(
         capabilities.device_name,
         backend.core.physical_device.name()

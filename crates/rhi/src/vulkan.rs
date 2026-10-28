@@ -40,7 +40,7 @@ use raw_window_handle::RawDisplayHandle;
 use tracing::{info, warn};
 
 use super::{
-    BackendOptions, Capabilities, Device, GraphicsApi, RenderHardwareInterface, WindowSize,
+    BackendOptions, Capabilities, GpuResources, GraphicsApi, RenderHardwareInterface, WindowSize,
     WindowTarget,
 };
 use device::LogicalDevice;
@@ -69,7 +69,7 @@ const CLEAR_COLOUR: [f32; 4] = [0.02, 0.05, 0.1, 1.0];
 /// window surface and swapchain. Also owns, until design 0002 moves them
 /// out, the resources for frames in flight and the triangle's shader
 /// objects. Everything else is in the shared [`VulkanDevice`], which it
-/// hands out as the [`Device`].
+/// hands out as the [`GpuResources`].
 ///
 /// Fields are dropped in declaration order, so each is declared before the
 /// objects it was created from, and the core, with the instance, last.
@@ -93,26 +93,26 @@ pub(crate) struct VulkanRenderHardwareInterface {
     swapchain: Option<Swapchain>,
     /// `None` when headless, or while suspended.
     surface: Option<Surface>,
-    /// `core`, as the device the application shares between threads.
-    device: Arc<dyn Device>,
+    /// `core`, as the resources the application shares between threads.
+    resources: Arc<dyn GpuResources>,
     /// The instance and devices. Declared last so that this backend's
     /// reference to it is dropped last, after every object created from it.
-    /// Holders of `device` may keep it alive longer.
+    /// Holders of `resources` may keep it alive longer.
     core: Arc<VulkanDevice>,
 }
 
 /// The Vulkan backend's shared core (design 0002, "Ownership and
 /// lifetimes"): the instance, the selected device and the logical device.
-/// The [`VulkanRenderHardwareInterface`] and every holder of its [`Device`]
-/// share it.
+/// The [`VulkanRenderHardwareInterface`] and every holder of its
+/// [`GpuResources`] share it.
 ///
 /// It's destroyed with its last `Arc`, on whichever thread drops it. Fields
 /// are dropped in declaration order, so each is declared before the objects
 /// it was created from.
 ///
 /// Its queues aren't locked yet, so only the owner thread submits to them,
-/// through the [`VulkanRenderHardwareInterface`]. Submitting through the
-/// `Device` comes with the locks it needs, in `rhi-commands`.
+/// through the [`VulkanRenderHardwareInterface`]. Submitting through a
+/// `Queue` comes with the locks it needs, in `rhi-commands`.
 pub(crate) struct VulkanDevice {
     /// The logical device, and its queues, created on `physical_device`.
     device: LogicalDevice,
@@ -221,7 +221,7 @@ impl VulkanRenderHardwareInterface {
             triangle_shaders,
             swapchain: None,
             surface,
-            device: core.clone(),
+            resources: core.clone(),
             core,
         };
         if let Some(size) = window_size {
@@ -641,7 +641,7 @@ impl fmt::Debug for VulkanDevice {
     }
 }
 
-impl Device for VulkanDevice {
+impl GpuResources for VulkanDevice {
     fn capabilities(&self) -> &Capabilities {
         &self.capabilities
     }
@@ -653,8 +653,8 @@ impl RenderHardwareInterface for VulkanRenderHardwareInterface {
         GraphicsApi::Vulkan
     }
 
-    fn device(&self) -> &Arc<dyn Device> {
-        &self.device
+    fn resources(&self) -> &Arc<dyn GpuResources> {
+        &self.resources
     }
 
     fn is_headless(&self) -> bool {

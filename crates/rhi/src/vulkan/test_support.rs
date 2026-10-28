@@ -111,7 +111,7 @@ impl VulkanTestBackend {
     ///
     /// Panics if the device lacks `capability` and it's required.
     pub(crate) fn has(&self, capability: Capability) -> bool {
-        let capabilities = self.rhi.device().capabilities();
+        let capabilities = self.rhi.resources().capabilities();
         let supported = capability.is_in(capabilities);
         if !supported {
             test_support::missing_capability(
