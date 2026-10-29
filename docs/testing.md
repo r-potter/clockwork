@@ -350,7 +350,9 @@ session.expect(Level::ERROR, VALIDATION_TARGET, |event| {
 });
 ```
 
-Synchronization validation doesn't see copies and fills by address (`VK_KHR_device_address_commands`), which is how the RHI copies and fills buffers. A missing barrier between them isn't reported, so a test that copies or fills a buffer still records the barriers the RHI's users would, and checks the result, such as `buffer_round_trip` in `crates/rhi/src/vulkan/translate/gpu_tests.rs`. Hazards on textures are reported as usual.
+Synchronization validation doesn't see copies and fills by address (`VK_KHR_device_address_commands`), which is how the RHI copies and fills, on either the buffer side or the texture side. A missing barrier between them isn't reported, so a test that copies or fills still records the barriers the RHI's users would, and checks the result, such as `buffer_round_trip` in `crates/rhi/src/vulkan/translate/gpu_tests.rs`.
+
+A test that a driver bug breaks on one vendor's drivers skips there with `test_support::skip_for_driver_bug`, which prints a banner like a missing capability's, and names the bug, which `TODO.md` tracks. `padded_rows_round_trip` skips on NVIDIA's drivers this way.
 
 A false positive is suppressed by its ID, with a reason and an upstream issue (see "Rules" above). Best-practices messages (IDs beginning `BestPractices-`) are only logged, never counted. The Vulkan loader's own messages come through the same messenger, so they're on `clockwork::validation` too, with the ID `Loader Message`, which identifies none of them: suppress those by prefix.
 
