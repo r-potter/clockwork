@@ -28,15 +28,15 @@ pub(super) struct LogicalDevice {
     debug_utils: Option<ext::debug_utils::Device>,
     /// The families the queues below were created from.
     queue_families: QueueFamilies,
-    /// The queue rendering work is submitted to.
-    graphics_queue: vk::Queue,
-    /// `None` when headless.
-    present_queue: Option<vk::Queue>,
+    /// One queue from each distinct family in `queue_families`, with its
+    /// family. They're used through [`Queues`](super::queues::Queues), which
+    /// locks them.
+    queues: Vec<(u32, vk::Queue)>,
 }
 
 impl LogicalDevice {
     /// Creates a logical device on `physical_device`, with one queue from each
-    /// of `queue_families`.
+    /// distinct family in `queue_families`.
     ///
     /// Enables the extensions and features device selection requires:
     /// - `VK_EXT_shader_object`, `VK_EXT_descriptor_heap` and
@@ -62,14 +62,16 @@ impl LogicalDevice {
         queue_families: QueueFamilies,
         debug_utils: bool,
     ) -> Result<Self> {
-        // Vulkan forbids requesting the same family twice, so request the
-        // present family separately only if it differs from the graphics one.
-        let mut families = vec![queue_families.graphics];
-        if let Some(present) = queue_families.present
-            && present != queue_families.graphics
-        {
-            families.push(present);
-        }
+        // Vulkan forbids requesting the same family twice, so request each
+        // family once, however many kinds use it.
+        let mut families = vec![
+            queue_families.graphics,
+            queue_families.compute,
+            queue_families.transfer,
+        ];
+        families.extend(queue_families.present);
+        families.sort_unstable();
+        families.dedup();
         let priorities = [1.0];
         let queue_create_infos: Vec<_> = families
             .iter()
@@ -130,12 +132,11 @@ impl LogicalDevice {
         let device = unsafe { instance.create_device(physical_device.handle, &create_info, None) }
             .context("failed to create Vulkan logical device")?;
 
-        // SAFETY: One queue was requested from each of these families.
-        let graphics_queue = unsafe { device.get_device_queue(queue_families.graphics, 0) };
-        let present_queue = queue_families
-            .present
-            // SAFETY: as above.
-            .map(|family| unsafe { device.get_device_queue(family, 0) });
+        let queues = families
+            .into_iter()
+            // SAFETY: One queue was requested from each of these families.
+            .map(|family| (family, unsafe { device.get_device_queue(family, 0) }))
+            .collect();
 
         Ok(Self {
             shader_object: ext::shader_object::Device::load(instance, &device),
@@ -143,8 +144,7 @@ impl LogicalDevice {
             debug_utils: debug_utils.then(|| ext::debug_utils::Device::load(instance, &device)),
             device,
             queue_families,
-            graphics_queue,
-            present_queue,
+            queues,
         })
     }
 
@@ -195,15 +195,17 @@ impl LogicalDevice {
         self.queue_families
     }
 
-    /// The queue to submit rendering work to.
-    pub(super) fn graphics_queue(&self) -> vk::Queue {
-        self.graphics_queue
-    }
-
-    /// The queue to present swapchain images on, or `None` when headless.
-    /// May be the same queue as [`graphics_queue`](Self::graphics_queue).
-    pub(super) fn present_queue(&self) -> Option<vk::Queue> {
-        self.present_queue
+    /// The queue created from `family`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if no queue was created from `family`.
+    pub(super) fn queue(&self, family: u32) -> vk::Queue {
+        self.queues
+            .iter()
+            .find(|&&(queue_family, _)| queue_family == family)
+            .map(|&(_, queue)| queue)
+            .unwrap_or_else(|| panic!("no queue was created from family {family}"))
     }
 }
 

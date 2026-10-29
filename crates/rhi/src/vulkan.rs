@@ -24,6 +24,7 @@ mod frames;
 mod gpu_tests;
 mod memory;
 mod physical_device;
+mod queues;
 mod samplers;
 mod shaders;
 mod surface;
@@ -45,8 +46,8 @@ use tracing::{info, warn};
 
 use super::{
     BackendOptions, Buffer, BufferDesc, Capabilities, DescriptorIndex, GpuAddress, GpuResources,
-    GraphicsApi, PresentCapabilities, RenderHardwareInterface, RhiResult, Sampler, SamplerDesc,
-    Texture, TextureDesc, WindowSize, WindowTarget,
+    GraphicsApi, PresentCapabilities, QueueKind, RenderHardwareInterface, RhiResult, Sampler,
+    SamplerDesc, Texture, TextureDesc, WindowSize, WindowTarget,
 };
 use crate::handle::HandleTable;
 use buffers::BufferEntry;
@@ -56,6 +57,7 @@ use device_selection::{Candidate, Selection};
 use frames::Frames;
 use memory::MemoryAllocator;
 use physical_device::PhysicalDevice;
+use queues::Queues;
 use samplers::SamplerEntry;
 use shaders::TriangleShaders;
 use surface::Surface;
@@ -116,7 +118,7 @@ pub(crate) struct VulkanRenderHardwareInterface {
 
 /// The Vulkan backend's shared core (design 0002, "Ownership and
 /// lifetimes"): the instance, the selected device and the logical device,
-/// the memory allocator, and the resource tables. The
+/// its queues, the memory allocator, and the resource tables. The
 /// [`VulkanRenderHardwareInterface`] and every holder of its
 /// [`GpuResources`] share it.
 ///
@@ -125,9 +127,9 @@ pub(crate) struct VulkanRenderHardwareInterface {
 /// tables, then drops its fields in declaration order, so each is declared
 /// before the objects it was created from.
 ///
-/// Its queues aren't locked yet, so only the owner thread submits to them,
-/// through the [`VulkanRenderHardwareInterface`]. Submitting through a
-/// `Queue` comes with the locks it needs, in `rhi-commands`.
+/// Its queues are locked for each use, so any thread can submit to them.
+/// Only the owner thread does so far, through the
+/// [`VulkanRenderHardwareInterface`], until the next PR adds `Queue`.
 pub(crate) struct VulkanDevice {
     /// Every live buffer.
     buffers: RwLock<HandleTable<BufferEntry>>,
@@ -138,6 +140,8 @@ pub(crate) struct VulkanDevice {
     /// The resource and sampler heaps. Destroyed in `drop`, after the
     /// tables, so that no entry's slot outlives its heap.
     heaps: DescriptorHeaps,
+    /// The device's queues, with their locks.
+    queues: Queues,
     /// Allocates memory for resources on `device`.
     allocator: MemoryAllocator,
     /// The logical device, and its queues, created on `physical_device`.
@@ -249,11 +253,13 @@ impl VulkanRenderHardwareInterface {
             &allocator,
             &physical_device.properties.descriptor_heap,
         )?;
+        let queues = Queues::new(&device);
         let core = Arc::new(VulkanDevice {
             buffers: RwLock::new(HandleTable::new("buffer")),
             textures: RwLock::new(HandleTable::new("texture")),
             samplers: RwLock::new(HandleTable::new("sampler")),
             heaps,
+            queues,
             allocator,
             device,
             physical_device,
@@ -316,11 +322,6 @@ impl VulkanRenderHardwareInterface {
     fn draw_frame(&self, swapchain: &Swapchain) -> Result<bool> {
         let device = self.core.device.handle();
         let frame = self.frames.current();
-        let present_queue = self
-            .core
-            .device
-            .present_queue()
-            .context("a windowed Vulkan backend has no present queue")?;
 
         // Every handle used below was created on `device`, or by `swapchain`
         // on `device`, and each info structure is valid for the duration of
@@ -392,22 +393,33 @@ impl VulkanRenderHardwareInterface {
             .wait_semaphore_infos(slice::from_ref(&wait))
             .command_buffer_infos(slice::from_ref(&command_buffer_info))
             .signal_semaphore_infos(slice::from_ref(&signal));
-        // SAFETY: the graphics queue, semaphores, command buffer and fence
-        // were all created on `device`, the command buffer has ended, the
-        // fence is unsignalled, and the info structures outlive the call.
-        unsafe {
-            device.queue_submit2(
-                self.core.device.graphics_queue(),
-                slice::from_ref(&submit_info),
-                frame.in_flight,
-            )
+        {
+            let graphics_queue = self.core.queues.lock(QueueKind::Graphics);
+            // SAFETY: the graphics queue, semaphores, command buffer and
+            // fence were all created on `device`, the queue is locked, the
+            // command buffer has ended, the fence is unsignalled, and the
+            // info structures outlive the call.
+            unsafe {
+                device.queue_submit2(
+                    *graphics_queue,
+                    slice::from_ref(&submit_info),
+                    frame.in_flight,
+                )
+            }
+            .context("failed to submit Vulkan frame")?;
         }
-        .context("failed to submit Vulkan frame")?;
 
-        // SAFETY: the present queue was created on `device`, and its family
-        // can present to the surface, as checked by device selection and on
-        // resume. `image_index` was acquired above.
-        match unsafe { swapchain.present(present_queue, image_index) } {
+        // The present queue may be the graphics queue, so that one is
+        // unlocked first.
+        let present_queue = self
+            .core
+            .queues
+            .lock_present()
+            .context("a windowed Vulkan backend has no present queue")?;
+        // SAFETY: the present queue was created on `device`, is locked, and
+        // its family can present to the surface, as checked by device
+        // selection and on resume. `image_index` was acquired above.
+        match unsafe { swapchain.present(*present_queue, image_index) } {
             Ok(suboptimal) => out_of_date |= suboptimal,
             Err(vk::Result::ERROR_OUT_OF_DATE_KHR) => out_of_date = true,
             Err(err) => return Err(err).context("failed to present Vulkan swapchain image"),

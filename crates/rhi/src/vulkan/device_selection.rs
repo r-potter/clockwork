@@ -23,7 +23,7 @@ use super::capabilities;
 use super::descriptor_heaps::HeapLayout;
 use super::physical_device::PhysicalDevice;
 use super::surface::SurfaceSupport;
-use crate::{Capabilities, MAX_PUSH_DATA_SIZE, PresentCapabilities};
+use crate::{Capabilities, MAX_PUSH_DATA_SIZE, PresentCapabilities, QueueKind};
 
 /// A device being considered for selection.
 pub(super) struct Candidate {
@@ -48,14 +48,43 @@ pub(super) struct Selection {
     pub present_capabilities: PresentCapabilities,
 }
 
-/// Indices of the queue families to use on a device.
+/// Indices of the queue families to use on a device, for each queue kind
+/// and for presenting (design 0002, "Queues and submission").
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct QueueFamilies {
     /// Supports graphics operations.
     pub graphics: u32,
+    /// Compute work: a dedicated compute family if the device has one, and
+    /// `graphics` otherwise.
+    pub compute: u32,
+    /// Transfers: a dedicated transfer family if the device has one, then
+    /// `compute`.
+    pub transfer: u32,
     /// Can present to the window's surface. `None` when headless. May be the
     /// same family as `graphics`.
     pub present: Option<u32>,
+}
+
+impl QueueFamilies {
+    /// The family `kind`'s work is submitted to.
+    pub(super) fn family(self, kind: QueueKind) -> u32 {
+        match kind {
+            QueueKind::Graphics => self.graphics,
+            QueueKind::Compute => self.compute,
+            QueueKind::Transfer => self.transfer,
+        }
+    }
+
+    /// The kind whose queue `kind`'s work is submitted to: `kind` itself if
+    /// its family is dedicated, and otherwise the most capable kind it
+    /// shares a family with, which is what `Queue::kind` reports.
+    pub(super) fn serving_kind(self, kind: QueueKind) -> QueueKind {
+        let family = self.family(kind);
+        QueueKind::ALL
+            .into_iter()
+            .find(|&other| self.family(other) == family)
+            .expect("`kind` shares its own family")
+    }
 }
 
 /// The push data, in bytes, that each draw or dispatch can carry (design
@@ -308,45 +337,50 @@ fn device_type_rank(device_type: vk::PhysicalDeviceType) -> u8 {
 ///
 /// Prefers a single family that supports both graphics and presenting, so
 /// that swapchain images do not need to be shared between queue families.
-/// Otherwise uses the first family that supports each.
+/// Otherwise uses the first family that supports each. Compute and transfer
+/// work use dedicated families where the device has them (see
+/// [`QueueFamilies`]).
 ///
 /// # Panics
 ///
 /// Panics if `candidate` does not meet the requirements.
 fn queue_families(candidate: &Candidate) -> QueueFamilies {
-    let Some(support) = &candidate.surface_support else {
-        let graphics = graphics_families(&candidate.device).next();
-        return QueueFamilies {
-            graphics: graphics.expect("requirements guarantee a graphics queue family"),
-            present: None,
-        };
+    let (graphics, present) = match &candidate.surface_support {
+        None => (graphics_families(&candidate.device).next(), None),
+        Some(support) => {
+            let can_present = |family: &u32| support.present_families[*family as usize];
+            let (graphics, present) = match graphics_families(&candidate.device).find(can_present) {
+                Some(family) => (Some(family), Some(family)),
+                None => (
+                    graphics_families(&candidate.device).next(),
+                    (0..support.present_families.len() as u32).find(can_present),
+                ),
+            };
+            let present = present.expect("requirements guarantee a present queue family");
+            (graphics, Some(present))
+        }
     };
-
-    let can_present = |family: &u32| support.present_families[*family as usize];
-    let (graphics, present) = match graphics_families(&candidate.device).find(can_present) {
-        Some(family) => (Some(family), Some(family)),
-        None => (
-            graphics_families(&candidate.device).next(),
-            (0..support.present_families.len() as u32).find(can_present),
-        ),
-    };
+    let graphics = graphics.expect("requirements guarantee a graphics queue family");
+    let compute = dedicated_compute_family(&candidate.device).unwrap_or(graphics);
     QueueFamilies {
-        graphics: graphics.expect("requirements guarantee a graphics queue family"),
-        present: Some(present.expect("requirements guarantee a present queue family")),
+        graphics,
+        compute,
+        transfer: dedicated_transfer_family(&candidate.device).unwrap_or(compute),
+        present,
     }
 }
 
 /// The first of `device`'s queue families that supports compute but not
 /// graphics, or `None` if it has none, when compute work shares the graphics
 /// family (design 0002, "Queues and submission").
-pub(super) fn dedicated_compute_family(device: &PhysicalDevice) -> Option<u32> {
+fn dedicated_compute_family(device: &PhysicalDevice) -> Option<u32> {
     first_family(device, vk::QueueFlags::COMPUTE, vk::QueueFlags::GRAPHICS)
 }
 
 /// The first of `device`'s queue families that supports transfers but
 /// neither graphics nor compute, or `None` if it has none, when transfers
 /// share a more capable family (design 0002, "Queues and submission").
-pub(super) fn dedicated_transfer_family(device: &PhysicalDevice) -> Option<u32> {
+fn dedicated_transfer_family(device: &PhysicalDevice) -> Option<u32> {
     first_family(
         device,
         vk::QueueFlags::TRANSFER,
@@ -782,6 +816,8 @@ mod tests {
             selection.queue_families,
             QueueFamilies {
                 graphics: 0,
+                compute: 0,
+                transfer: 0,
                 present: None,
             },
         );
@@ -859,6 +895,8 @@ mod tests {
             selection.queue_families,
             QueueFamilies {
                 graphics: 1,
+                compute: 1,
+                transfer: 1,
                 present: Some(1),
             },
         );
@@ -877,6 +915,8 @@ mod tests {
             selection.queue_families,
             QueueFamilies {
                 graphics: 0,
+                compute: 1,
+                transfer: 1,
                 present: Some(1),
             },
         );
@@ -947,20 +987,79 @@ mod tests {
         );
     }
 
-    /// Dedicated compute and transfer families are found by their flags,
-    /// and a family that also supports graphics or compute isn't dedicated.
-    #[test]
-    fn finds_dedicated_families() {
-        let device = device("device", vk::PhysicalDeviceType::DISCRETE_GPU, 8 * GIB);
-        assert_eq!(dedicated_compute_family(&device), None);
-        assert_eq!(dedicated_transfer_family(&device), None);
+    /// The families chosen for headless selection of `device`.
+    fn families(device: PhysicalDevice) -> QueueFamilies {
+        select(headless(vec![device]), None).unwrap().queue_families
+    }
 
+    /// With one family, every kind shares it, and is served by the graphics
+    /// queue.
+    #[test]
+    fn a_single_family_serves_every_kind() {
+        let families = families(device(
+            "device",
+            vk::PhysicalDeviceType::DISCRETE_GPU,
+            8 * GIB,
+        ));
+        assert_eq!((families.compute, families.transfer), (0, 0));
+        for kind in QueueKind::ALL {
+            assert_eq!(families.serving_kind(kind), QueueKind::Graphics, "{kind:?}");
+        }
+    }
+
+    /// Dedicated compute and transfer families are found by their flags,
+    /// and each kind is served by its own queue. A family that also
+    /// supports graphics or compute isn't dedicated.
+    #[test]
+    fn dedicated_families_serve_their_own_kinds() {
         let device = with_family(
-            with_family(device, vk::QueueFlags::COMPUTE | vk::QueueFlags::TRANSFER),
+            with_family(
+                device("device", vk::PhysicalDeviceType::DISCRETE_GPU, 8 * GIB),
+                vk::QueueFlags::COMPUTE | vk::QueueFlags::TRANSFER,
+            ),
             vk::QueueFlags::TRANSFER,
         );
-        assert_eq!(dedicated_compute_family(&device), Some(1));
-        assert_eq!(dedicated_transfer_family(&device), Some(2));
+        let families = families(device);
+        assert_eq!((families.compute, families.transfer), (1, 2));
+        for kind in QueueKind::ALL {
+            assert_eq!(families.serving_kind(kind), kind, "{kind:?}");
+        }
+    }
+
+    /// Without a dedicated transfer family, transfers share the dedicated
+    /// compute family, and are served by the compute queue.
+    #[test]
+    fn transfers_fall_back_to_the_compute_family() {
+        let device = with_family(
+            device("device", vk::PhysicalDeviceType::DISCRETE_GPU, 8 * GIB),
+            vk::QueueFlags::COMPUTE,
+        );
+        let families = families(device);
+        assert_eq!((families.compute, families.transfer), (1, 1));
+        assert_eq!(
+            families.serving_kind(QueueKind::Transfer),
+            QueueKind::Compute
+        );
+    }
+
+    /// Without a dedicated compute family, a dedicated transfer family is
+    /// still used, and compute work shares the graphics queue.
+    #[test]
+    fn a_transfer_family_is_used_without_a_compute_family() {
+        let device = with_family(
+            device("device", vk::PhysicalDeviceType::DISCRETE_GPU, 8 * GIB),
+            vk::QueueFlags::TRANSFER,
+        );
+        let families = families(device);
+        assert_eq!((families.compute, families.transfer), (0, 1));
+        assert_eq!(
+            families.serving_kind(QueueKind::Compute),
+            QueueKind::Graphics
+        );
+        assert_eq!(
+            families.serving_kind(QueueKind::Transfer),
+            QueueKind::Transfer
+        );
     }
 
     /// The selection carries the device's capabilities, for its queue

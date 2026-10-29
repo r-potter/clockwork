@@ -16,7 +16,7 @@ pub const MAX_PUSH_DATA_SIZE: u32 = 128;
 
 /// A kind of queue that work is submitted to (design 0002, "Queues and
 /// submission").
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum QueueKind {
     /// Rendering, and anything else. Every device has one.
     Graphics,
@@ -26,6 +26,20 @@ pub enum QueueKind {
     /// Transfers only, on a dedicated queue where the device has one, and
     /// otherwise sharing a more capable queue.
     Transfer,
+}
+
+impl QueueKind {
+    /// Every kind, from the most capable to the least.
+    pub const ALL: [Self; 3] = [Self::Graphics, Self::Compute, Self::Transfer];
+
+    /// The kind's name, in messages and debug tools.
+    pub(crate) const fn name(self) -> &'static str {
+        match self {
+            Self::Graphics => "graphics",
+            Self::Compute => "compute",
+            Self::Transfer => "transfer",
+        }
+    }
 }
 
 /// A set of [`QueueKind`]s.
