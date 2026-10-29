@@ -49,22 +49,22 @@ pub(super) struct BufferEntry {
     mapping: Mutex<()>,
 }
 
-/// The Vulkan usage flags for a buffer used as `usage`. Every buffer can be
-/// copied to and from, and has a device address.
-pub(super) fn usage_flags(usage: BufferUsage) -> vk::BufferUsageFlags {
-    let mut flags = vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS
-        | vk::BufferUsageFlags::TRANSFER_SRC
-        | vk::BufferUsageFlags::TRANSFER_DST;
-    for (part, part_flags) in [
-        (BufferUsage::STORAGE, vk::BufferUsageFlags::STORAGE_BUFFER),
-        (BufferUsage::INDEX, vk::BufferUsageFlags::INDEX_BUFFER),
-        (BufferUsage::INDIRECT, vk::BufferUsageFlags::INDIRECT_BUFFER),
-    ] {
-        if usage.contains(part) {
-            flags |= part_flags;
+impl From<BufferUsage> for vk::BufferUsageFlags {
+    /// The Vulkan usage flags for a buffer used as `usage`. Every buffer can
+    /// be copied to and from, and has a device address.
+    fn from(usage: BufferUsage) -> Self {
+        let mut flags = Self::SHADER_DEVICE_ADDRESS | Self::TRANSFER_SRC | Self::TRANSFER_DST;
+        for (part, part_flags) in [
+            (BufferUsage::STORAGE, Self::STORAGE_BUFFER),
+            (BufferUsage::INDEX, Self::INDEX_BUFFER),
+            (BufferUsage::INDIRECT, Self::INDIRECT_BUFFER),
+        ] {
+            if usage.contains(part) {
+                flags |= part_flags;
+            }
         }
+        flags
     }
-    flags
 }
 
 impl VulkanDevice {
@@ -85,7 +85,7 @@ impl VulkanDevice {
         let device = self.device.handle();
         let buffer_create_info = vk::BufferCreateInfo::default()
             .size(desc.size)
-            .usage(usage_flags(desc.usage))
+            .usage(vk::BufferUsageFlags::from(desc.usage))
             .sharing_mode(vk::SharingMode::EXCLUSIVE);
         // SAFETY: `buffer_create_info` is valid for the call, its size is
         // non-zero, and `bufferDeviceAddress` is enabled (device selection
@@ -339,13 +339,13 @@ mod tests {
         let base = vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS
             | vk::BufferUsageFlags::TRANSFER_SRC
             | vk::BufferUsageFlags::TRANSFER_DST;
-        assert_eq!(usage_flags(BufferUsage::COPIES), base);
+        assert_eq!(vk::BufferUsageFlags::from(BufferUsage::COPIES), base);
         assert_eq!(
-            usage_flags(BufferUsage::STORAGE | BufferUsage::INDEX),
+            vk::BufferUsageFlags::from(BufferUsage::STORAGE | BufferUsage::INDEX),
             base | vk::BufferUsageFlags::STORAGE_BUFFER | vk::BufferUsageFlags::INDEX_BUFFER,
         );
         assert_eq!(
-            usage_flags(BufferUsage::INDIRECT),
+            vk::BufferUsageFlags::from(BufferUsage::INDIRECT),
             base | vk::BufferUsageFlags::INDIRECT_BUFFER,
         );
     }
