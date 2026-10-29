@@ -7,9 +7,17 @@
 //! a device: [`HeapLayout`] places each slot's descriptor and the driver's
 //! reserved range in a heap's buffer, and [`SlotAllocator`] hands out slots
 //! from a free list.
+//!
+//! Each heap's slot allocator is behind a `Mutex`. A slot is written by the
+//! one thread it was handed to, before its index is returned, so writes to
+//! the mapped heap never overlap (design 0002, "Binding model").
 
 #[cfg(test)]
 mod gpu_tests;
+
+use std::ffi::c_void;
+use std::marker::PhantomData;
+use std::sync::{Mutex, MutexGuard, PoisonError};
 
 use anyhow::{Context, Result};
 use ash::vk;
@@ -99,6 +107,8 @@ pub(super) struct DescriptorHeap {
     allocation: Option<MemoryAllocation>,
     /// The buffer's device address, which command buffers bind the heap at.
     address: vk::DeviceAddress,
+    /// Which slots are handed out.
+    slots: Mutex<SlotAllocator>,
 }
 
 impl DescriptorHeap {
@@ -171,23 +181,21 @@ impl DescriptorHeap {
             buffer,
             allocation: Some(allocation),
             address,
+            slots: Mutex::new(SlotAllocator::new(layout.capacity())),
         })
     }
 
     /// The heap's name, in messages and debug tools.
     #[cfg_attr(
         not(test),
-        expect(dead_code, reason = "samplers are written to the heap in a later PR")
+        expect(dead_code, reason = "debug names name the heaps in a later PR")
     )]
     pub(super) fn label(&self) -> &'static str {
         self.label
     }
 
     /// Where each slot's descriptor is in the heap.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "samplers are written to the heap in a later PR")
-    )]
+    #[cfg(test)]
     pub(super) fn layout(&self) -> HeapLayout {
         self.layout
     }
@@ -206,14 +214,64 @@ impl DescriptorHeap {
     /// # Panics
     ///
     /// Panics if the heap has been destroyed.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "samplers are written to the heap in a later PR")
-    )]
     pub(super) fn allocation(&self) -> &MemoryAllocation {
         self.allocation
             .as_ref()
             .unwrap_or_else(|| panic!("the {} is destroyed", self.label))
+    }
+
+    /// Hands out a free slot, or returns `None` if every slot is in use.
+    pub(super) fn allocate_slot(&self) -> Option<u32> {
+        self.lock_slots().allocate()
+    }
+
+    /// Returns `slot` to the heap, to be handed out again.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `slot` isn't in use.
+    pub(super) fn free_slot(&self, slot: u32) {
+        self.lock_slots().free(slot);
+    }
+
+    /// The number of slots in use.
+    #[cfg(test)]
+    pub(super) fn slots_in_use(&self) -> u32 {
+        self.lock_slots().in_use()
+    }
+
+    /// The address range of `slot` in the heap's mapped memory, which holds
+    /// its descriptor, for writing it with `vkWrite*DescriptorsEXT`.
+    ///
+    /// The range is a raw pointer, so this reads and writes nothing. The
+    /// caller writes through it only while it holds the slot, which no other
+    /// thread writes.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `slot` isn't below the capacity, or the heap has been
+    /// destroyed.
+    pub(super) fn slot_address_range(&self, slot: u32) -> vk::HostAddressRangeEXT<'_> {
+        let offset = self.layout.offset(slot);
+        let mapped = self
+            .allocation()
+            .mapped()
+            .unwrap_or_else(|| panic!("the {} isn't mapped", self.label));
+        // SAFETY: The slot is below the capacity, so its descriptor range is
+        // inside the heap's buffer, which is inside its dedicated allocation's
+        // mapped bytes, starting at offset 0.
+        let address = unsafe { mapped.as_ptr().add(offset as usize) };
+        vk::HostAddressRangeEXT {
+            address: address.cast::<c_void>(),
+            size: self.layout.stride() as usize,
+            _marker: PhantomData,
+        }
+    }
+
+    /// Locks the slot allocator, recovering it if a panic poisoned it: no
+    /// allocator operation panics halfway through, so it's consistent.
+    fn lock_slots(&self) -> MutexGuard<'_, SlotAllocator> {
+        self.slots.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
     /// Destroys the heap's buffer, and frees its memory. Does nothing if
@@ -294,10 +352,6 @@ impl HeapLayout {
     }
 
     /// The number of slots.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "the heaps are created on the core in the next PR")
-    )]
     pub(super) fn capacity(&self) -> u32 {
         self.capacity
     }
@@ -307,10 +361,6 @@ impl HeapLayout {
     /// # Panics
     ///
     /// Panics if `slot` isn't below the capacity.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "the heaps are created on the core in the next PR")
-    )]
     pub(super) fn offset(&self, slot: u32) -> vk::DeviceSize {
         assert!(
             slot < self.capacity,
@@ -322,10 +372,6 @@ impl HeapLayout {
 
     /// The size of a slot's descriptor range: the stride, so that writing
     /// one descriptor never reaches the next slot.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "the heaps are created on the core in the next PR")
-    )]
     pub(super) fn stride(&self) -> vk::DeviceSize {
         self.stride
     }
@@ -369,10 +415,6 @@ pub(super) struct SlotAllocator {
     in_use: Vec<u64>,
 }
 
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "the heaps are created on the core in the next PR")
-)]
 impl SlotAllocator {
     /// An allocator for a heap of `capacity` slots, all free.
     pub(super) fn new(capacity: u32) -> Self {
@@ -428,6 +470,7 @@ impl SlotAllocator {
     }
 
     /// The number of slots in use.
+    #[cfg(test)]
     pub(super) fn in_use(&self) -> u32 {
         self.next_unused - self.free.len() as u32
     }

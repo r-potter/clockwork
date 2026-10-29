@@ -14,19 +14,11 @@ pub struct Sampler(Handle);
 
 impl Sampler {
     /// The sampler for `handle`, issued by a backend's sampler table.
-    #[expect(
-        dead_code,
-        reason = "the Vulkan backend creates samplers in the next PR"
-    )]
     pub(crate) fn from_handle(handle: Handle) -> Self {
         Self(handle)
     }
 
     /// The handle into the backend's sampler table.
-    #[expect(
-        dead_code,
-        reason = "the Vulkan backend creates samplers in the next PR"
-    )]
     pub(crate) fn handle(self) -> Handle {
         self.0
     }

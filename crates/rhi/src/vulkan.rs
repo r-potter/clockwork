@@ -44,9 +44,9 @@ use raw_window_handle::RawDisplayHandle;
 use tracing::{info, warn};
 
 use super::{
-    BackendOptions, Buffer, BufferDesc, Capabilities, GpuAddress, GpuResources, GraphicsApi,
-    PresentCapabilities, RenderHardwareInterface, RhiResult, Texture, TextureDesc, WindowSize,
-    WindowTarget,
+    BackendOptions, Buffer, BufferDesc, Capabilities, DescriptorIndex, GpuAddress, GpuResources,
+    GraphicsApi, PresentCapabilities, RenderHardwareInterface, RhiResult, Sampler, SamplerDesc,
+    Texture, TextureDesc, WindowSize, WindowTarget,
 };
 use crate::handle::HandleTable;
 use buffers::BufferEntry;
@@ -56,6 +56,7 @@ use device_selection::{Candidate, Selection};
 use frames::Frames;
 use memory::MemoryAllocator;
 use physical_device::PhysicalDevice;
+use samplers::SamplerEntry;
 use shaders::TriangleShaders;
 use surface::Surface;
 use swapchain::Swapchain;
@@ -132,6 +133,8 @@ pub(crate) struct VulkanDevice {
     buffers: RwLock<HandleTable<BufferEntry>>,
     /// Every live texture.
     textures: RwLock<HandleTable<TextureEntry>>,
+    /// Every live sampler.
+    samplers: RwLock<HandleTable<SamplerEntry>>,
     /// The resource and sampler heaps. Destroyed in `drop`, after the
     /// tables, so that no entry's slot outlives its heap.
     heaps: DescriptorHeaps,
@@ -241,6 +244,7 @@ impl VulkanRenderHardwareInterface {
         let core = Arc::new(VulkanDevice {
             buffers: RwLock::new(HandleTable::new("buffer")),
             textures: RwLock::new(HandleTable::new("texture")),
+            samplers: RwLock::new(HandleTable::new("sampler")),
             heaps,
             allocator,
             device,
@@ -704,6 +708,14 @@ impl Drop for VulkanDevice {
             // SAFETY: As above.
             unsafe { self.free_texture(entry) };
         }
+        let samplers = self
+            .samplers
+            .get_mut()
+            .unwrap_or_else(PoisonError::into_inner)
+            .drain();
+        for (_, entry) in samplers {
+            self.free_sampler(entry);
+        }
         // SAFETY: The heaps were created on this device, with memory from
         // this allocator, and the device is idle.
         unsafe { self.heaps.destroy(self.device.handle(), &self.allocator) };
@@ -741,6 +753,18 @@ impl GpuResources for VulkanDevice {
 
     fn destroy_texture(&self, texture: Texture) {
         self.destroy_texture_entry(texture);
+    }
+
+    fn create_sampler(&self, desc: &SamplerDesc<'_>) -> RhiResult<Sampler> {
+        self.create_sampler_entry(desc)
+    }
+
+    fn destroy_sampler(&self, sampler: Sampler) {
+        self.destroy_sampler_entry(sampler);
+    }
+
+    fn sampler_index(&self, sampler: Sampler) -> DescriptorIndex {
+        self.sampler_entry_index(sampler)
     }
 }
 

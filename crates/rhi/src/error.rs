@@ -9,6 +9,8 @@
 use std::error::Error;
 use std::fmt;
 
+use crate::HeapKind;
+
 /// A failure of an RHI call that the caller may handle.
 ///
 /// `?` turns it into an [`anyhow::Error`] in application code, since it
@@ -19,6 +21,15 @@ pub enum RhiError {
     /// evict resources and try again, or load a lower mip level.
     OutOfDeviceMemory {
         /// The label of the object being created.
+        label: String,
+    },
+    /// The heap has no free slot for the named texture view or sampler. The
+    /// caller can free views or samplers, or report that the scene needs a
+    /// bigger heap.
+    DescriptorHeapFull {
+        /// The heap that's full.
+        heap: HeapKind,
+        /// The label of the texture or sampler that needed a slot.
         label: String,
     },
     /// Anything with no specific recovery, with its context.
@@ -38,6 +49,9 @@ impl fmt::Display for RhiError {
             Self::OutOfDeviceMemory { label } => {
                 write!(f, "failed to create \"{label}\": out of device memory")
             }
+            Self::DescriptorHeapFull { heap, label } => {
+                write!(f, "the {heap} has no free slot for \"{label}\"")
+            }
             Self::Other(err) => fmt::Display::fmt(err, f),
         }
     }
@@ -49,7 +63,7 @@ impl Error for RhiError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
             Self::Other(err) => err.source(),
-            Self::OutOfDeviceMemory { .. } => None,
+            Self::OutOfDeviceMemory { .. } | Self::DescriptorHeapFull { .. } => None,
         }
     }
 }
@@ -89,6 +103,28 @@ mod tests {
             "failed to create \"triangle vertices\": out of device memory",
         );
         assert!(err.source().is_none());
+    }
+
+    /// A full heap names the heap, and the object that needed a slot.
+    #[test]
+    fn descriptor_heap_full_names_the_heap_and_object() {
+        let err = RhiError::DescriptorHeapFull {
+            heap: HeapKind::Sampler,
+            label: "shadow comparison".into(),
+        };
+        assert_eq!(
+            err.to_string(),
+            "the sampler heap has no free slot for \"shadow comparison\"",
+        );
+        assert!(err.source().is_none());
+        let err = RhiError::DescriptorHeapFull {
+            heap: HeapKind::Resource,
+            label: "albedo".into(),
+        };
+        assert_eq!(
+            err.to_string(),
+            "the resource heap has no free slot for \"albedo\""
+        );
     }
 
     /// `Other` keeps its `anyhow` context chain, through `?` into an
