@@ -35,6 +35,7 @@ mod buffer;
 mod capabilities;
 mod descriptor;
 mod error;
+mod ffi;
 #[cfg(test)]
 mod gpu_tests;
 mod handle;

@@ -173,6 +173,7 @@ impl VulkanDevice {
         // was checked, and the format supports the usage.
         let image = unsafe { device.create_image(&image_create_info, None) }
             .map_err(|result| error(result, "create texture", desc.label))?;
+        self.device.set_object_name(image, desc.label);
 
         // SAFETY: `image` was just created on `device`.
         let (requirements, dedication) = unsafe { image_memory_requirements(device, image) };
