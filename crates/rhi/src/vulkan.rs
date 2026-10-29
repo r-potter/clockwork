@@ -24,6 +24,7 @@ mod frames;
 mod gpu_tests;
 mod memory;
 mod physical_device;
+mod samplers;
 mod shaders;
 mod surface;
 mod swapchain;
