@@ -1,7 +1,8 @@
 //! T1 tests of the Vulkan backend: that the validation layer's messages
 //! reach the test that caused them (R5), that synchronization validation is
 //! on (R6), that the device's Vulkan 1.4 and extension features are queried
-//! (R12), and that its capabilities describe it (design 0002, R2).
+//! (R12), that its capabilities describe it (design 0002, R2), and that
+//! objects left at drop are reported (design 0002, R3).
 //!
 //! Each validation test makes a mistake on purpose, and declares the message it expects
 //! by its ID, so the test fails if the message never arrives, which is what
@@ -13,7 +14,12 @@ use clockwork_diagnostics::capture::TestSession;
 use tracing::Level;
 
 use super::test_support::{Capability, VulkanTestBackend};
-use crate::{MAX_PUSH_DATA_SIZE, QueueKind, RenderHardwareInterface};
+use crate::handle::LEAK_TARGET;
+use crate::{
+    AddressMode, BufferDesc, BufferUsage, Extent3d, Filter, Format, MAX_PUSH_DATA_SIZE,
+    MemoryLocation, QueueKind, RenderHardwareInterface, SamplerDesc, TextureDesc, TextureDimension,
+    TextureUsage,
+};
 
 /// A buffer and the memory bound to it, destroyed when dropped.
 struct TestBuffer<'a> {
@@ -242,4 +248,69 @@ fn reference_device_reports_required_extensions() {
     // Every descriptor heap device has descriptors of some size, so it's only
     // zero if the extension's properties weren't queried.
     assert!(device.properties.descriptor_heap.buffer_descriptor_size > 0);
+}
+
+/// Objects left when the device is dropped are destroyed with it, before
+/// their memory, heaps and device, so validation reports nothing, and each
+/// kind is reported with one warning naming its objects (design 0002, R3).
+#[test]
+fn leaked_objects_are_reported() {
+    let session = TestSession::new();
+    for report in [
+        "2 buffers were never destroyed, and were freed with the device: \
+         \"vertices\", \"staging\"",
+        "1 texture was never destroyed, and was freed with the device: \"albedo\"",
+        "1 sampler was never destroyed, and was freed with the device: \"linear\"",
+    ] {
+        session.expect(Level::WARN, LEAK_TARGET, move |event| {
+            event.message == report
+        });
+    }
+    let backend = VulkanTestBackend::headless(&session);
+    let resources = backend.resources();
+
+    // One buffer in pooled device memory, and one in upload memory, which
+    // is mapped.
+    for (label, location) in [
+        ("vertices", MemoryLocation::Device),
+        ("staging", MemoryLocation::Upload),
+    ] {
+        resources
+            .create_buffer(&BufferDesc {
+                label,
+                size: 1_024,
+                usage: BufferUsage::STORAGE,
+                location,
+            })
+            .unwrap();
+    }
+    // A destroyed object isn't reported.
+    let destroyed = resources
+        .create_texture(&texture_desc("destroyed"))
+        .unwrap();
+    resources.create_texture(&texture_desc("albedo")).unwrap();
+    resources.destroy_texture(destroyed);
+    resources
+        .create_sampler(&SamplerDesc {
+            label: "linear",
+            mag_filter: Filter::Linear,
+            min_filter: Filter::Linear,
+            mip_filter: Filter::Linear,
+            address_modes: [AddressMode::Repeat; 3],
+        })
+        .unwrap();
+    drop(backend);
+}
+
+/// A small 2D texture to sample, labelled `label`.
+fn texture_desc(label: &str) -> TextureDesc<'_> {
+    TextureDesc {
+        label,
+        dimension: TextureDimension::D2,
+        format: Format::Rgba8Unorm,
+        extent: Extent3d::new_2d(16, 16),
+        mip_levels: 1,
+        array_layers: 1,
+        usage: TextureUsage::SAMPLED,
+    }
 }

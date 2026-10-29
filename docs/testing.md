@@ -329,6 +329,14 @@ fn clears_are_validated() {
 
 Declare the session first, so that the backend is dropped first, and anything logged while it's destroyed still reaches the session. Tests of `rhi::create` itself pass it `test_support::backend_options(&session)`, which is how `VulkanTestBackend` is configured too.
 
+Destroy every buffer, texture and sampler the test creates. Objects left when the backend is dropped are freed with it, but each kind left is reported with a `WARN` on `clockwork::leaks` (design 0002, "Handles"), which fails the test:
+
+```text
+WARN clockwork::leaks: 2 samplers were never destroyed, and were freed with the device: "second", "third"
+```
+
+The report names the first eight objects it finds. `leaked_objects_are_reported` in `crates/rhi/src/vulkan/gpu_tests.rs` is the only test that leaves objects on purpose, and it expects the reports.
+
 ### Validation is required
 
 Every T1 test runs with the Khronos validation layer, and can't run without it: `VulkanTestBackend::headless` and `backend_options` always ask for `Validation::Required`, so creating the backend fails if the layer, or a requested feature, isn't available. There's no way to turn validation off for tests, because a pass without it would prove less than it claims.

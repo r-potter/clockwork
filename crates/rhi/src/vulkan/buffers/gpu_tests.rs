@@ -5,9 +5,7 @@ use std::collections::HashSet;
 use clockwork_diagnostics::capture::TestSession;
 
 use crate::vulkan::test_support::VulkanTestBackend;
-use crate::{
-    Buffer, BufferDesc, BufferUsage, GpuResources, MemoryLocation, RenderHardwareInterface,
-};
+use crate::{Buffer, BufferDesc, BufferUsage, MemoryLocation, RenderHardwareInterface};
 
 /// A storage buffer of `size` bytes in `location`.
 fn desc(label: &str, size: u64, location: MemoryLocation) -> BufferDesc<'_> {
@@ -126,21 +124,6 @@ fn empty_buffers_panic() {
     let _ = backend
         .resources()
         .create_buffer(&desc("empty", 0, MemoryLocation::Device));
-}
-
-/// Buffers left when the device is dropped are destroyed with it, before
-/// their memory and the device, so validation reports nothing.
-#[test]
-fn buffers_left_at_drop_are_destroyed() {
-    let session = TestSession::new();
-    let backend = VulkanTestBackend::headless(&session);
-    let resources: &dyn GpuResources = backend.resources().as_ref();
-    for location in [MemoryLocation::Device, MemoryLocation::Upload] {
-        resources
-            .create_buffer(&desc("left behind", 1_024, location))
-            .unwrap();
-    }
-    drop(backend);
 }
 
 /// A copy of `len` bytes of `buffer`'s mapped memory, read directly.
