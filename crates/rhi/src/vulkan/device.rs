@@ -7,6 +7,7 @@ use tracing::debug;
 
 use super::device_selection::QueueFamilies;
 use super::physical_device::PhysicalDevice;
+use super::queues::{QueueLayout, QueueLocks};
 use crate::ffi::truncate_to_cstring;
 
 /// A logical device, created from the selected physical device, and the
@@ -28,15 +29,17 @@ pub(super) struct LogicalDevice {
     debug_utils: Option<ext::debug_utils::Device>,
     /// The families the queues below were created from.
     queue_families: QueueFamilies,
-    /// The queue rendering work is submitted to.
-    graphics_queue: vk::Queue,
-    /// `None` when headless.
-    present_queue: Option<vk::Queue>,
+    /// The queues created from `queue_families`, and the queue each role
+    /// uses.
+    queue_layout: QueueLayout,
+    /// The queues `queue_layout` lays out, each behind its lock. They're
+    /// used through [`Queues`](super::queues::Queues).
+    queue_locks: QueueLocks,
 }
 
 impl LogicalDevice {
     /// Creates a logical device on `physical_device`, with one queue from each
-    /// of `queue_families`.
+    /// distinct family in `queue_families`.
     ///
     /// Enables the extensions and features device selection requires:
     /// - `VK_EXT_shader_object`, `VK_EXT_descriptor_heap` and
@@ -62,18 +65,14 @@ impl LogicalDevice {
         queue_families: QueueFamilies,
         debug_utils: bool,
     ) -> Result<Self> {
-        // Vulkan forbids requesting the same family twice, so request the
-        // present family separately only if it differs from the graphics one.
-        let mut families = vec![queue_families.graphics];
-        if let Some(present) = queue_families.present
-            && present != queue_families.graphics
-        {
-            families.push(present);
-        }
+        // Vulkan forbids requesting the same family twice, so the layout has
+        // each family once, however many roles use it.
+        let layout = QueueLayout::new(queue_families);
         let priorities = [1.0];
-        let queue_create_infos: Vec<_> = families
+        let queue_create_infos: Vec<_> = layout
+            .queues
             .iter()
-            .map(|&family| {
+            .map(|&(family, _)| {
                 vk::DeviceQueueCreateInfo::default()
                     .queue_family_index(family)
                     .queue_priorities(&priorities)
@@ -130,21 +129,22 @@ impl LogicalDevice {
         let device = unsafe { instance.create_device(physical_device.handle, &create_info, None) }
             .context("failed to create Vulkan logical device")?;
 
-        // SAFETY: One queue was requested from each of these families.
-        let graphics_queue = unsafe { device.get_device_queue(queue_families.graphics, 0) };
-        let present_queue = queue_families
-            .present
-            // SAFETY: as above.
-            .map(|family| unsafe { device.get_device_queue(family, 0) });
+        let debug_utils = debug_utils.then(|| ext::debug_utils::Device::load(instance, &device));
+        let queue_locks = QueueLocks::new(layout.queues.iter().map(|&(family, role)| {
+            // SAFETY: One queue was requested from each of these families.
+            let queue = unsafe { device.get_device_queue(family, 0) };
+            set_object_name(debug_utils.as_ref(), queue, role.name());
+            queue
+        }));
 
         Ok(Self {
             shader_object: ext::shader_object::Device::load(instance, &device),
             descriptor_heap: ext::descriptor_heap::Device::load(instance, &device),
-            debug_utils: debug_utils.then(|| ext::debug_utils::Device::load(instance, &device)),
+            debug_utils,
             device,
             queue_families,
-            graphics_queue,
-            present_queue,
+            queue_layout: layout,
+            queue_locks,
         })
     }
 
@@ -175,19 +175,7 @@ impl LogicalDevice {
     /// Failing to set a name only loses the name, so it's logged at `DEBUG`
     /// and otherwise ignored.
     pub(super) fn set_object_name<T: vk::Handle>(&self, object: T, label: &str) {
-        let Some(debug_utils) = &self.debug_utils else {
-            return;
-        };
-        let name = truncate_to_cstring(label);
-        let name_info = vk::DebugUtilsObjectNameInfoEXT::default()
-            .object_handle(object)
-            .object_name(&name);
-        // SAFETY: `name_info` is valid for the call, `debug_utils` was loaded
-        // for this device with `VK_EXT_debug_utils` enabled on its instance,
-        // and the caller passes a live object created on this device.
-        if let Err(result) = unsafe { debug_utils.set_debug_utils_object_name(&name_info) } {
-            debug!("failed to name {:?} \"{label}\": {result:?}", T::TYPE);
-        }
+        set_object_name(self.debug_utils.as_ref(), object, label);
     }
 
     /// The queue families the device's queues were created from.
@@ -195,27 +183,53 @@ impl LogicalDevice {
         self.queue_families
     }
 
-    /// The queue to submit rendering work to.
-    pub(super) fn graphics_queue(&self) -> vk::Queue {
-        self.graphics_queue
+    /// The queues created from [`queue_families`](Self::queue_families), and
+    /// the queue each role uses.
+    pub(super) fn queue_layout(&self) -> &QueueLayout {
+        &self.queue_layout
     }
 
-    /// The queue to present swapchain images on, or `None` when headless.
-    /// May be the same queue as [`graphics_queue`](Self::graphics_queue).
-    pub(super) fn present_queue(&self) -> Option<vk::Queue> {
-        self.present_queue
+    /// The device's queues, each behind its lock. Objects that wait for the
+    /// device to be idle when they're dropped keep a clone, to hold every
+    /// lock while they wait.
+    pub(super) fn queue_locks(&self) -> &QueueLocks {
+        &self.queue_locks
+    }
+}
+
+/// Names `object` after `label` with `debug_utils`, as
+/// [`LogicalDevice::set_object_name`] describes, or does nothing if it's
+/// `None`. `debug_utils` must have been loaded for the device `object` was
+/// created on, which must be live.
+fn set_object_name<T: vk::Handle>(
+    debug_utils: Option<&ext::debug_utils::Device>,
+    object: T,
+    label: &str,
+) {
+    let Some(debug_utils) = debug_utils else {
+        return;
+    };
+    let name = truncate_to_cstring(label);
+    let name_info = vk::DebugUtilsObjectNameInfoEXT::default()
+        .object_handle(object)
+        .object_name(&name);
+    // SAFETY: `name_info` is valid for the call, `debug_utils` was loaded for
+    // the device `object` was created on, with `VK_EXT_debug_utils` enabled
+    // on its instance, and the caller passes a live object.
+    if let Err(result) = unsafe { debug_utils.set_debug_utils_object_name(&name_info) } {
+        debug!("failed to name {:?} \"{label}\": {result:?}", T::TYPE);
     }
 }
 
 impl Drop for LogicalDevice {
     fn drop(&mut self) {
         // SAFETY: The device was created by `new` and is destroyed exactly
-        // once here. Waiting for it to be idle ensures no submitted work still
-        // uses it, and the owner guarantees that every object created from it
-        // has been destroyed.
+        // once here, and its queues were retrieved from it. Waiting for it to
+        // be idle ensures no submitted work still uses it, and the owner
+        // guarantees that every object created from it has been destroyed.
         unsafe {
             // Nothing useful can be done if this fails while dropping.
-            let _ = self.device.device_wait_idle();
+            let _ = self.queue_locks.wait_idle(&self.device);
             self.device.destroy_device(None);
         }
     }

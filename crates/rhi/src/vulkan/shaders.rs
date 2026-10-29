@@ -8,6 +8,7 @@ use anyhow::{Context, Result};
 use ash::{ext, vk};
 
 use super::device::LogicalDevice;
+use super::queues::QueueLocks;
 
 /// The triangle shaders, compiled from `shaders/triangle.slang` by
 /// `build.rs`.
@@ -32,6 +33,8 @@ pub(super) struct TriangleShaders {
     shader_object: ext::shader_object::Device,
     /// The device the shaders were created on, for its core functions.
     device: ash::Device,
+    /// The device's queues, locked while waiting for it to be idle.
+    queue_locks: QueueLocks,
     /// The vertex shader, linked with `fragment`.
     vertex: vk::ShaderEXT,
     /// The fragment shader, linked with `vertex`.
@@ -91,6 +94,7 @@ impl TriangleShaders {
         Ok(Self {
             shader_object,
             device: device.handle().clone(),
+            queue_locks: device.queue_locks().clone(),
             vertex: shaders[0],
             fragment: shaders[1],
         })
@@ -168,11 +172,11 @@ impl TriangleShaders {
 impl Drop for TriangleShaders {
     fn drop(&mut self) {
         // SAFETY: The shaders were created by `new` and are destroyed exactly
-        // once here. Waiting for the device to be idle ensures that no
-        // submitted work still uses them.
+        // once here. Waiting for the device, which the queues were retrieved
+        // from, to be idle ensures that no submitted work still uses them.
         unsafe {
             // Nothing useful can be done if this fails while dropping.
-            let _ = self.device.device_wait_idle();
+            let _ = self.queue_locks.wait_idle(&self.device);
             self.shader_object.destroy_shader(self.vertex, None);
             self.shader_object.destroy_shader(self.fragment, None);
         }

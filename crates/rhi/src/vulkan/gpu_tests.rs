@@ -8,11 +8,16 @@
 //! by its ID, so the test fails if the message never arrives, which is what
 //! would happen if validation were off or its messages were lost.
 
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::thread;
+use std::time::Duration;
+
 use ash::vk;
 use clockwork_diagnostics::VALIDATION_TARGET;
 use clockwork_diagnostics::capture::TestSession;
 use tracing::Level;
 
+use super::queues::QueueRole;
 use super::test_support::{Capability, VulkanTestBackend};
 use crate::handle::LEAK_TARGET;
 use crate::{
@@ -215,6 +220,36 @@ fn capabilities_describe_the_selected_device() {
         .max_push_data_size;
     assert!(push_data_size >= u64::from(MAX_PUSH_DATA_SIZE));
     assert!(capabilities.limits.timestamp_period_ns > 0.0);
+}
+
+/// Waiting for the device to be idle holds every queue's lock, so it doesn't
+/// start while another thread is using a queue (design 0002, "Queues and
+/// submission").
+#[test]
+fn waiting_for_idle_waits_for_queue_locks() {
+    let session = TestSession::new();
+    let backend = VulkanTestBackend::headless(&session);
+    let device = backend.core.device.handle();
+    let queue_locks = backend.core.device.queue_locks();
+    let done = AtomicBool::new(false);
+    for kind in QueueKind::ALL {
+        let guard = backend.core.queues.lock(QueueRole::Kind(kind)).unwrap();
+        thread::scope(|scope| {
+            let waiter = scope.spawn(|| {
+                // SAFETY: `device` is live, and its queues are `queue_locks`.
+                unsafe { queue_locks.wait_idle(device) }.unwrap();
+                done.store(true, Ordering::SeqCst);
+            });
+            thread::sleep(Duration::from_millis(50));
+            assert!(
+                !done.load(Ordering::SeqCst),
+                "the wait didn't hold the {kind:?} queue's lock",
+            );
+            drop(guard);
+            waiter.join().unwrap();
+        });
+        assert!(done.swap(false, Ordering::SeqCst));
+    }
 }
 
 /// The device has every capability `CLOCKWORK_REQUIRED_CAPABILITIES`

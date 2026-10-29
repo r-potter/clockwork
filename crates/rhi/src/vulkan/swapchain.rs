@@ -7,6 +7,7 @@ use tracing::info;
 
 use super::device::LogicalDevice;
 use super::physical_device::PhysicalDevice;
+use super::queues::QueueLocks;
 use super::surface::Surface;
 use crate::WindowSize;
 
@@ -50,6 +51,8 @@ const PREFERRED_COMPOSITE_ALPHA: &[vk::CompositeAlphaFlagsKHR] = &[
 pub(super) struct Swapchain {
     /// Kept to destroy the image views and semaphores.
     device: ash::Device,
+    /// The device's queues, locked while waiting for it to be idle.
+    queue_locks: QueueLocks,
     /// The `VK_KHR_swapchain` functions for the device.
     swapchain_fn: khr::swapchain::Device,
     /// The swapchain, created with `swapchain_fn`.
@@ -181,6 +184,7 @@ impl Swapchain {
         // later step fails.
         let mut this = Self {
             device: device.handle().clone(),
+            queue_locks: device.queue_locks().clone(),
             swapchain_fn,
             swapchain,
             images: Vec::new(),
@@ -316,11 +320,12 @@ impl Swapchain {
 impl Drop for Swapchain {
     fn drop(&mut self) {
         // SAFETY: The semaphores, views and swapchain were created by `new`
-        // and are destroyed exactly once here. Waiting for the device to be
-        // idle ensures that no submitted work still uses them.
+        // and are destroyed exactly once here. Waiting for the device, which
+        // the queues were retrieved from, to be idle ensures that no
+        // submitted work still uses them.
         unsafe {
             // Nothing useful can be done if this fails while dropping.
-            let _ = self.device.device_wait_idle();
+            let _ = self.queue_locks.wait_idle(&self.device);
             for &semaphore in &self.render_finished {
                 self.device.destroy_semaphore(semaphore, None);
             }
