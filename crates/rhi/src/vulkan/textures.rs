@@ -21,10 +21,11 @@ use ash::vk;
 use super::VulkanDevice;
 use super::error::{error, error_from_chain};
 use super::memory::{MemoryAllocation, MemoryRequest, Resource, image_memory_requirements};
+use crate::copy::CopiedTexture;
 use crate::handle::HandleTable;
 use crate::{
-    Format, MemoryLocation, RhiResult, Subresource, Texture, TextureDesc, TextureDimension,
-    TextureUsage,
+    Extent3d, Format, FormatInfo, MemoryLocation, RhiResult, Subresource, Texture, TextureDesc,
+    TextureDimension, TextureUsage,
 };
 
 /// A texture in the texture table.
@@ -34,8 +35,10 @@ pub(super) struct TextureEntry {
     image: vk::Image,
     /// The memory it's bound to.
     allocation: MemoryAllocation,
-    /// The aspects its format has: depth, or colour.
-    aspect: vk::ImageAspectFlags,
+    /// Its format's block layout.
+    format: FormatInfo,
+    /// The size of its largest mip.
+    extent: Extent3d,
     /// How many mips it has.
     mip_count: u32,
     /// How many array layers it has.
@@ -46,6 +49,27 @@ impl TextureEntry {
     /// The image, for commands that name it.
     pub(super) fn image(&self) -> vk::Image {
         self.image
+    }
+
+    /// The aspects its format has, for the commands that name them.
+    pub(super) fn aspect(&self) -> vk::ImageAspectFlags {
+        aspect(self.format)
+    }
+
+    /// Its format's block layout.
+    pub(super) fn format(&self) -> FormatInfo {
+        self.format
+    }
+
+    /// What copy checks need to know about the texture labelled `label`.
+    pub(super) fn copied<'a>(&self, label: &'a str) -> CopiedTexture<'a> {
+        CopiedTexture {
+            label,
+            format: self.format,
+            extent: self.extent,
+            mip_count: self.mip_count,
+            layer_count: self.layer_count,
+        }
     }
 
     /// The Vulkan range for `subresource` of the texture labelled `label`,
@@ -62,7 +86,7 @@ impl TextureEntry {
     ) -> vk::ImageSubresourceRange {
         let resolved = subresource.resolve(label, self.mip_count, self.layer_count);
         vk::ImageSubresourceRange {
-            aspect_mask: self.aspect,
+            aspect_mask: self.aspect(),
             base_mip_level: resolved.mips.start,
             level_count: resolved.mips.end - resolved.mips.start,
             base_array_layer: resolved.layers.start,
@@ -73,8 +97,8 @@ impl TextureEntry {
 
 /// The aspects of an image of `format`: depth for a depth format, and
 /// colour otherwise. There are no stencil formats yet.
-fn aspect(format: Format) -> vk::ImageAspectFlags {
-    if format.is_depth() {
+fn aspect(format: FormatInfo) -> vk::ImageAspectFlags {
+    if format.depth {
         vk::ImageAspectFlags::DEPTH
     } else {
         vk::ImageAspectFlags::COLOR
@@ -253,7 +277,8 @@ impl VulkanDevice {
         let entry = TextureEntry {
             image,
             allocation,
-            aspect: aspect(desc.format),
+            format: desc.format.info(),
+            extent: desc.extent,
             mip_count: desc.mip_levels,
             layer_count: desc.array_layers,
         };
@@ -362,7 +387,7 @@ mod tests {
             } else {
                 vk::ImageAspectFlags::COLOR
             };
-            assert_eq!(aspect(format), expected, "{format:?}");
+            assert_eq!(aspect(format.info()), expected, "{format:?}");
         }
     }
 

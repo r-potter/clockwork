@@ -198,13 +198,27 @@ Outstanding tasks and future work.
       range past the end of one is read or written unreported. Translation
       could look the address up in the buffer table in debug builds and
       panic, naming the buffer, if the range doesn't fit inside it.
-- [ ] **Check buffer hazards once synchronization validation sees
-      copies and fills by address.** The RHI copies and fills buffers with
+- [ ] **Check copy hazards once synchronization validation sees copies
+      and fills by address.** The RHI copies and fills with
       `VK_KHR_device_address_commands`, which synchronization validation
-      doesn't track, so a missing barrier between them isn't reported (see
-      "Validation is required" in `docs/testing.md`). When a validation
-      layer release tracks them, add a buffer case to
-      `missing_barrier_is_reported`.
+      doesn't track, on the buffer side or the texture side, so a missing
+      barrier between copies isn't reported (see "Validation is required"
+      in `docs/testing.md`). When a validation layer release tracks them,
+      add a copy case to `missing_barrier_is_reported`.
+- [ ] **Debug buffer-to-texture copies on NVIDIA in Nsight.** On the RTX
+      4090 with driver 617.42, `vkCmdCopyMemoryToImageKHR` writes nothing
+      to the image, and validation reports nothing. The same data copied
+      with `vkCmdCopyBufferToImage` arrives, `vkCmdCopyImageToMemoryKHR`
+      works, and `padded_rows_round_trip` passes on lavapipe, so it looks
+      like the driver's. Changing the row layout, or setting
+      `FULLY_BOUND`, made no difference. Capture the copy in Nsight
+      Graphics to see what the driver records, then report it to NVIDIA
+      with a minimal reproduction, or fix our side if it's ours. Until
+      then `padded_rows_round_trip` and `subresources_round_trip` skip on
+      NVIDIA drivers up to 617.42
+      (`crates/rhi/src/vulkan/translate/gpu_tests.rs`), so a later driver
+      runs them, and uploads to textures, from `rhi-streaming` on, won't
+      work there unless design 0002's fallback lands ("Risks").
 - [ ] **Move CI off actions that run on Node.js 20.** GitHub warns that
       `actions/cache@v4` targets Node.js 20, which is deprecated, and runs
       it on Node.js 24 instead. Move to a version that targets Node.js 24

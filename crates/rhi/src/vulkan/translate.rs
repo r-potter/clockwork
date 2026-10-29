@@ -33,8 +33,9 @@ use super::error::error;
 use super::queues::Queues;
 use crate::barrier::BarrierTarget;
 use crate::command_list::Command;
+use crate::copy::check_texture_copy;
 use crate::ffi::truncate_to_cstring;
-use crate::{AccessSet, CommandBuffer, CommandList, QueueId, RhiResult};
+use crate::{Access, AccessSet, CommandBuffer, CommandList, QueueId, RhiResult};
 
 /// A command list translated for one queue, holding the command pool its
 /// command buffer was recorded from until it's submitted or dropped.
@@ -309,6 +310,102 @@ impl VulkanDevice {
                         self.device
                             .device_address_commands()
                             .cmd_copy_memory(buffer, &copy_info);
+                    }
+                }
+                &(Command::CopyBufferToTexture { copy }
+                | Command::CopyTextureToBuffer { copy }) => {
+                    let to_texture = matches!(command, Command::CopyBufferToTexture { .. });
+                    let copy = list.texture_copy(copy);
+                    let region = &copy.texture;
+                    let (label, entry) = textures
+                        .lookup(region.texture.handle())
+                        .unwrap_or_else(|err| panic!("{err}"));
+                    let end = check_texture_copy(&entry.copied(label), region, &copy.layout);
+                    let start = copy.buffer.0.checked_add(copy.layout.offset);
+                    let start = start
+                        .filter(|start| start.checked_add(end - copy.layout.offset).is_some())
+                        .unwrap_or_else(|| {
+                            panic!(
+                                "command list \"{}\" copies texture \"{label}\" past the end of \
+                                 the address space",
+                                list.label(),
+                            )
+                        });
+                    // The texture is in the layout its copy access needs,
+                    // as the barriers before the copy put it.
+                    let access = if to_texture {
+                        Access::CopyWrite
+                    } else {
+                        Access::CopyRead
+                    };
+                    let layout = vk::ImageLayout::from(
+                        access.layout().expect("copy accesses apply to textures"),
+                    );
+                    let format = entry.format();
+                    let texel =
+                        |value: u32| i32::try_from(value).expect("texel offsets fit an i32");
+                    // Vulkan counts rows and images in texels. A copy of one
+                    // image doesn't use its height, which the checks allow
+                    // to be short, so it's passed as 0, which Vulkan reads
+                    // as tightly packed.
+                    let in_texels = |blocks: u32, block_extent: u32| {
+                        blocks.checked_mul(block_extent).unwrap_or_else(|| {
+                            panic!(
+                                "command list \"{}\" copies texture \"{label}\" with a layout too \
+                                 large for Vulkan to count in texels",
+                                list.label(),
+                            )
+                        })
+                    };
+                    let images = (region.layers.end - region.layers.start) * region.extent.depth;
+                    let row_length = in_texels(
+                        copy.layout.bytes_per_row / format.block_bytes,
+                        format.block_extent[0],
+                    );
+                    let image_height = if images == 1 {
+                        0
+                    } else {
+                        in_texels(copy.layout.rows_per_image, format.block_extent[1])
+                    };
+                    let memory_copy = vk::DeviceMemoryImageCopyKHR::default()
+                        .address_range(
+                            vk::DeviceAddressRangeKHR::default()
+                                .address(start)
+                                .size(end - copy.layout.offset),
+                        )
+                        .address_row_length(row_length)
+                        .address_image_height(image_height)
+                        .image_subresource(vk::ImageSubresourceLayers {
+                            aspect_mask: entry.aspect(),
+                            mip_level: region.mip,
+                            base_array_layer: region.layers.start,
+                            layer_count: region.layers.end - region.layers.start,
+                        })
+                        .image_layout(layout)
+                        .image_offset(vk::Offset3D {
+                            x: texel(region.origin[0]),
+                            y: texel(region.origin[1]),
+                            z: texel(region.origin[2]),
+                        })
+                        .image_extent(vk::Extent3D {
+                            width: region.extent.width,
+                            height: region.extent.height,
+                            depth: region.extent.depth,
+                        });
+                    let copy_info = vk::CopyDeviceMemoryImageInfoKHR::default()
+                        .image(entry.image())
+                        .regions(std::slice::from_ref(&memory_copy));
+                    let device_address_commands = self.device.device_address_commands();
+                    // SAFETY: Guaranteed by the caller, the image is live,
+                    // since the table is locked, the copy passed its checks,
+                    // so it's inside the image and laid out in whole
+                    // blocks, and `copy_info` is valid for the call.
+                    unsafe {
+                        if to_texture {
+                            device_address_commands.cmd_copy_memory_to_image(buffer, &copy_info);
+                        } else {
+                            device_address_commands.cmd_copy_image_to_memory(buffer, &copy_info);
+                        }
                     }
                 }
                 Command::BeginDebugRegion { text } => {

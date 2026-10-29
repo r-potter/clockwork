@@ -198,6 +198,23 @@ pub(crate) fn missing_capability(name: &str, device: &str, required: &RequiredCa
     }
 }
 
+/// Prints a skip message for a test that can't run on the device `device`
+/// because of a driver bug, described by `bug`, which `TODO.md` tracks.
+///
+/// Like [`missing_capability`]'s, the message goes to the process's stderr
+/// directly, so that skips are visible in passing runs.
+pub(crate) fn skip_for_driver_bug(device: &str, bug: &str) {
+    let test = std::thread::current()
+        .name()
+        .unwrap_or("<unnamed test>")
+        .to_owned();
+    // Nothing can be done if stderr is unwritable.
+    let _ = writeln!(
+        io::stderr(),
+        "=== clockwork: skipped {test}: {device} has a driver bug: {bug} ==="
+    );
+}
+
 #[cfg(test)]
 mod tests {
     //! T0 tests of reading the test environment, and of the skip-or-fail
