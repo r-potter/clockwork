@@ -730,12 +730,13 @@ impl Drop for VulkanDevice {
         // SAFETY: The device was created on this core's instance, and is
         // still alive.
         let _ = unsafe { self.device.handle().device_wait_idle() };
+        // Anything left in the tables is a leak, reported as it's drained.
         let buffers = self
             .buffers
             .get_mut()
             .unwrap_or_else(PoisonError::into_inner)
-            .drain();
-        for (_, entry) in buffers {
+            .drain_leaked();
+        for entry in buffers {
             // SAFETY: The device is idle, so no submitted work uses the
             // buffer.
             unsafe { self.free_buffer(entry) };
@@ -744,8 +745,8 @@ impl Drop for VulkanDevice {
             .textures
             .get_mut()
             .unwrap_or_else(PoisonError::into_inner)
-            .drain();
-        for (_, entry) in textures {
+            .drain_leaked();
+        for entry in textures {
             // SAFETY: As above.
             unsafe { self.free_texture(entry) };
         }
@@ -753,8 +754,8 @@ impl Drop for VulkanDevice {
             .samplers
             .get_mut()
             .unwrap_or_else(PoisonError::into_inner)
-            .drain();
-        for (_, entry) in samplers {
+            .drain_leaked();
+        for entry in samplers {
             self.free_sampler(entry);
         }
         // SAFETY: The heaps were created on this device, with memory from

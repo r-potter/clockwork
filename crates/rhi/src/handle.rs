@@ -13,10 +13,46 @@
 //! A handle older than that is still detected, but named by its slot and
 //! generation.
 //!
+//! Objects left in a table when its device is dropped are leaks. They're
+//! destroyed with the device, and reported with one `WARN` for each kind of
+//! object, so that a leak fails the test that caused it.
+//!
 //! This is safe code, so it's checked with property tests against a model
 //! rather than with `miri`.
 
 use std::fmt;
+
+use tracing::warn;
+
+/// The target leak reports are logged on, named for what they report
+/// rather than for the module that logs them, as validation's are.
+pub(crate) const LEAK_TARGET: &str = "clockwork::leaks";
+
+/// The most labels a leak report names.
+const LEAK_REPORT_LABELS: usize = 8;
+
+/// The report that the objects of `kind`, such as `buffer`, labelled
+/// `labels`, were left when their device was dropped, or `None` if none
+/// were. It counts them, and names the first [`LEAK_REPORT_LABELS`].
+fn leak_report(kind: &str, labels: &[Box<str>]) -> Option<String> {
+    let (count, s, were) = match labels.len() {
+        0 => return None,
+        1 => (1, "", "was"),
+        count => (count, "s", "were"),
+    };
+    let mut named: Vec<_> = labels
+        .iter()
+        .take(LEAK_REPORT_LABELS)
+        .map(|label| format!("\"{label}\""))
+        .collect();
+    if count > LEAK_REPORT_LABELS {
+        named.push(format!("and {} more", count - LEAK_REPORT_LABELS));
+    }
+    Some(format!(
+        "{count} {kind}{s} {were} never destroyed, and {were} freed with the device: {}",
+        named.join(", "),
+    ))
+}
 
 /// An index into a [`HandleTable`], and the generation of the slot it was
 /// issued for.
@@ -134,13 +170,7 @@ impl<T> HandleTable<T> {
     }
 
     /// The number of objects in the table.
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "leak reporting counts objects, later in rhi-resources"
-        )
-    )]
+    #[cfg(test)]
     pub(crate) fn len(&self) -> usize {
         self.len
     }
@@ -242,6 +272,18 @@ impl<T> HandleTable<T> {
             .into_iter()
             .map(|handle| self.remove(handle))
             .collect()
+    }
+
+    /// Removes every object left in the table when its device is dropped,
+    /// returning them to be destroyed. If there were any, logs a `WARN` on
+    /// [`LEAK_TARGET`] counting them and naming the first few, since each is
+    /// a missing `destroy_*` call.
+    pub(crate) fn drain_leaked(&mut self) -> Vec<T> {
+        let (labels, values): (Vec<_>, Vec<_>) = self.drain().into_iter().unzip();
+        if let Some(report) = leak_report(self.kind, &labels) {
+            warn!(target: LEAK_TARGET, "{report}");
+        }
+        values
     }
 
     /// The label and object `handle` refers to, or why it doesn't refer to
@@ -360,6 +402,44 @@ mod tests {
         for handle in [first, second, third] {
             assert!(table.lookup(handle).is_err());
         }
+    }
+
+    /// The labels `labels`, boxed as a table holds them.
+    fn boxed(labels: &[&str]) -> Vec<Box<str>> {
+        labels.iter().map(|&label| label.into()).collect()
+    }
+
+    /// Nothing is reported for a kind of object with none left.
+    #[test]
+    fn no_leaks_are_not_reported() {
+        assert_eq!(leak_report("buffer", &[]), None);
+    }
+
+    /// A leak report counts the objects and names them, in the singular for
+    /// one.
+    #[test]
+    fn leak_reports_count_and_name_objects() {
+        assert_eq!(
+            leak_report("sampler", &boxed(&["linear"])).unwrap(),
+            "1 sampler was never destroyed, and was freed with the device: \"linear\"",
+        );
+        assert_eq!(
+            leak_report("buffer", &boxed(&["vertices", "indices"])).unwrap(),
+            "2 buffers were never destroyed, and were freed with the device: \
+             \"vertices\", \"indices\"",
+        );
+    }
+
+    /// A leak report names only the first eight objects, and counts the
+    /// rest.
+    #[test]
+    fn leak_reports_name_the_first_eight() {
+        let labels: Vec<_> = (0..11).map(|number| format!("{number}").into()).collect();
+        assert_eq!(
+            leak_report("texture", &labels).unwrap(),
+            "11 textures were never destroyed, and were freed with the device: \
+             \"0\", \"1\", \"2\", \"3\", \"4\", \"5\", \"6\", \"7\", and 3 more",
+        );
     }
 
     /// Removing an object twice panics, rather than freeing its slot twice.

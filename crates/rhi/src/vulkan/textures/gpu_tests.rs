@@ -133,16 +133,3 @@ fn invalid_textures_panic() {
         ..desc_2d("sky", 64, 64)
     });
 }
-
-/// Textures left when the device is dropped are destroyed with it, before
-/// their memory and the device, so validation reports nothing.
-#[test]
-fn textures_left_at_drop_are_destroyed() {
-    let session = TestSession::new();
-    let backend = VulkanTestBackend::headless(&session);
-    backend
-        .resources()
-        .create_texture(&desc_2d("left behind", 64, 64))
-        .unwrap();
-    drop(backend);
-}

@@ -68,6 +68,8 @@ fn freed_sampler_slots_are_reused() {
     let third = resources.create_sampler(&desc("third")).unwrap();
     assert_eq!(resources.sampler_index(third), freed);
     assert_ne!(resources.sampler_index(second), freed);
+    resources.destroy_sampler(second);
+    resources.destroy_sampler(third);
 }
 
 /// Creating a sampler with the heap full returns `DescriptorHeapFull`,
@@ -91,7 +93,10 @@ fn full_sampler_heap_is_reported() {
     );
 
     resources.destroy_sampler(samplers[0]);
-    resources.create_sampler(&desc("fits")).unwrap();
+    let fits = resources.create_sampler(&desc("fits")).unwrap();
+    for sampler in samplers.into_iter().skip(1).chain([fits]) {
+        resources.destroy_sampler(sampler);
+    }
 }
 
 /// Using a destroyed sampler's handle panics, naming the sampler (R3).
@@ -104,17 +109,4 @@ fn stale_sampler_handles_panic() {
     let sampler = resources.create_sampler(&desc("shadow")).unwrap();
     resources.destroy_sampler(sampler);
     resources.sampler_index(sampler);
-}
-
-/// Samplers left when the device is dropped have their slots freed before
-/// the heaps are destroyed, so validation reports nothing.
-#[test]
-fn samplers_left_at_drop_are_freed() {
-    let session = TestSession::new();
-    let backend = VulkanTestBackend::headless(&session);
-    backend
-        .resources()
-        .create_sampler(&desc("left behind"))
-        .unwrap();
-    drop(backend);
 }

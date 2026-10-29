@@ -55,10 +55,13 @@ Outstanding tasks and future work.
       Decided in ADR 0002: it's required, with no emulation layer or
       pipeline fallback. Devices without it are rejected at start-up.
 - [ ] **Add a rendering API to the RHI.** The triangle is hardcoded in the
-      Vulkan backend (`record_frame` in `crates/rhi/src/vulkan.rs`). Expose
-      pipelines, shaders, buffers and descriptors through
-      `RenderHardwareInterface` as opaque handles, so that the application
-      decides what to draw.
+      Vulkan backend (`record_frame` in `crates/rhi/src/vulkan.rs`). Design
+      0002's `rhi-resources` slice added buffers, textures and samplers as
+      opaque handles through `GpuResources`, with descriptor heap slots,
+      debug names and leak reports. Its later slices add command lists and
+      queues, programs and draws, and presentation, and `rhi-present` moves
+      the triangle out of the backend, so that the application decides what
+      to draw.
 - [x] **Compile shaders for other backends.** Not needed: ADR 0003 keeps
       Vulkan as the only graphics API on every planned platform, so SPIR-V
       stays the only shader target.
