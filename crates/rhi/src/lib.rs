@@ -36,6 +36,7 @@
 //! 2. add a submodule with a type implementing [`RenderHardwareInterface`],
 //! 3. add a match arm for it in [`create`].
 
+mod barrier;
 mod buffer;
 mod capabilities;
 mod command_list;
@@ -60,6 +61,7 @@ use anyhow::{Result, bail};
 use clockwork_diagnostics::SessionId;
 use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
 
+pub use barrier::{Access, Barrier, Subresource};
 pub use buffer::{Buffer, BufferDesc, BufferUsage, GpuAddress};
 pub use capabilities::{
     Capabilities, Limits, MAX_PUSH_DATA_SIZE, PresentCapabilities, QueueKind, QueueKindSet,
