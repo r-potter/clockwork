@@ -192,13 +192,25 @@ Outstanding tasks and future work.
       (2026-10-19 to 2026-11-19) can't change the packages `linux-lavapipe`
       installs, or the libraries its lavapipe build links. Moving to 26.04 is
       a deliberate change, as "CI" in `docs/testing.md` describes.
-- [ ] **Check buffer hazards once synchronization validation sees
-      copies and fills by address.** The RHI copies and fills buffers with
+- [ ] **Check copy hazards once synchronization validation sees copies
+      and fills by address.** The RHI copies and fills with
       `VK_KHR_device_address_commands`, which synchronization validation
-      doesn't track, so a missing barrier between them isn't reported (see
-      "Validation is required" in `docs/testing.md`). When a validation
-      layer release tracks them, add a buffer case to
-      `missing_barrier_is_reported`.
+      doesn't track, on the buffer side or the texture side, so a missing
+      barrier between copies isn't reported (see "Validation is required"
+      in `docs/testing.md`). When a validation layer release tracks them,
+      add a copy case to `missing_barrier_is_reported`.
+- [ ] **Debug buffer-to-texture copies on NVIDIA in Nsight.** On the RTX
+      4090 with driver 617.42, `vkCmdCopyMemoryToImageKHR` writes nothing
+      to the image, and validation reports nothing. The same data copied
+      with `vkCmdCopyBufferToImage` arrives, `vkCmdCopyImageToMemoryKHR`
+      works, and `padded_rows_round_trip` passes on lavapipe, so it looks
+      like the driver's. Changing the row layout, or setting
+      `FULLY_BOUND`, made no difference. Capture the copy in Nsight
+      Graphics to see what the driver records, then report it to NVIDIA
+      with a minimal reproduction, or fix our side if it's ours. Until
+      then `padded_rows_round_trip` skips on NVIDIA
+      (`crates/rhi/src/vulkan/translate/gpu_tests.rs`), and uploads to
+      textures, from `rhi-streaming` on, won't work there.
 - [ ] **Move CI off actions that run on Node.js 20.** GitHub warns that
       `actions/cache@v4` targets Node.js 20, which is deprecated, and runs
       it on Node.js 24 instead. Move to a version that targets Node.js 24
