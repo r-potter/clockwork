@@ -40,6 +40,7 @@ mod barrier;
 mod buffer;
 mod capabilities;
 mod command_list;
+mod copy;
 mod descriptor;
 mod error;
 mod ffi;
@@ -67,11 +68,14 @@ pub use capabilities::{
     Capabilities, Limits, MAX_PUSH_DATA_SIZE, PresentCapabilities, QueueKind, QueueKindSet,
 };
 pub use command_list::CommandList;
+pub use copy::{TextureCopy, TextureDataLayout};
 pub use descriptor::{DescriptorIndex, HeapKind};
 pub use error::{RhiError, RhiResult};
 pub use queue::{CommandBuffer, GpuPoint, Queue, SubmitDesc};
 pub use sampler::{AddressMode, Filter, Sampler, SamplerDesc};
-pub use texture::{Extent3d, Format, Texture, TextureDesc, TextureDimension, TextureUsage};
+pub use texture::{
+    Extent3d, Format, FormatInfo, Texture, TextureDesc, TextureDimension, TextureUsage,
+};
 use vulkan::VulkanRenderHardwareInterface;
 
 /// A window a backend can render to.

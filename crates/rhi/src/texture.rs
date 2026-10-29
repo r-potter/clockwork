@@ -126,6 +126,44 @@ impl Format {
     pub const fn is_depth(self) -> bool {
         matches!(self, Self::Depth32Float)
     }
+
+    /// The format's block layout, and what it holds (design 0002, "Texture
+    /// copies"): the one table of format information that copies, views and
+    /// barriers use.
+    pub const fn info(self) -> FormatInfo {
+        let block_bytes = match self {
+            Self::Rgba8Unorm
+            | Self::Rgba8Srgb
+            | Self::Bgra8Unorm
+            | Self::Bgra8Srgb
+            | Self::R32Uint
+            | Self::Depth32Float => 4,
+            Self::Rgba16Float => 8,
+            Self::Rgba32Float => 16,
+        };
+        FormatInfo {
+            block_extent: [1, 1],
+            block_bytes,
+            depth: self.is_depth(),
+            srgb: matches!(self, Self::Rgba8Srgb | Self::Bgra8Srgb),
+        }
+    }
+}
+
+/// How a format lays out its texels, and what they hold.
+///
+/// Texels are stored in blocks: one texel for uncompressed formats, and 4×4
+/// for block-compressed ones. Copies count rows and images in blocks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct FormatInfo {
+    /// A block's width and height, in texels.
+    pub block_extent: [u32; 2],
+    /// A block's size, in bytes.
+    pub block_bytes: u32,
+    /// Whether it holds depth, rather than colour.
+    pub depth: bool,
+    /// Whether its colour is in sRGB, which sampling converts to linear.
+    pub srgb: bool,
 }
 
 /// How a texture is used. A set of the constants below, combined with `|`,
