@@ -49,6 +49,13 @@ pub(super) struct BufferEntry {
     mapping: Mutex<()>,
 }
 
+impl BufferEntry {
+    /// The buffer itself, for commands that name it.
+    pub(super) fn buffer(&self) -> vk::Buffer {
+        self.buffer
+    }
+}
+
 impl From<BufferUsage> for vk::BufferUsageFlags {
     /// The Vulkan usage flags for a buffer used as `usage`. Every buffer can
     /// be copied to and from, and has a device address.
@@ -148,9 +155,10 @@ impl VulkanDevice {
     /// Panics if the handle is stale.
     pub(super) fn destroy_buffer_entry(&self, buffer: Buffer) {
         let (_, entry) = self.lock_buffers_for_writing().remove(buffer.handle());
-        // SAFETY: Nothing can submit work through a `Queue` yet, so no
-        // submitted work uses the buffer. Once it can, deferred destruction
-        // (`rhi-commands`) calls this only once nothing can.
+        self.wait_for_submissions();
+        // SAFETY: Every submission so far has completed. A command buffer
+        // translated but not yet submitted may still name the buffer, which
+        // deferred destruction, later in `rhi-commands`, rules out.
         unsafe { self.free_buffer(entry) };
     }
 

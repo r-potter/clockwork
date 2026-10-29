@@ -226,7 +226,6 @@ impl Barrier {
     }
 
     /// What the barrier applies to.
-    #[expect(dead_code, reason = "translation reads barriers in the next PR")]
     pub(crate) fn target(&self) -> &BarrierTarget {
         &self.target
     }

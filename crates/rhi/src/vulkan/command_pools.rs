@@ -24,7 +24,6 @@ pub(super) struct PooledCommands {
     /// The pool.
     pub pool: vk::CommandPool,
     /// The primary command buffer allocated from `pool`.
-    #[expect(dead_code, reason = "translation records into it in the next PR")]
     pub buffer: vk::CommandBuffer,
 }
 

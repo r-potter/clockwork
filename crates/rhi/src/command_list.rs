@@ -45,10 +45,6 @@ pub struct CommandList {
 
 /// A recorded command. Variable-length data is in the list's arena.
 #[derive(Debug)]
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "queues translate commands in the next PR")
-)]
 pub(crate) enum Command {
     /// Orders accesses with the barriers in `barriers` in the list's arena,
     /// together.
@@ -104,6 +100,36 @@ impl CommandList {
     /// The list's name, in messages and debug tools.
     pub fn label(&self) -> &str {
         &self.label
+    }
+
+    /// The commands, in recording order, for translation.
+    pub(crate) fn commands(&self) -> &[Command] {
+        &self.commands
+    }
+
+    /// The label text at `range` of the arena, for translation.
+    pub(crate) fn text(&self, range: &Range<usize>) -> &str {
+        &self.text[range.clone()]
+    }
+
+    /// The barriers at `range` of the arena, for translation.
+    pub(crate) fn barriers(&self, range: &Range<usize>) -> &[Barrier] {
+        &self.barriers[range.clone()]
+    }
+
+    /// Checks that the list can be translated: that every debug label it
+    /// opened is closed.
+    ///
+    /// # Panics
+    ///
+    /// Panics, naming the list, if a label is still open.
+    pub(crate) fn check_complete(&self) {
+        assert!(
+            self.open_labels == 0,
+            "command list \"{}\" is translated with {} debug labels still open",
+            self.label,
+            self.open_labels,
+        );
     }
 
     /// Orders the accesses each barrier names, together (design 0002,
@@ -346,6 +372,24 @@ mod tests {
                 RecordedCommand::Barrier(&barriers[..1]),
             ],
         );
+    }
+
+    /// A list whose labels are closed can be translated.
+    #[test]
+    fn closed_labels_are_complete() {
+        let mut list = CommandList::new("labels");
+        list.begin_label("outer");
+        list.end_label();
+        list.check_complete();
+    }
+
+    /// Translating a list with a label still open panics, naming the list.
+    #[test]
+    #[should_panic(expected = "command list \"open\" is translated with 1 debug labels still open")]
+    fn open_labels_are_incomplete() {
+        let mut list = CommandList::new("open");
+        list.begin_label("outer");
+        list.check_complete();
     }
 
     /// Recording a barrier checks it, naming the list.

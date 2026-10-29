@@ -55,6 +55,7 @@ fn queues_wait_for_points_on_other_queues() {
         let after = queue
             .submit(SubmitDesc {
                 wait_for: &[before],
+                ..SubmitDesc::default()
             })
             .unwrap();
         queue.wait(after).unwrap();
