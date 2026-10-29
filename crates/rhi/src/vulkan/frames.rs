@@ -4,6 +4,7 @@ use anyhow::{Context, Result};
 use ash::vk;
 
 use super::device::LogicalDevice;
+use super::queues::QueueLocks;
 
 /// How many frames the CPU may record ahead of the GPU.
 ///
@@ -18,6 +19,8 @@ const FRAMES_IN_FLIGHT: usize = 2;
 pub(super) struct Frames {
     /// Kept to destroy the resources.
     device: ash::Device,
+    /// The device's queues, locked while waiting for it to be idle.
+    queue_locks: QueueLocks,
     /// One entry per frame in flight: [`FRAMES_IN_FLIGHT`] once created.
     frames: Vec<Frame>,
     /// Index into `frames` of the frame to record next.
@@ -51,6 +54,7 @@ impl Frames {
         // destroyed by `Drop` if a later one fails.
         let mut frames = Self {
             device: device.handle().clone(),
+            queue_locks: device.queue_locks().clone(),
             frames: Vec::with_capacity(FRAMES_IN_FLIGHT),
             current: 0,
         };
@@ -154,11 +158,12 @@ impl Frame {
 
 impl Drop for Frames {
     fn drop(&mut self) {
-        // SAFETY: Every frame was created on `self.device`. Waiting for the
-        // device to be idle ensures that none is still in use.
+        // SAFETY: Every frame was created on `self.device`, which the queues
+        // were retrieved from. Waiting for the device to be idle ensures that
+        // no frame is still in use.
         unsafe {
             // Nothing useful can be done if this fails while dropping.
-            let _ = self.device.device_wait_idle();
+            let _ = self.queue_locks.wait_idle(&self.device);
             for frame in &self.frames {
                 frame.destroy(&self.device);
             }
