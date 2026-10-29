@@ -33,10 +33,12 @@
 
 mod buffer;
 mod capabilities;
+mod descriptor;
 mod error;
 #[cfg(test)]
 mod gpu_tests;
 mod handle;
+mod sampler;
 #[cfg(test)]
 mod test_support;
 mod texture;
@@ -54,7 +56,9 @@ pub use buffer::{Buffer, BufferDesc, BufferUsage, GpuAddress};
 pub use capabilities::{
     Capabilities, Limits, MAX_PUSH_DATA_SIZE, PresentCapabilities, QueueKind, QueueKindSet,
 };
+pub use descriptor::{DescriptorIndex, HeapKind};
 pub use error::{RhiError, RhiResult};
+pub use sampler::{AddressMode, Filter, Sampler, SamplerDesc};
 pub use texture::{Extent3d, Format, Texture, TextureDesc, TextureDimension, TextureUsage};
 use vulkan::VulkanRenderHardwareInterface;
 
