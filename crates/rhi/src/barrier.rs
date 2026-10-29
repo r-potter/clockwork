@@ -160,6 +160,51 @@ impl Subresource {
             layers: layer..layer + 1,
         }
     }
+
+    /// The subresource with its ranges resolved for the texture `label`,
+    /// which has `mip_count` mips and `layer_count` layers: each range
+    /// ending at [`REMAINING`](Self::REMAINING) ends at the texture's last.
+    ///
+    /// # Panics
+    ///
+    /// Panics if either range is empty or passes the texture's last mip or
+    /// layer, naming the texture.
+    pub(crate) fn resolve(&self, label: &str, mip_count: u32, layer_count: u32) -> Self {
+        Self {
+            mips: resolve_range(label, "mips", &self.mips, mip_count),
+            layers: resolve_range(label, "layers", &self.layers, layer_count),
+        }
+    }
+}
+
+/// `range` of the `count` `items` (mips or layers) of the texture `label`,
+/// with an end of [`Subresource::REMAINING`] resolved to `count`.
+///
+/// # Panics
+///
+/// Panics if the resolved range is empty or ends after `count`.
+fn resolve_range(label: &str, items: &str, range: &Range<u32>, count: u32) -> Range<u32> {
+    let end = if range.end == Subresource::REMAINING {
+        count
+    } else {
+        range.end
+    };
+    assert!(
+        range.start < end && end <= count,
+        "texture \"{label}\" has {count} {items}, so a subresource can't name {items} {}",
+        describe_range(range),
+    );
+    range.start..end
+}
+
+/// `range` as written in messages, with an end of
+/// [`Subresource::REMAINING`] written as an open range.
+fn describe_range(range: &Range<u32>) -> String {
+    if range.end == Subresource::REMAINING {
+        format!("{}..", range.start)
+    } else {
+        format!("{range:?}")
+    }
 }
 
 /// What a barrier applies to.
@@ -330,6 +375,100 @@ mod tests {
                 Access::HostWrite,
             ],
         );
+    }
+
+    /// The named subresources cover what their names say, with
+    /// `REMAINING` for the texture's last.
+    #[test]
+    fn subresource_constructors_name_their_ranges() {
+        assert_eq!(
+            Subresource::ALL.resolve("t", 4, 6),
+            Subresource {
+                mips: 0..4,
+                layers: 0..6
+            },
+        );
+        assert_eq!(
+            Subresource::mip(2).resolve("t", 4, 6),
+            Subresource {
+                mips: 2..3,
+                layers: 0..6
+            },
+        );
+        assert_eq!(
+            Subresource::layer(5).resolve("t", 4, 6),
+            Subresource {
+                mips: 0..4,
+                layers: 5..6
+            },
+        );
+        assert_eq!(
+            Subresource::mip_layer(3, 1).resolve("t", 4, 6),
+            Subresource {
+                mips: 3..4,
+                layers: 1..2
+            },
+        );
+    }
+
+    /// A range reaching exactly the texture's last mip or layer is in
+    /// range.
+    #[test]
+    fn subresources_may_reach_the_last_mip_and_layer() {
+        let subresource = Subresource {
+            mips: 1..4,
+            layers: 0..6,
+        };
+        assert_eq!(subresource.resolve("t", 4, 6), subresource);
+    }
+
+    /// A mip past the texture's last panics, naming the texture.
+    #[test]
+    #[should_panic(
+        expected = "texture \"albedo\" has 4 mips, so a subresource can't name mips 4..5"
+    )]
+    fn mips_past_the_last_panic() {
+        Subresource::mip(4).resolve("albedo", 4, 1);
+    }
+
+    /// A layer range past the texture's last panics.
+    #[test]
+    #[should_panic(
+        expected = "texture \"shadows\" has 4 layers, so a subresource can't name layers 2..6"
+    )]
+    fn layers_past_the_last_panic() {
+        Subresource {
+            mips: 0..1,
+            layers: 2..6,
+        }
+        .resolve("shadows", 1, 4);
+    }
+
+    /// A range starting past the texture's last, reaching `REMAINING`,
+    /// panics, rather than resolving to nothing.
+    #[test]
+    #[should_panic(
+        expected = "texture \"albedo\" has 1 layers, so a subresource can't name layers 1.."
+    )]
+    fn remaining_ranges_starting_past_the_last_panic() {
+        Subresource {
+            mips: 0..1,
+            layers: 1..Subresource::REMAINING,
+        }
+        .resolve("albedo", 1, 1);
+    }
+
+    /// An empty range panics.
+    #[test]
+    #[should_panic(
+        expected = "texture \"albedo\" has 4 mips, so a subresource can't name mips 2..2"
+    )]
+    fn empty_ranges_panic() {
+        Subresource {
+            mips: 2..2,
+            layers: 0..1,
+        }
+        .resolve("albedo", 4, 1);
     }
 
     /// Barriers whose accesses suit what they apply to pass, including

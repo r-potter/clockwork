@@ -5,10 +5,14 @@
 //! Vulkan commands it stands for, in order, with no merging, reordering or
 //! removal (design 0002, "Keeping the recording model reversible"). It
 //! looks up every handle the list names, holding each table's read lock
-//! once for the whole list, and panics on a stale one.
+//! once for the whole list, and panics on a stale one, and on a subresource
+//! outside its texture.
 //!
-//! Lock order: a table's read lock is taken while a command pool is checked
-//! out, never the other way around, and the queue's lock is never taken.
+//! Lock order: the tables' read locks are taken while a command pool is
+//! checked out, never the other way around, and the queue's lock is never
+//! taken. Holding the buffer and texture tables' read locks together can't
+//! deadlock, since nothing takes either's write lock while holding the
+//! other.
 
 #[cfg(test)]
 mod gpu_tests;
@@ -19,7 +23,7 @@ use std::sync::Arc;
 use ash::vk;
 
 use super::VulkanDevice;
-use super::access::access_info;
+use super::access::{AccessInfo, access_info};
 use super::command_pools::PooledCommands;
 use super::error::error;
 use crate::barrier::BarrierTarget;
@@ -150,15 +154,18 @@ impl VulkanDevice {
     unsafe fn record(&self, buffer: vk::CommandBuffer, list: &CommandList) {
         let device = self.device.handle();
         let buffers = self.lock_buffers_for_reading();
+        let textures = self.lock_textures_for_reading();
         // Reused for each barrier command, so recording them doesn't allocate
         // once they've grown.
         let mut memory_barriers = Vec::new();
         let mut buffer_barriers = Vec::new();
+        let mut image_barriers = Vec::new();
         for command in list.commands() {
             match command {
                 Command::Barrier { barriers } => {
                     memory_barriers.clear();
                     buffer_barriers.clear();
+                    image_barriers.clear();
                     for barrier in list.barriers(barriers) {
                         let before = access_info(barrier.before());
                         let after = access_info(barrier.after());
@@ -182,17 +189,40 @@ impl VulkanDevice {
                                     .offset(0)
                                     .size(vk::WHOLE_SIZE),
                             ),
-                            BarrierTarget::Texture(..) => {
-                                unimplemented!("texture barriers are translated from the next PR")
+                            BarrierTarget::Texture(target, subresource) => {
+                                let (label, entry) = textures
+                                    .lookup(target.handle())
+                                    .unwrap_or_else(|err| panic!("{err}"));
+                                let layout = |info: AccessInfo| {
+                                    info.layout
+                                        .expect("recording checked the access applies to textures")
+                                };
+                                image_barriers.push(
+                                    vk::ImageMemoryBarrier2::default()
+                                        .src_stage_mask(before.stages)
+                                        .src_access_mask(before.access)
+                                        .dst_stage_mask(after.stages)
+                                        .dst_access_mask(after.access)
+                                        .old_layout(layout(before))
+                                        .new_layout(layout(after))
+                                        .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                                        .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                                        .image(entry.image())
+                                        .subresource_range(
+                                            entry.subresource_range(label, subresource),
+                                        ),
+                                );
                             }
                         }
                     }
                     let dependency_info = vk::DependencyInfo::default()
                         .memory_barriers(&memory_barriers)
-                        .buffer_memory_barriers(&buffer_barriers);
-                    // SAFETY: Guaranteed by the caller, each buffer is live,
-                    // since the table is locked, and `dependency_info` is
-                    // valid for the call.
+                        .buffer_memory_barriers(&buffer_barriers)
+                        .image_memory_barriers(&image_barriers);
+                    // SAFETY: Guaranteed by the caller, each buffer and
+                    // image is live, since the tables are locked, each
+                    // subresource range is inside its image, and
+                    // `dependency_info` is valid for the call.
                     unsafe { device.cmd_pipeline_barrier2(buffer, &dependency_info) };
                 }
                 &Command::FillBuffer {
