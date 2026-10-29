@@ -14,7 +14,7 @@
 #[cfg(test)]
 mod gpu_tests;
 
-use std::sync::{PoisonError, RwLockWriteGuard};
+use std::sync::{PoisonError, RwLockReadGuard, RwLockWriteGuard};
 
 use ash::vk;
 
@@ -23,7 +23,8 @@ use super::error::{error, error_from_chain};
 use super::memory::{MemoryAllocation, MemoryRequest, Resource, image_memory_requirements};
 use crate::handle::HandleTable;
 use crate::{
-    Format, MemoryLocation, RhiResult, Texture, TextureDesc, TextureDimension, TextureUsage,
+    Format, MemoryLocation, RhiResult, Subresource, Texture, TextureDesc, TextureDimension,
+    TextureUsage,
 };
 
 /// A texture in the texture table.
@@ -33,6 +34,51 @@ pub(super) struct TextureEntry {
     image: vk::Image,
     /// The memory it's bound to.
     allocation: MemoryAllocation,
+    /// The aspects its format has: depth, or colour.
+    aspect: vk::ImageAspectFlags,
+    /// How many mips it has.
+    mip_count: u32,
+    /// How many array layers it has.
+    layer_count: u32,
+}
+
+impl TextureEntry {
+    /// The image, for commands that name it.
+    pub(super) fn image(&self) -> vk::Image {
+        self.image
+    }
+
+    /// The Vulkan range for `subresource` of the texture labelled `label`,
+    /// in every aspect its format has.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the subresource is out of range (see
+    /// [`Subresource::resolve`]).
+    pub(super) fn subresource_range(
+        &self,
+        label: &str,
+        subresource: &Subresource,
+    ) -> vk::ImageSubresourceRange {
+        let resolved = subresource.resolve(label, self.mip_count, self.layer_count);
+        vk::ImageSubresourceRange {
+            aspect_mask: self.aspect,
+            base_mip_level: resolved.mips.start,
+            level_count: resolved.mips.len() as u32,
+            base_array_layer: resolved.layers.start,
+            layer_count: resolved.layers.len() as u32,
+        }
+    }
+}
+
+/// The aspects of an image of `format`: depth for a depth format, and
+/// colour otherwise. There are no stencil formats yet.
+fn aspect(format: Format) -> vk::ImageAspectFlags {
+    if format.is_depth() {
+        vk::ImageAspectFlags::DEPTH
+    } else {
+        vk::ImageAspectFlags::COLOR
+    }
 }
 
 impl From<Format> for vk::Format {
@@ -204,7 +250,13 @@ impl VulkanDevice {
             return Err(error(result, "bind memory for texture", desc.label));
         }
 
-        let entry = TextureEntry { image, allocation };
+        let entry = TextureEntry {
+            image,
+            allocation,
+            aspect: aspect(desc.format),
+            mip_count: desc.mip_levels,
+            layer_count: desc.array_layers,
+        };
         Ok(Texture::from_handle(
             self.lock_textures_for_writing().insert(desc.label, entry),
         ))
@@ -236,6 +288,15 @@ impl VulkanDevice {
         // is freed.
         unsafe { self.device.handle().destroy_image(entry.image, None) };
         self.allocator.free(entry.allocation);
+    }
+
+    /// Locks the texture table for reading, recovering it if a panic
+    /// poisoned it: no table operation panics halfway through, so it's
+    /// consistent.
+    pub(super) fn lock_textures_for_reading(
+        &self,
+    ) -> RwLockReadGuard<'_, HandleTable<TextureEntry>> {
+        self.textures.read().unwrap_or_else(PoisonError::into_inner)
     }
 
     /// Locks the texture table for writing, recovering it if a panic
@@ -283,6 +344,19 @@ mod tests {
         let (usage, features) = usage_flags(every_usage);
         assert_eq!(usage.as_raw().count_ones(), 6);
         assert_eq!(features.as_raw().count_ones(), 6);
+    }
+
+    /// Depth formats have the depth aspect, and the others colour.
+    #[test]
+    fn formats_have_their_aspects() {
+        for format in Format::ALL {
+            let expected = if format == Format::Depth32Float {
+                vk::ImageAspectFlags::DEPTH
+            } else {
+                vk::ImageAspectFlags::COLOR
+            };
+            assert_eq!(aspect(format), expected, "{format:?}");
+        }
     }
 
     /// Cube maps are cube-compatible 2D images, and 3D textures 3D images.
