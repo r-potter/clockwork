@@ -34,6 +34,7 @@ A small game engine written in Rust, rendering with Vulkan.
 
 ### Code
 
+- **Mapping to Vulkan:** the Vulkan backend converts an RHI type to the Vulkan type it stands for with a `From` impl, such as `impl From<Filter> for vk::Filter`, rather than a `vk_*` function. Write the target type at the call site (`vk::Filter::from(desc.mag_filter)`) where a bare `.into()` wouldn't say what it converts to. A mapping that needs more than the value, returns several values, or derives something rather than converting stays a named function, such as `image_type`, which returns a texture dimension's image type and its creation flags.
 - **Create infos:** functions that build a `Vk*CreateInfo` structure, and variables that hold one, are named `*_create_info` (`*_create_infos` for several). Vulkan has other kinds of info structure, such as begin, submit and present infos, and those keep plain `*_info` names.
 - **`SAFETY` comments:** every `unsafe` block has its own `SAFETY:` comment. It can say "as above" only when a full `SAFETY:` comment comes earlier in the same scope, never on the first block.
 - **Documentation:** every item is documented, including private ones. The workspace lints enforce this, except in test code, where it's a review rule.
