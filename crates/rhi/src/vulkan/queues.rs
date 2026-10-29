@@ -334,21 +334,23 @@ impl Queue for VulkanQueue {
     }
 
     fn submit(&self, desc: SubmitDesc<'_>) -> RhiResult<GpuPoint> {
-        self.core
-            .queues
-            .submit(self.core.device.handle(), self.kind, desc)
+        let core = &self.core;
+        core.lost
+            .guard(|| core.queues.submit(core.device.handle(), self.kind, desc))
     }
 
     fn wait(&self, point: GpuPoint) -> RhiResult<()> {
-        self.core
-            .queues
-            .wait(self.core.device.handle(), self.kind, point)
+        let core = &self.core;
+        core.lost
+            .guard(|| core.queues.wait(core.device.handle(), self.kind, point))
     }
 
     fn is_complete(&self, point: GpuPoint) -> RhiResult<bool> {
-        self.core
-            .queues
-            .is_complete(self.core.device.handle(), self.kind, point)
+        let core = &self.core;
+        core.lost.guard(|| {
+            core.queues
+                .is_complete(core.device.handle(), self.kind, point)
+        })
     }
 }
 

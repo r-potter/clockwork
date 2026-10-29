@@ -37,6 +37,7 @@ fn variant(result: vk::Result, label: &str) -> Option<RhiError> {
         vk::Result::ERROR_OUT_OF_DEVICE_MEMORY => Some(RhiError::OutOfDeviceMemory {
             label: label.to_owned(),
         }),
+        vk::Result::ERROR_DEVICE_LOST => Some(RhiError::DeviceLost),
         _ => None,
     }
 }
@@ -60,6 +61,22 @@ mod tests {
         assert!(matches!(
             err,
             RhiError::OutOfDeviceMemory { label } if label == "vertices"
+        ));
+    }
+
+    /// A lost device is `DeviceLost`, whatever the call was doing, on its
+    /// own or in a chain.
+    #[test]
+    fn device_lost_is_mapped() {
+        assert!(matches!(
+            error(vk::Result::ERROR_DEVICE_LOST, "submit to queue", "graphics"),
+            RhiError::DeviceLost
+        ));
+        let err =
+            anyhow::Error::from(vk::Result::ERROR_DEVICE_LOST).context("failed to map memory");
+        assert!(matches!(
+            error_from_chain(err, "vertices"),
+            RhiError::DeviceLost
         ));
     }
 
