@@ -41,6 +41,7 @@ mod buffer;
 mod capabilities;
 mod command_list;
 mod copy;
+mod deferred;
 mod descriptor;
 mod error;
 mod ffi;
