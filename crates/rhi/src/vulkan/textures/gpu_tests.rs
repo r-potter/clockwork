@@ -99,6 +99,7 @@ fn textures_of_every_dimension_are_created() {
     for texture in textures {
         resources.destroy_texture(texture);
     }
+    resources.collect_garbage();
     for memory_type in memory_types {
         let (before, after) = (before[memory_type as usize], statistics(memory_type));
         assert_eq!(

@@ -61,6 +61,7 @@ fn buffers_in_every_location_have_addresses() {
     for buffer in buffers {
         resources.destroy_buffer(buffer);
     }
+    resources.collect_garbage();
     for memory_type in memory_types {
         let statistics = backend.core.allocator.statistics(memory_type);
         assert_eq!(statistics.pool.allocated, 0, "memory type {memory_type}");
@@ -95,6 +96,7 @@ fn many_small_buffers() {
     for buffer in buffers {
         resources.destroy_buffer(buffer);
     }
+    resources.collect_garbage();
     let statistics = backend.core.allocator.statistics(memory_type);
     assert_eq!(statistics.pool.allocated, 0);
     assert!(statistics.pool.blocks <= 1, "{statistics:?}");
