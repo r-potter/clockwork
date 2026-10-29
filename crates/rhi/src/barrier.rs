@@ -10,7 +10,7 @@
 
 use std::ops::Range;
 
-use crate::{Buffer, Texture};
+use crate::{Buffer, QueueId, Texture};
 
 /// A way a resource is used, which a barrier orders against another.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -228,6 +228,8 @@ pub struct Barrier {
     before: Access,
     /// How it's used after it.
     after: Access,
+    /// The queues ownership moves from and to, if it moves.
+    transfer: Option<(QueueId, QueueId)>,
 }
 
 impl Barrier {
@@ -238,6 +240,7 @@ impl Barrier {
             target: BarrierTarget::Global,
             before,
             after,
+            transfer: None,
         }
     }
 
@@ -247,6 +250,7 @@ impl Barrier {
             target: BarrierTarget::Buffer(buffer),
             before,
             after,
+            transfer: None,
         }
     }
 
@@ -267,7 +271,27 @@ impl Barrier {
             target: BarrierTarget::Texture(texture, subresource),
             before,
             after,
+            transfer: None,
         }
+    }
+
+    /// The barrier, also moving the resource's ownership from the queue
+    /// `from` to the queue `to` (design 0002, "Synchronization"). Record it
+    /// on both queues, with the same accesses: on `from` it releases the
+    /// resource, after the accesses before it, and on `to` it acquires it,
+    /// before the accesses after it, once a wait orders the two. When both
+    /// are one queue, as when two kinds share a queue, or are two queues on
+    /// one family, the backend drops the transfer and keeps the accesses.
+    pub fn with_queue_transfer(self, from: QueueId, to: QueueId) -> Self {
+        Self {
+            transfer: Some((from, to)),
+            ..self
+        }
+    }
+
+    /// The queues ownership moves from and to, if it moves.
+    pub fn queue_transfer(&self) -> Option<(QueueId, QueueId)> {
+        self.transfer
     }
 
     /// What the barrier applies to.
@@ -292,8 +316,9 @@ impl Barrier {
     ///
     /// Panics, naming the list, if a buffer is given an access only
     /// textures have, a texture is given one only buffers have, all memory
-    /// is given [`Access::Present`], which needs a layout, or a texture is
-    /// moved to [`Access::None`], which has no layout to move to.
+    /// is given [`Access::Present`], which needs a layout, a texture is
+    /// moved to [`Access::None`], which has no layout to move to, or a queue
+    /// transfer is for all memory, which no queue owns.
     pub(crate) fn check(&self, list: &str) {
         let (target, applies): (_, fn(Access) -> bool) = match self.target {
             // A global barrier orders memory accesses only, with no layout,
@@ -307,6 +332,13 @@ impl Barrier {
                 applies(access),
                 "command list \"{list}\" has a barrier for {target} with {access:?}, which \
                  doesn't apply to {target}",
+            );
+        }
+        if self.transfer.is_some() {
+            assert!(
+                self.target != BarrierTarget::Global,
+                "command list \"{list}\" has a barrier for all memory with a queue transfer, but \
+                 only a buffer or texture can move between queues",
             );
         }
         if let BarrierTarget::Texture(..) = self.target {
@@ -336,6 +368,12 @@ mod tests {
 
     use super::*;
     use crate::handle::HandleTable;
+
+    /// A graphics queue's ID, for tests.
+    const GRAPHICS: QueueId = QueueId::new(0);
+
+    /// A transfer queue's ID, for tests.
+    const TRANSFER: QueueId = QueueId::new(1);
 
     /// A texture handle for tests, from a table of its own.
     fn texture() -> Texture {
@@ -486,6 +524,44 @@ mod tests {
             Access::FragmentShaderSampledRead,
         )
         .check("list");
+    }
+
+    /// Queue transfers are kept, and checked: a buffer or texture can move
+    /// between two queues, or name one queue at both ends, as when two
+    /// kinds share it.
+    #[test]
+    fn queue_transfers_are_kept() {
+        let barrier = Barrier::buffer(buffer(), Access::CopyWrite, Access::CopyRead)
+            .with_queue_transfer(TRANSFER, GRAPHICS);
+        barrier.check("list");
+        assert_eq!(barrier.queue_transfer(), Some((TRANSFER, GRAPHICS)));
+        Barrier::texture(
+            texture(),
+            Access::CopyWrite,
+            Access::FragmentShaderSampledRead,
+        )
+        .with_queue_transfer(TRANSFER, GRAPHICS)
+        .check("list");
+        Barrier::buffer(buffer(), Access::CopyWrite, Access::CopyRead)
+            .with_queue_transfer(GRAPHICS, GRAPHICS)
+            .check("list");
+        assert_eq!(
+            Barrier::global(Access::CopyWrite, Access::CopyRead).queue_transfer(),
+            None
+        );
+    }
+
+    /// A global barrier can't move between queues, since no queue owns all
+    /// memory.
+    #[test]
+    #[should_panic(
+        expected = "command list \"upload\" has a barrier for all memory with a queue transfer, \
+                    but only a buffer or texture can move between queues"
+    )]
+    fn global_queue_transfers_panic() {
+        Barrier::global(Access::CopyWrite, Access::CopyRead)
+            .with_queue_transfer(TRANSFER, GRAPHICS)
+            .check("upload");
     }
 
     /// A buffer barrier with an access only textures have panics, naming

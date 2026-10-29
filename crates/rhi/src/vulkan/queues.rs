@@ -168,6 +168,8 @@ struct DeviceQueue {
     /// kind uses it. It's the reverse of [`Queues::roles`] (see "Mapping
     /// roles to queues" on [`Queues`]).
     role: QueueRole,
+    /// Its family.
+    family: u32,
     /// The queue, locked for each submission and present.
     queue: Mutex<vk::Queue>,
     /// A timeline semaphore, signalled with the number of each submission.
@@ -242,6 +244,7 @@ impl Queues {
         device.set_object_name(queue, role.name());
         self.queues.push(DeviceQueue {
             role,
+            family,
             queue: Mutex::new(queue),
             timeline,
             submitted: AtomicU64::new(0),
@@ -267,6 +270,11 @@ impl Queues {
     /// `present` for one only presenting uses.
     pub(super) fn name(&self, id: QueueId) -> &'static str {
         self.get(id).role.name()
+    }
+
+    /// The family of the queue `id`.
+    pub(super) fn family(&self, id: QueueId) -> u32 {
+        self.get(id).family
     }
 
     /// The queue `id`.
