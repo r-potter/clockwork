@@ -162,6 +162,9 @@ struct VulkanInstance {
     instance: Instance,
     /// Present only when validation is enabled and available.
     debug_messenger: Option<DebugMessenger>,
+    /// Whether `VK_EXT_debug_utils` is enabled, for validation's messages
+    /// and object names (see [`should_enable_debug_utils`]).
+    debug_utils: bool,
     /// Whether the surface extensions for a display were enabled, so that
     /// surfaces can be created. `false` when headless.
     supports_surfaces: bool,
@@ -229,7 +232,12 @@ impl VulkanRenderHardwareInterface {
             present_capabilities,
         } = device_selection::select(candidates, options.device_filter.as_deref())?;
 
-        let device = LogicalDevice::new(&instance.instance, &physical_device, queue_families)?;
+        let device = LogicalDevice::new(
+            &instance.instance,
+            &physical_device,
+            queue_families,
+            instance.debug_utils,
+        )?;
         // Create these before the core takes the instance, so that if either
         // fails, the surface is still destroyed before the instance.
         let frames = Frames::new(&device)?;
@@ -237,7 +245,7 @@ impl VulkanRenderHardwareInterface {
 
         let allocator = MemoryAllocator::new(device.handle(), physical_device.memory_properties);
         let heaps = DescriptorHeaps::new(
-            device.handle(),
+            &device,
             &allocator,
             &physical_device.properties.descriptor_heap,
         )?;
@@ -545,14 +553,19 @@ impl VulkanInstance {
             info!("Vulkan validation: off");
         }
 
+        let enable_debug_utils = should_enable_debug_utils(&entry, validate)?;
+
         let mut layers = Vec::new();
         let mut extensions = Vec::new();
+        if enable_debug_utils {
+            // Provided by the validation layer when validating, and by the
+            // loader otherwise.
+            extensions.push(debug_utils::NAME.as_ptr());
+        }
         if validate {
             layers.push(VALIDATION_LAYER.as_ptr());
-            // Provided by the validation layer.
-            extensions.push(debug_utils::NAME.as_ptr());
             if plan.use_settings {
-                // Also provided by the validation layer.
+                // Provided by the validation layer.
                 extensions.push(vk::EXT_LAYER_SETTINGS_NAME.as_ptr());
             }
         }
@@ -597,6 +610,7 @@ impl VulkanInstance {
             entry,
             instance,
             debug_messenger: None,
+            debug_utils: enable_debug_utils,
             supports_surfaces: display_handle.is_some(),
         };
         if validate {
@@ -615,6 +629,33 @@ impl VulkanInstance {
 
         Ok(vulkan_instance)
     }
+}
+
+/// Whether the instance should enable `VK_EXT_debug_utils`, and so name
+/// objects (see [`LogicalDevice::set_object_name`]): whenever it will
+/// `validate`, since the validation layer provides the extension and sends
+/// its messages through it, and in a debug build when `entry`'s loader
+/// offers it, so that a capture of a normal run shows the names. An
+/// optimized release build without validation doesn't enable it, so naming
+/// costs it nothing.
+///
+/// # Errors
+///
+/// Returns an error if the loader's instance extensions can't be
+/// enumerated.
+fn should_enable_debug_utils(entry: &Entry, validate: bool) -> Result<bool> {
+    if validate {
+        return Ok(true);
+    }
+    if !cfg!(debug_assertions) {
+        return Ok(false);
+    }
+    // SAFETY: `entry` holds a valid, loaded Vulkan loader.
+    let extensions = unsafe { entry.enumerate_instance_extension_properties(None) }
+        .context("failed to enumerate Vulkan instance extensions")?;
+    Ok(extensions
+        .iter()
+        .any(|extension| extension.extension_name_as_c_str() == Ok(debug_utils::NAME)))
 }
 
 /// Formats a Vulkan version number as `major.minor.patch`.

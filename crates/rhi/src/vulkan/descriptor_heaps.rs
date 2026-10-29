@@ -22,6 +22,7 @@ use std::sync::{Mutex, MutexGuard, PoisonError};
 use anyhow::{Context, Result};
 use ash::vk;
 
+use super::device::LogicalDevice;
 use super::memory::{
     DedicatedAllocationProperties, MemoryAllocation, MemoryAllocator, MemoryRequest, MemoryUse,
     Resource, buffer_memory_requirements,
@@ -44,18 +45,20 @@ pub(super) struct DescriptorHeaps {
 }
 
 impl DescriptorHeaps {
-    /// Creates both heaps on `device`, laid out for its descriptor heap
-    /// `properties`, with memory from `allocator`.
+    /// Creates both heaps on `logical_device`, laid out for its descriptor
+    /// heap `properties`, with memory from `allocator`, and names their
+    /// buffers after the heaps.
     ///
     /// # Errors
     ///
     /// Returns an error if either heap's buffer can't be created, or its
     /// memory allocated or bound.
     pub(super) fn new(
-        device: &ash::Device,
+        logical_device: &LogicalDevice,
         allocator: &MemoryAllocator,
         properties: &vk::PhysicalDeviceDescriptorHeapPropertiesEXT<'_>,
     ) -> Result<Self> {
+        let device = logical_device.handle();
         let mut resource = DescriptorHeap::new(
             device,
             allocator,
@@ -73,6 +76,9 @@ impl DescriptorHeaps {
             // `allocator`, and nothing has used it.
             unsafe { resource.destroy(device, allocator) };
         })?;
+        for heap in [&resource, &sampler] {
+            logical_device.set_object_name(heap.buffer, heap.label());
+        }
         Ok(Self { resource, sampler })
     }
 
@@ -186,10 +192,6 @@ impl DescriptorHeap {
     }
 
     /// The heap's name, in messages and debug tools.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "debug names name the heaps in a later PR")
-    )]
     pub(super) fn label(&self) -> &'static str {
         self.label
     }

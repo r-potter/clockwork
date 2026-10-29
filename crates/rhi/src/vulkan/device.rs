@@ -3,9 +3,11 @@
 use anyhow::{Context, Result};
 use ash::vk::TaggedStructure;
 use ash::{Instance, ext, khr, vk};
+use tracing::debug;
 
 use super::device_selection::QueueFamilies;
 use super::physical_device::PhysicalDevice;
+use crate::ffi::truncate_to_cstring;
 
 /// A logical device, created from the selected physical device, and the
 /// queues retrieved from it.
@@ -21,6 +23,9 @@ pub(super) struct LogicalDevice {
     /// `VK_EXT_descriptor_heap` functions, for writing descriptors into the
     /// heaps.
     descriptor_heap: ext::descriptor_heap::Device,
+    /// `VK_EXT_debug_utils` functions, for naming objects after their
+    /// labels, or `None` if the extension isn't enabled.
+    debug_utils: Option<ext::debug_utils::Device>,
     /// The families the queues below were created from.
     queue_families: QueueFamilies,
     /// The queue rendering work is submitted to.
@@ -41,6 +46,9 @@ impl LogicalDevice {
     ///   `host_query_reset`
     /// - Vulkan 1.3's `dynamic_rendering` and `synchronization2`
     ///
+    /// Objects on it are named if `debug_utils`, meaning `VK_EXT_debug_utils`
+    /// is enabled on `instance` (see [`LogicalDevice::set_object_name`]).
+    ///
     /// If `queue_families` has a present family, `VK_KHR_swapchain` is also
     /// enabled. `texture_compression_bc` is enabled where the device supports
     /// it, since it's optional (design 0002, "Data structures and layout").
@@ -52,6 +60,7 @@ impl LogicalDevice {
         instance: &Instance,
         physical_device: &PhysicalDevice,
         queue_families: QueueFamilies,
+        debug_utils: bool,
     ) -> Result<Self> {
         // Vulkan forbids requesting the same family twice, so request the
         // present family separately only if it differs from the graphics one.
@@ -131,6 +140,7 @@ impl LogicalDevice {
         Ok(Self {
             shader_object: ext::shader_object::Device::load(instance, &device),
             descriptor_heap: ext::descriptor_heap::Device::load(instance, &device),
+            debug_utils: debug_utils.then(|| ext::debug_utils::Device::load(instance, &device)),
             device,
             queue_families,
             graphics_queue,
@@ -151,6 +161,33 @@ impl LogicalDevice {
     /// The `VK_EXT_descriptor_heap` functions.
     pub(super) fn descriptor_heap(&self) -> &ext::descriptor_heap::Device {
         &self.descriptor_heap
+    }
+
+    /// Names `object`, a live object created on this device, after `label`,
+    /// for capture tools such as RenderDoc and Nsight, and for validation
+    /// messages (design 0002, "Handles"). Does nothing without
+    /// `VK_EXT_debug_utils`, when labels are still used in panics and logs.
+    ///
+    /// Buffers, images and the descriptor heaps' buffers are named. Memory
+    /// isn't: a pooled block holds many resources, and a dedicated
+    /// allocation is found through the resource bound to it.
+    ///
+    /// Failing to set a name only loses the name, so it's logged at `DEBUG`
+    /// and otherwise ignored.
+    pub(super) fn set_object_name<T: vk::Handle>(&self, object: T, label: &str) {
+        let Some(debug_utils) = &self.debug_utils else {
+            return;
+        };
+        let name = truncate_to_cstring(label);
+        let name_info = vk::DebugUtilsObjectNameInfoEXT::default()
+            .object_handle(object)
+            .object_name(&name);
+        // SAFETY: `name_info` is valid for the call, `debug_utils` was loaded
+        // for this device with `VK_EXT_debug_utils` enabled on its instance,
+        // and the caller passes a live object created on this device.
+        if let Err(result) = unsafe { debug_utils.set_debug_utils_object_name(&name_info) } {
+            debug!("failed to name {:?} \"{label}\": {result:?}", T::TYPE);
+        }
     }
 
     /// The queue families the device's queues were created from.

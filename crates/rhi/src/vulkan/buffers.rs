@@ -92,6 +92,7 @@ impl VulkanDevice {
         // requires it).
         let buffer = unsafe { device.create_buffer(&buffer_create_info, None) }
             .map_err(|result| error(result, "create buffer", desc.label))?;
+        self.device.set_object_name(buffer, desc.label);
 
         // SAFETY: `buffer` was just created on `device`.
         let (requirements, dedication) = unsafe { buffer_memory_requirements(device, buffer) };
