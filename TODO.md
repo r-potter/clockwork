@@ -192,6 +192,12 @@ Outstanding tasks and future work.
       (2026-10-19 to 2026-11-19) can't change the packages `linux-lavapipe`
       installs, or the libraries its lavapipe build links. Moving to 26.04 is
       a deliberate change, as "CI" in `docs/testing.md` describes.
+- [ ] **Check texture copies' buffer ranges in debug builds.** Copies
+      name buffers by address (design 0002, R5), so the bytes
+      `check_texture_copy` returns aren't checked against a buffer, and a
+      range past the end of one is read or written unreported. Translation
+      could look the address up in the buffer table in debug builds and
+      panic, naming the buffer, if the range doesn't fit inside it.
 - [ ] **Check buffer hazards once synchronization validation sees
       copies and fills by address.** The RHI copies and fills buffers with
       `VK_KHR_device_address_commands`, which synchronization validation
