@@ -17,6 +17,7 @@ use std::sync::{PoisonError, RwLockReadGuard, RwLockWriteGuard};
 use ash::vk;
 
 use super::VulkanDevice;
+use super::destruction::Retired;
 use super::error::error;
 use crate::handle::HandleTable;
 use crate::{
@@ -120,17 +121,15 @@ impl VulkanDevice {
         ))
     }
 
-    /// Removes `sampler` from the table, and frees its slot.
+    /// Removes `sampler` from the table, and retires it, for its slot to be
+    /// freed once nothing translated before now can use it.
     ///
     /// # Panics
     ///
     /// Panics if the handle is stale.
     pub(super) fn destroy_sampler_entry(&self, sampler: Sampler) {
         let (_, entry) = self.lock_samplers_for_writing().remove(sampler.handle());
-        // No submission so far reads the descriptor once they've completed.
-        // Deferred destruction, later in `rhi-commands`, replaces the wait.
-        self.wait_for_submissions();
-        self.free_sampler(entry);
+        self.retire(Retired::Sampler(entry));
     }
 
     /// Frees the slot of a sampler taken out of the table.

@@ -330,7 +330,7 @@ fn clears_are_validated() {
 
 Declare the session first, so that the backend is dropped first, and anything logged while it's destroyed still reaches the session. Tests of `rhi::create` itself pass it `test_support::backend_options(&session)`, which is how `VulkanTestBackend` is configured too.
 
-Destroy every buffer, texture and sampler the test creates. Objects left when the backend is dropped are freed with it, but each kind left is reported with a `WARN` on `clockwork::leaks` (design 0002, "Handles"), which fails the test:
+Destroy every buffer, texture and sampler the test creates. Destroying one retires it, and it's freed once nothing translated before can use it (design 0002, "Deferred destruction"), at the next submission or `collect_garbage`, or when the backend is dropped. A test that checks memory statistics or heap slots after destroying calls `collect_garbage` first. Objects left when the backend is dropped are freed with it, but each kind left is reported with a `WARN` on `clockwork::leaks` (design 0002, "Handles"), which fails the test:
 
 ```text
 WARN clockwork::leaks: 2 samplers were never destroyed, and were freed with the device: "second", "third"

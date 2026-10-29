@@ -48,13 +48,6 @@ pub(crate) struct DeferredQueue<T> {
     retired: VecDeque<(u64, T)>,
 }
 
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "the backend retires objects through it in the next PR"
-    )
-)]
 impl<T> DeferredQueue<T> {
     /// An empty queue, at the first epoch.
     pub(crate) fn new() -> Self {
@@ -135,6 +128,12 @@ impl<T> DeferredQueue<T> {
     /// is idle, when nothing can use them.
     pub(crate) fn drain(&mut self) -> Vec<T> {
         self.retired.drain(..).map(|(_, object)| object).collect()
+    }
+
+    /// How many retired objects are waiting to be freed.
+    #[cfg(test)]
+    pub(crate) fn retired_len(&self) -> usize {
+        self.retired.len()
     }
 
     /// Counts one fewer unsubmitted command buffer from `epoch`.
