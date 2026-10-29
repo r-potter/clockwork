@@ -200,6 +200,7 @@ Later designs add the other tiers design 0001 lists. Design 0002 adds property t
 - **Document each test**: what it checks, and why it matters, if that isn't obvious.
 - **Keep logic pure where you can,** taking its inputs (the platform, environment variables, a file probe, device properties) as parameters, so that it's T0 and every platform's behaviour is tested on any machine (ADR 0003). `crates/rhi/build/slangc.rs` and `xtask/src/window_systems.rs` are examples: the Linux window systems are tested on Windows, and Win32 on Linux.
 - **Build paths with `Path`,** never by joining strings, and compare `Path` values, not strings, so tests pass on both operating systems.
+- **Check what a command list recorded through `CommandList::recorded`,** which resolves its arenas, rather than matching its private `Command`s, so that the recording model can change without rewriting the tests (design 0002, "Keeping the recording model reversible"). Test each recording check with `#[should_panic(expected = "...")]` and its whole message.
 - **Fixture files go in `testdata/`,** next to the code that uses them.
 - **Fix a bug by writing a failing test first,** then the fix.
 
