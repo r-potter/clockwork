@@ -35,17 +35,19 @@ pub(super) struct TextureEntry {
     allocation: MemoryAllocation,
 }
 
-/// The Vulkan format for `format`.
-pub(super) fn vk_format(format: Format) -> vk::Format {
-    match format {
-        Format::Rgba8Unorm => vk::Format::R8G8B8A8_UNORM,
-        Format::Rgba8Srgb => vk::Format::R8G8B8A8_SRGB,
-        Format::Bgra8Unorm => vk::Format::B8G8R8A8_UNORM,
-        Format::Bgra8Srgb => vk::Format::B8G8R8A8_SRGB,
-        Format::Rgba16Float => vk::Format::R16G16B16A16_SFLOAT,
-        Format::Rgba32Float => vk::Format::R32G32B32A32_SFLOAT,
-        Format::R32Uint => vk::Format::R32_UINT,
-        Format::Depth32Float => vk::Format::D32_SFLOAT,
+impl From<Format> for vk::Format {
+    /// The Vulkan format for `format`.
+    fn from(format: Format) -> Self {
+        match format {
+            Format::Rgba8Unorm => Self::R8G8B8A8_UNORM,
+            Format::Rgba8Srgb => Self::R8G8B8A8_SRGB,
+            Format::Bgra8Unorm => Self::B8G8R8A8_UNORM,
+            Format::Bgra8Srgb => Self::B8G8R8A8_SRGB,
+            Format::Rgba16Float => Self::R16G16B16A16_SFLOAT,
+            Format::Rgba32Float => Self::R32G32B32A32_SFLOAT,
+            Format::R32Uint => Self::R32_UINT,
+            Format::Depth32Float => Self::D32_SFLOAT,
+        }
     }
 }
 
@@ -130,7 +132,7 @@ impl VulkanDevice {
     /// its usage.
     pub(super) fn create_texture_entry(&self, desc: &TextureDesc<'_>) -> RhiResult<Texture> {
         desc.validate();
-        let format = vk_format(desc.format);
+        let format = vk::Format::from(desc.format);
         let (usage, features) = usage_flags(desc.usage);
         // SAFETY: The physical device was enumerated from this instance.
         let supported = unsafe {
@@ -255,9 +257,12 @@ mod tests {
     /// Every format has a Vulkan format of its own.
     #[test]
     fn formats_map_to_distinct_vulkan_formats() {
-        let formats: HashSet<_> = Format::ALL.into_iter().map(vk_format).collect();
+        let formats: HashSet<_> = Format::ALL.into_iter().map(vk::Format::from).collect();
         assert_eq!(formats.len(), Format::ALL.len());
-        assert_eq!(vk_format(Format::Depth32Float), vk::Format::D32_SFLOAT);
+        assert_eq!(
+            vk::Format::from(Format::Depth32Float),
+            vk::Format::D32_SFLOAT
+        );
     }
 
     /// Each usage adds its image usage and the format feature it needs.
