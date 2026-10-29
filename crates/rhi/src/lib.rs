@@ -27,7 +27,9 @@
 //! can act on (design 0002, "Error handling").
 //!
 //! GPU work is recorded into a [`CommandList`], plain data that needs no
-//! device (design 0002, "Command lists and translation").
+//! device (design 0002, "Command lists and translation"), and submitted to a
+//! [`Queue`], which orders it on a timeline (design 0002, "Queues and
+//! submission").
 //!
 //! To add a backend:
 //! 1. add a variant to [`GraphicsApi`],
@@ -43,6 +45,7 @@ mod ffi;
 #[cfg(test)]
 mod gpu_tests;
 mod handle;
+mod queue;
 mod sampler;
 #[cfg(test)]
 mod test_support;
@@ -64,6 +67,7 @@ pub use capabilities::{
 pub use command_list::CommandList;
 pub use descriptor::{DescriptorIndex, HeapKind};
 pub use error::{RhiError, RhiResult};
+pub use queue::{GpuPoint, Queue, SubmitDesc};
 pub use sampler::{AddressMode, Filter, Sampler, SamplerDesc};
 pub use texture::{Extent3d, Format, Texture, TextureDesc, TextureDimension, TextureUsage};
 use vulkan::VulkanRenderHardwareInterface;
@@ -447,13 +451,19 @@ const _: () = {
 /// opaque handles rather than as backend-specific associated types.
 ///
 /// A backend stays on the thread that created it, since it owns the window's
-/// surface and swapchain. What other threads need is its [`GpuResources`].
+/// surface and swapchain. What other threads need is its [`GpuResources`]
+/// and [`Queue`]s.
 pub trait RenderHardwareInterface: Debug {
     /// Returns the graphics API this backend implements.
     fn api(&self) -> GraphicsApi;
 
     /// The GPU resources, to share with other threads.
     fn resources(&self) -> &Arc<dyn GpuResources>;
+
+    /// The queue for `kind`, to share with other threads. A kind with no
+    /// dedicated family gets the queue of the kind it shares with, whose
+    /// [`Queue::kind`] says which it is.
+    fn queue(&self, kind: QueueKind) -> &Arc<dyn Queue>;
 
     /// What presenting to a window can do on the selected device. A headless
     /// backend reports it too, since it describes the device.
