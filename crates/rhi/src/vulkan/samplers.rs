@@ -2,12 +2,33 @@
 //!
 //! A sampler is only a slot in the sampler heap. `VK_EXT_descriptor_heap`
 //! writes its descriptor straight from a `VkSamplerCreateInfo`, so there's
-//! no `VkSampler` to create or destroy. This module translates a
-//! [`SamplerDesc`] into the create info its descriptor is written from.
+//! no `VkSampler` to create or destroy. The [`VulkanDevice`]'s sampler table
+//! holds each sampler's slot.
+//!
+//! Lock order: the sampler table is never held while a heap's slot
+//! allocator is locked, so the two can't deadlock.
+
+#[cfg(test)]
+mod gpu_tests;
+
+use std::slice;
+use std::sync::{PoisonError, RwLockReadGuard, RwLockWriteGuard};
 
 use ash::vk;
 
-use crate::{AddressMode, Filter, SamplerDesc};
+use super::VulkanDevice;
+use super::error::error;
+use crate::handle::HandleTable;
+use crate::{
+    AddressMode, DescriptorIndex, Filter, HeapKind, RhiError, RhiResult, Sampler, SamplerDesc,
+};
+
+/// A sampler in the sampler table.
+#[derive(Debug)]
+pub(super) struct SamplerEntry {
+    /// The sampler's slot in the sampler heap.
+    slot: u32,
+}
 
 impl From<Filter> for vk::Filter {
     /// The Vulkan filter for filtering texels with `filter`.
@@ -43,13 +64,6 @@ impl From<AddressMode> for vk::SamplerAddressMode {
 /// The create info `desc`'s descriptor is written from: its filters and
 /// address modes, sampling every mip with no bias, anisotropy or
 /// comparison.
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "the Vulkan backend creates samplers in the next PR"
-    )
-)]
 pub(super) fn sampler_create_info(desc: &SamplerDesc<'_>) -> vk::SamplerCreateInfo<'static> {
     let [u, v, w] = desc.address_modes.map(vk::SamplerAddressMode::from);
     vk::SamplerCreateInfo::default()
@@ -61,6 +75,92 @@ pub(super) fn sampler_create_info(desc: &SamplerDesc<'_>) -> vk::SamplerCreateIn
         .address_mode_w(w)
         .min_lod(0.0)
         .max_lod(vk::LOD_CLAMP_NONE)
+}
+
+impl VulkanDevice {
+    /// Writes a descriptor for `desc` into a free slot in the sampler heap,
+    /// and adds the sampler to the sampler table.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RhiError::DescriptorHeapFull`] if the sampler heap has no
+    /// free slot, or [`RhiError::Other`] if the descriptor can't be written.
+    pub(super) fn create_sampler_entry(&self, desc: &SamplerDesc<'_>) -> RhiResult<Sampler> {
+        let heap = &self.heaps.sampler;
+        let slot = heap
+            .allocate_slot()
+            .ok_or_else(|| RhiError::DescriptorHeapFull {
+                heap: HeapKind::Sampler,
+                label: desc.label.to_owned(),
+            })?;
+        let create_info = sampler_create_info(desc);
+        let slot_range = heap.slot_address_range(slot);
+        // SAFETY: `create_info` is valid for the call, and `slot_range` is the
+        // slot's range in the heap's mapped memory, a stride long, which holds
+        // a sampler descriptor. The slot was just handed to this thread, so
+        // nothing else writes to the range, and no submitted work reads it,
+        // since a slot is only freed once nothing can.
+        let written = unsafe {
+            self.device.descriptor_heap().write_sampler_descriptors(
+                slice::from_ref(&create_info),
+                slice::from_ref(&slot_range),
+            )
+        };
+        if let Err(result) = written {
+            heap.free_slot(slot);
+            return Err(error(
+                result,
+                "write the descriptor for sampler",
+                desc.label,
+            ));
+        }
+        let entry = SamplerEntry { slot };
+        Ok(Sampler::from_handle(
+            self.lock_samplers_for_writing().insert(desc.label, entry),
+        ))
+    }
+
+    /// Removes `sampler` from the table, and frees its slot.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the handle is stale.
+    pub(super) fn destroy_sampler_entry(&self, sampler: Sampler) {
+        let (_, entry) = self.lock_samplers_for_writing().remove(sampler.handle());
+        // Nothing can submit work through a `Queue` yet, so no submitted work
+        // reads the descriptor. Once it can, deferred destruction
+        // (`rhi-commands`) frees the slot only once nothing can.
+        self.free_sampler(entry);
+    }
+
+    /// Frees the slot of a sampler taken out of the table.
+    pub(super) fn free_sampler(&self, entry: SamplerEntry) {
+        self.heaps.sampler.free_slot(entry.slot);
+    }
+
+    /// The slot `sampler`'s descriptor is in, for shaders to index.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the handle is stale.
+    pub(super) fn sampler_entry_index(&self, sampler: Sampler) -> DescriptorIndex {
+        DescriptorIndex(self.lock_samplers_for_reading().get(sampler.handle()).slot)
+    }
+
+    /// Locks the sampler table for reading, recovering it if a panic
+    /// poisoned it: no table operation panics halfway through, so it's
+    /// consistent.
+    fn lock_samplers_for_reading(&self) -> RwLockReadGuard<'_, HandleTable<SamplerEntry>> {
+        self.samplers.read().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Locks the sampler table for writing, recovering it as
+    /// [`lock_samplers_for_reading`](Self::lock_samplers_for_reading) does.
+    fn lock_samplers_for_writing(&self) -> RwLockWriteGuard<'_, HandleTable<SamplerEntry>> {
+        self.samplers
+            .write()
+            .unwrap_or_else(PoisonError::into_inner)
+    }
 }
 
 #[cfg(test)]

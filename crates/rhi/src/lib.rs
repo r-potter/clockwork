@@ -395,6 +395,33 @@ pub trait GpuResources: Debug + Send + Sync {
     ///
     /// Panics if the handle is stale.
     fn destroy_texture(&self, texture: Texture);
+
+    /// Creates a sampler, as a slot in the sampler heap.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RhiError::DescriptorHeapFull`] if the sampler heap has no
+    /// free slot, or [`RhiError::Other`] if its descriptor can't be written.
+    fn create_sampler(&self, desc: &SamplerDesc<'_>) -> RhiResult<Sampler>;
+
+    /// Destroys the sampler, freeing its slot. Its handle is stale from then
+    /// on.
+    ///
+    /// Nothing can submit work through a `Queue` yet, so the slot is freed
+    /// straight away, as [`destroy_buffer`](Self::destroy_buffer)
+    /// describes.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the handle is stale.
+    fn destroy_sampler(&self, sampler: Sampler);
+
+    /// The sampler's slot in the sampler heap, for shaders to index.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the handle is stale.
+    fn sampler_index(&self, sampler: Sampler) -> DescriptorIndex;
 }
 
 // The resources are shared between threads, as an `Arc<dyn GpuResources>`

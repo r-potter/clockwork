@@ -18,6 +18,9 @@ pub(super) struct LogicalDevice {
     /// `VK_EXT_shader_object` functions, for creating, binding and drawing
     /// with shader objects.
     shader_object: ext::shader_object::Device,
+    /// `VK_EXT_descriptor_heap` functions, for writing descriptors into the
+    /// heaps.
+    descriptor_heap: ext::descriptor_heap::Device,
     /// The families the queues below were created from.
     queue_families: QueueFamilies,
     /// The queue rendering work is submitted to.
@@ -127,6 +130,7 @@ impl LogicalDevice {
 
         Ok(Self {
             shader_object: ext::shader_object::Device::load(instance, &device),
+            descriptor_heap: ext::descriptor_heap::Device::load(instance, &device),
             device,
             queue_families,
             graphics_queue,
@@ -142,6 +146,11 @@ impl LogicalDevice {
     /// The `VK_EXT_shader_object` functions.
     pub(super) fn shader_object(&self) -> &ext::shader_object::Device {
         &self.shader_object
+    }
+
+    /// The `VK_EXT_descriptor_heap` functions.
+    pub(super) fn descriptor_heap(&self) -> &ext::descriptor_heap::Device {
+        &self.descriptor_heap
     }
 
     /// The queue families the device's queues were created from.
