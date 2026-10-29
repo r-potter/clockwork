@@ -127,9 +127,9 @@ impl VulkanDevice {
     /// Panics if the handle is stale.
     pub(super) fn destroy_sampler_entry(&self, sampler: Sampler) {
         let (_, entry) = self.lock_samplers_for_writing().remove(sampler.handle());
-        // Nothing can submit work through a `Queue` yet, so no submitted work
-        // reads the descriptor. Once it can, deferred destruction
-        // (`rhi-commands`) frees the slot only once nothing can.
+        // No submission so far reads the descriptor once they've completed.
+        // Deferred destruction, later in `rhi-commands`, replaces the wait.
+        self.wait_for_submissions();
         self.free_sampler(entry);
     }
 

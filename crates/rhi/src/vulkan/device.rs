@@ -23,6 +23,9 @@ pub(super) struct LogicalDevice {
     /// `VK_EXT_descriptor_heap` functions, for writing descriptors into the
     /// heaps.
     descriptor_heap: ext::descriptor_heap::Device,
+    /// `VK_KHR_device_address_commands` functions, for copies and fills by
+    /// address.
+    device_address_commands: khr::device_address_commands::Device,
     /// `VK_EXT_debug_utils` functions, for naming objects after their
     /// labels, or `None` if the extension isn't enabled.
     debug_utils: Option<ext::debug_utils::Device>,
@@ -141,6 +144,7 @@ impl LogicalDevice {
         Ok(Self {
             shader_object: ext::shader_object::Device::load(instance, &device),
             descriptor_heap: ext::descriptor_heap::Device::load(instance, &device),
+            device_address_commands: khr::device_address_commands::Device::load(instance, &device),
             debug_utils: debug_utils.then(|| ext::debug_utils::Device::load(instance, &device)),
             device,
             queue_families,
@@ -161,6 +165,17 @@ impl LogicalDevice {
     /// The `VK_EXT_descriptor_heap` functions.
     pub(super) fn descriptor_heap(&self) -> &ext::descriptor_heap::Device {
         &self.descriptor_heap
+    }
+
+    /// The `VK_KHR_device_address_commands` functions.
+    pub(super) fn device_address_commands(&self) -> &khr::device_address_commands::Device {
+        &self.device_address_commands
+    }
+
+    /// The `VK_EXT_debug_utils` functions, or `None` if the extension isn't
+    /// enabled, for debug labels in command buffers.
+    pub(super) fn debug_utils(&self) -> Option<&ext::debug_utils::Device> {
+        self.debug_utils.as_ref()
     }
 
     /// Names `object`, a live object created on this device, after `label`,

@@ -36,7 +36,9 @@ use super::command_pools::{CommandPools, PooledCommands};
 use super::device::LogicalDevice;
 use super::device_selection::QueueFamilies;
 use super::error::error;
-use crate::{GpuPoint, Queue, QueueId, QueueKind, RhiResult, SubmitDesc};
+use crate::{
+    CommandBuffer, CommandList, GpuPoint, Queue, QueueId, QueueKind, RhiResult, SubmitDesc,
+};
 
 /// What a queue is used for: one kind's work, or presenting.
 ///
@@ -261,6 +263,12 @@ impl Queues {
         self.get(id).kind()
     }
 
+    /// The name of the queue `id`: the most capable kind it serves, or
+    /// `present` for one only presenting uses.
+    pub(super) fn name(&self, id: QueueId) -> &'static str {
+        self.get(id).role.name()
+    }
+
     /// The queue `id`.
     ///
     /// # Panics
@@ -288,7 +296,6 @@ impl Queues {
     ///
     /// Returns an error if the timeline can't be read, or a pool can't be
     /// reset or created.
-    #[expect(dead_code, reason = "translation checks pools out in the next PR")]
     pub(super) fn check_out_pool(
         &self,
         device: &ash::Device,
@@ -304,13 +311,13 @@ impl Queues {
 
     /// Gives `commands` back to the queue `id`, reusable once its timeline
     /// reaches `reusable_at`, or at once for 0.
-    #[expect(dead_code, reason = "command buffers give pools back in the next PR")]
     pub(super) fn give_back_pool(&self, id: QueueId, commands: PooledCommands, reusable_at: u64) {
         self.get(id).pools.give_back(commands, reusable_at);
     }
 
     /// Submits `desc` to the queue `id`, on `device`, and returns the point
-    /// its completion reaches.
+    /// its completion reaches. The command buffers' pools go back to the
+    /// queue, reusable once it's reached.
     ///
     /// # Errors
     ///
@@ -318,7 +325,8 @@ impl Queues {
     ///
     /// # Panics
     ///
-    /// Panics if a point to wait for wasn't returned by its queue.
+    /// Panics if a command buffer was translated for another queue, or a
+    /// point to wait for wasn't returned by its queue.
     pub(super) fn submit(
         &self,
         device: &ash::Device,
@@ -326,6 +334,14 @@ impl Queues {
         desc: SubmitDesc<'_>,
     ) -> RhiResult<GpuPoint> {
         let queue = self.get(id);
+        let command_buffer_infos: Vec<_> = desc
+            .command_buffers
+            .iter()
+            .map(|CommandBuffer(command_buffer)| {
+                command_buffer.check_queue(id);
+                vk::CommandBufferSubmitInfo::default().command_buffer(command_buffer.buffer())
+            })
+            .collect();
         let waits: Vec<_> = desc
             .wait_for
             .iter()
@@ -350,9 +366,12 @@ impl Queues {
             .stage_mask(vk::PipelineStageFlags2::ALL_COMMANDS);
         let submit_info = vk::SubmitInfo2::default()
             .wait_semaphore_infos(&waits)
+            .command_buffer_infos(&command_buffer_infos)
             .signal_semaphore_infos(std::slice::from_ref(&signal));
-        // SAFETY: The queue and semaphores were created on `device`, the
-        // queue is locked, so no other thread uses it, the info structures
+        // SAFETY: The queue, semaphores and command buffers were created on
+        // `device`, the queue is locked, so no other thread uses it, each
+        // command buffer was recorded for its family and has ended, and is
+        // owned by `desc`, so it's not pending elsewhere, the info structures
         // outlive the call, and `value` is greater than any value signalled
         // or waited for on this timeline so far.
         unsafe {
@@ -364,6 +383,9 @@ impl Queues {
         }
         .map_err(|result| error(result, "submit to queue", queue.role.name()))?;
         queue.submitted.store(value, Ordering::Release);
+        for CommandBuffer(mut command_buffer) in desc.command_buffers {
+            command_buffer.submitted(value);
+        }
         Ok(GpuPoint::new(id, value))
     }
 
@@ -425,6 +447,26 @@ impl Queues {
         );
         queue.check_returned(point);
         queue
+    }
+
+    /// Waits for every submission so far, on every queue, to complete.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if waiting fails.
+    pub(super) fn wait_for_submissions(&self, device: &ash::Device) -> RhiResult<()> {
+        let (semaphores, values): (Vec<_>, Vec<_>) = self
+            .queues
+            .iter()
+            .map(|queue| (queue.timeline, queue.submitted.load(Ordering::Acquire)))
+            .unzip();
+        let wait_info = vk::SemaphoreWaitInfo::default()
+            .semaphores(&semaphores)
+            .values(&values);
+        // SAFETY: The semaphores are timelines created on `device`, each
+        // value has been submitted, and `wait_info` is valid for the call.
+        unsafe { device.wait_semaphores(&wait_info, u64::MAX) }
+            .map_err(|result| error(result, "wait for every queue", "all"))
     }
 
     /// Destroys the timelines and command pools.
@@ -503,6 +545,11 @@ impl Queue for VulkanQueue {
 
     fn kind(&self) -> QueueKind {
         self.core.queues.kind(self.id)
+    }
+
+    fn translate(&self, commands: &CommandList) -> RhiResult<CommandBuffer> {
+        let core = &self.core;
+        core.lost.guard(|| core.translate(self.id, commands))
     }
 
     fn submit(&self, desc: SubmitDesc<'_>) -> RhiResult<GpuPoint> {
