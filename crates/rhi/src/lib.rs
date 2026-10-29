@@ -26,6 +26,9 @@
 //! RHI calls return an [`RhiError`], which tells apart the failures a caller
 //! can act on (design 0002, "Error handling").
 //!
+//! GPU work is recorded into a [`CommandList`], plain data that needs no
+//! device (design 0002, "Command lists and translation").
+//!
 //! To add a backend:
 //! 1. add a variant to [`GraphicsApi`],
 //! 2. add a submodule with a type implementing [`RenderHardwareInterface`],
@@ -33,6 +36,7 @@
 
 mod buffer;
 mod capabilities;
+mod command_list;
 mod descriptor;
 mod error;
 mod ffi;
@@ -57,6 +61,7 @@ pub use buffer::{Buffer, BufferDesc, BufferUsage, GpuAddress};
 pub use capabilities::{
     Capabilities, Limits, MAX_PUSH_DATA_SIZE, PresentCapabilities, QueueKind, QueueKindSet,
 };
+pub use command_list::CommandList;
 pub use descriptor::{DescriptorIndex, HeapKind};
 pub use error::{RhiError, RhiResult};
 pub use sampler::{AddressMode, Filter, Sampler, SamplerDesc};
