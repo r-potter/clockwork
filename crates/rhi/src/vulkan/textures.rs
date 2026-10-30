@@ -21,10 +21,11 @@ use ash::vk;
 use super::VulkanDevice;
 use super::error::{error, error_from_chain};
 use super::memory::{MemoryAllocation, MemoryRequest, Resource, image_memory_requirements};
+use crate::copy::CopiedTexture;
 use crate::handle::HandleTable;
 use crate::{
-    Format, MemoryLocation, RhiResult, Subresource, Texture, TextureDesc, TextureDimension,
-    TextureUsage,
+    Extent3d, Format, FormatInfo, MemoryLocation, RhiResult, Subresource, Texture, TextureDesc,
+    TextureDimension, TextureUsage,
 };
 
 /// A texture in the texture table.
@@ -36,6 +37,10 @@ pub(super) struct TextureEntry {
     allocation: MemoryAllocation,
     /// The aspects its format has: depth, or colour.
     aspect: vk::ImageAspectFlags,
+    /// Its format's block layout.
+    format: FormatInfo,
+    /// The size of its largest mip.
+    extent: Extent3d,
     /// How many mips it has.
     mip_count: u32,
     /// How many array layers it has.
@@ -46,6 +51,27 @@ impl TextureEntry {
     /// The image, for commands that name it.
     pub(super) fn image(&self) -> vk::Image {
         self.image
+    }
+
+    /// The aspects its format has, for the commands that name them.
+    pub(super) fn aspect(&self) -> vk::ImageAspectFlags {
+        self.aspect
+    }
+
+    /// Its format's block layout.
+    pub(super) fn format(&self) -> FormatInfo {
+        self.format
+    }
+
+    /// What copy checks need to know about the texture labelled `label`.
+    pub(super) fn copied<'a>(&self, label: &'a str) -> CopiedTexture<'a> {
+        CopiedTexture {
+            label,
+            format: self.format,
+            extent: self.extent,
+            mip_count: self.mip_count,
+            layer_count: self.layer_count,
+        }
     }
 
     /// The Vulkan range for `subresource` of the texture labelled `label`,
@@ -254,6 +280,8 @@ impl VulkanDevice {
             image,
             allocation,
             aspect: aspect(desc.format),
+            format: desc.format.info(),
+            extent: desc.extent,
             mip_count: desc.mip_levels,
             layer_count: desc.array_layers,
         };

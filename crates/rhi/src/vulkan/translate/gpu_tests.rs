@@ -1,18 +1,20 @@
 //! T1 tests of translating and submitting command lists on a real device
-//! (design 0002, R4, R7, R9 and R16).
+//! (design 0002, R4, R7, R9, R16 and R25).
 //!
 //! Synchronization validation doesn't track copies and fills by address
-//! (`VK_KHR_device_address_commands`), so a missing barrier between them
-//! isn't reported. R8's `missing_barrier_is_reported` waits for texture
-//! copies, which it does track.
+//! (`VK_KHR_device_address_commands`), on either side, so a missing
+//! barrier between them isn't reported, and R8's
+//! `missing_barrier_is_reported` waits for draws and dispatches in
+//! `rhi-shaders`.
 
 use clockwork_diagnostics::capture::TestSession;
 
+use crate::test_support::skip_for_driver_bug;
 use crate::vulkan::test_support::VulkanTestBackend;
 use crate::{
     Access, Barrier, Buffer, BufferDesc, BufferUsage, CommandList, Extent3d, Format, GpuResources,
     MemoryLocation, QueueKind, RenderHardwareInterface, SubmitDesc, Subresource, Texture,
-    TextureDesc, TextureDimension, TextureUsage,
+    TextureCopy, TextureDataLayout, TextureDesc, TextureDimension, TextureUsage,
 };
 
 /// A buffer of `size` bytes in `location`, for copies.
@@ -330,6 +332,151 @@ fn subresources_outside_their_texture_panic() {
         Access::None,
         Access::FragmentShaderSampledRead,
     )]);
+    let _ = backend.queue(QueueKind::Graphics).translate(&list);
+}
+
+/// The whole of mip 0, layer 0, of `texture`, which is `extent` there.
+fn whole(texture: Texture, extent: Extent3d) -> TextureCopy {
+    TextureCopy {
+        texture,
+        mip: 0,
+        layers: 0..1,
+        origin: [0; 3],
+        extent,
+    }
+}
+
+/// The PCI vendor ID of NVIDIA's GPUs.
+const NVIDIA: u32 = 0x10DE;
+
+/// Data with padded rows, after an offset, copied into a texture and back
+/// out tightly packed, matches the texels it held (R25's
+/// `padded_rows_round_trip`).
+///
+/// Skipped on NVIDIA's drivers, where `vkCmdCopyMemoryToImageKHR` writes
+/// nothing to the image, with no validation message, as of 617.42. It
+/// passes on lavapipe, and the handle-based copy works on NVIDIA, so it's
+/// the driver's. `TODO.md` tracks debugging it in Nsight.
+#[test]
+fn padded_rows_round_trip() {
+    const WIDTH: u32 = 4;
+    const HEIGHT: u32 = 4;
+    const PADDED_ROW: u32 = 256;
+    const OFFSET: u64 = 64;
+    let session = TestSession::new();
+    let backend = VulkanTestBackend::headless(&session);
+    let device = &backend.core.physical_device;
+    if device.properties.core.vendor_id == NVIDIA {
+        skip_for_driver_bug(
+            &device.name(),
+            "vkCmdCopyMemoryToImageKHR writes nothing to the image",
+        );
+        return;
+    }
+    let resources = backend.resources();
+    let extent = Extent3d::new_2d(WIDTH, HEIGHT);
+    let texture = create_texture(
+        &**resources,
+        "padded",
+        Format::Rgba8Unorm,
+        TextureUsage::COPY_SOURCE | TextureUsage::COPY_DESTINATION,
+    );
+    let tight_size = u64::from(WIDTH * HEIGHT * 4);
+    let padded_size = OFFSET + u64::from(PADDED_ROW * HEIGHT);
+    let upload = create(
+        &**resources,
+        "padded rows",
+        padded_size,
+        MemoryLocation::Upload,
+    );
+    let readback = create(
+        &**resources,
+        "tight rows",
+        tight_size,
+        MemoryLocation::Readback,
+    );
+
+    // Each texel's bytes are its row and column, and the padding is 0xEE,
+    // which no texel holds.
+    let mut padded = vec![0xEE; padded_size as usize];
+    let mut tight = Vec::new();
+    for row in 0..HEIGHT {
+        for column in 0..WIDTH {
+            let texel = [row as u8, column as u8, 0x10, 0x20];
+            let at = (OFFSET + u64::from(row * PADDED_ROW + column * 4)) as usize;
+            padded[at..at + 4].copy_from_slice(&texel);
+            tight.extend_from_slice(&texel);
+        }
+    }
+    resources.write_buffer(upload, 0, &padded);
+
+    let padded_layout = TextureDataLayout {
+        offset: OFFSET,
+        bytes_per_row: PADDED_ROW,
+        rows_per_image: HEIGHT,
+    };
+    let mut list = CommandList::new("padded round trip");
+    list.barrier(&[
+        Barrier::buffer(upload, Access::HostWrite, Access::CopyRead),
+        Barrier::texture(texture, Access::None, Access::CopyWrite),
+    ]);
+    list.copy_buffer_to_texture(
+        resources.buffer_address(upload),
+        padded_layout,
+        whole(texture, extent),
+    );
+    list.barrier(&[Barrier::texture(
+        texture,
+        Access::CopyWrite,
+        Access::CopyRead,
+    )]);
+    list.copy_texture_to_buffer(
+        whole(texture, extent),
+        resources.buffer_address(readback),
+        TextureDataLayout::tight(Format::Rgba8Unorm, extent),
+    );
+    list.barrier(&[Barrier::buffer(
+        readback,
+        Access::CopyWrite,
+        Access::HostRead,
+    )]);
+    run(&backend, &list);
+
+    let mut out = vec![0; tight_size as usize];
+    resources.read_buffer(readback, 0, &mut out).unwrap();
+    assert_eq!(out, tight);
+    resources.destroy_buffer(upload);
+    resources.destroy_buffer(readback);
+    resources.destroy_texture(texture);
+}
+
+/// A copy that fails its checks panics when it's translated, naming the
+/// texture.
+#[test]
+#[should_panic(
+    expected = "a copy of texture \"colour\" has 12 bytes per row, but needs a multiple of 4 \
+                that's at least 16"
+)]
+fn texture_copies_are_checked_when_translated() {
+    let session = TestSession::new();
+    let backend = VulkanTestBackend::headless(&session);
+    let resources = backend.resources();
+    let texture = create_texture(
+        &**resources,
+        "colour",
+        Format::Rgba8Unorm,
+        TextureUsage::COPY_DESTINATION,
+    );
+    let extent = Extent3d::new_2d(4, 4);
+    let mut list = CommandList::new("short rows");
+    list.copy_buffer_to_texture(
+        crate::GpuAddress(0x1000),
+        TextureDataLayout {
+            bytes_per_row: 12,
+            ..TextureDataLayout::tight(Format::Rgba8Unorm, extent)
+        },
+        whole(texture, extent),
+    );
     let _ = backend.queue(QueueKind::Graphics).translate(&list);
 }
 

@@ -91,10 +91,6 @@ pub(crate) struct CopiedTexture<'a> {
 /// - `bytes_per_row` isn't a multiple of the block size, or is less than a
 ///   row of blocks
 /// - `rows_per_image` is less than the region's rows of blocks
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "translation checks texture copies in the next PR")
-)]
 pub(crate) fn check_texture_copy(
     texture: &CopiedTexture<'_>,
     copy: &TextureCopy,

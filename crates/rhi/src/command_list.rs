@@ -2,11 +2,12 @@
 //! queue (design 0002, "Command lists and translation").
 //!
 //! A [`CommandList`] holds its commands as a `Vec` of the private
-//! [`Command`] enum, with variable-length data, such as debug text and
-//! barriers, in arenas beside it, so that each command stays small. Recording checks the
-//! rules it can see on its own, and panics on misuse, which is a bug in the
-//! caller. Rules that need the backend's state are checked when the list is
-//! translated.
+//! [`Command`] enum, with larger or variable-length data, such as debug
+//! text, barriers and texture copies, in arenas beside it, so that each
+//! command stays small. Recording checks the rules it can see on its own,
+//! and panics on misuse, which is a bug in the caller. Rules that need the
+//! backend's state, such as a texture copy's checks, are checked when the
+//! list is translated.
 //!
 //! Only this crate reads a list's commands (R18). Tests read them through
 //! the test-only `CommandList::recorded`, which resolves the arena, so that the
@@ -15,7 +16,7 @@
 
 use std::ops::Range;
 
-use crate::{Barrier, GpuAddress};
+use crate::{Barrier, GpuAddress, TextureCopy, TextureDataLayout};
 
 /// The alignment, in bytes, of a fill's address and size, as Vulkan
 /// requires of fills.
@@ -39,6 +40,9 @@ pub struct CommandList {
     text: String,
     /// Every barrier, which commands refer to by range.
     barriers: Vec<Barrier>,
+    /// Every copy between a buffer and a texture, which commands refer to
+    /// by index.
+    texture_copies: Vec<BufferTextureCopy>,
     /// How many debug regions are open.
     open_regions: u32,
 }
@@ -70,6 +74,18 @@ pub(crate) enum Command {
         /// How many bytes to copy.
         size: u64,
     },
+    /// Copies from a buffer to a texture, as `texture_copies[copy]` in the
+    /// list's arena describes.
+    CopyBufferToTexture {
+        /// The copy's index in the arena.
+        copy: usize,
+    },
+    /// Copies from a texture to a buffer, as `texture_copies[copy]` in the
+    /// list's arena describes.
+    CopyTextureToBuffer {
+        /// The copy's index in the arena.
+        copy: usize,
+    },
     /// Opens a debug region, whose name is `text` in the list's arena.
     BeginDebugRegion {
         /// The region's name, as a range of the arena.
@@ -93,6 +109,7 @@ impl CommandList {
             commands: Vec::new(),
             text: String::new(),
             barriers: Vec::new(),
+            texture_copies: Vec::new(),
             open_regions: 0,
         }
     }
@@ -115,6 +132,11 @@ impl CommandList {
     /// The barriers at `range` of the arena, for translation.
     pub(crate) fn barriers(&self, range: &Range<usize>) -> &[Barrier] {
         &self.barriers[range.clone()]
+    }
+
+    /// The texture copy at `index` in the arena, for translation.
+    pub(crate) fn texture_copy(&self, index: usize) -> &BufferTextureCopy {
+        &self.texture_copies[index]
     }
 
     /// Checks that the list can be translated: that every debug region it
@@ -199,6 +221,58 @@ impl CommandList {
         });
     }
 
+    /// Copies buffer data at `source`, laid out as `layout`, to the region
+    /// of a texture `destination` names (design 0002, "Texture copies").
+    /// The texture must be in the layout of [`Access::CopyWrite`].
+    ///
+    /// The copy is checked when the list is translated, since that needs
+    /// the texture (see [`TextureCopy`]).
+    ///
+    /// [`Access::CopyWrite`]: crate::Access::CopyWrite
+    pub fn copy_buffer_to_texture(
+        &mut self,
+        source: GpuAddress,
+        layout: TextureDataLayout,
+        destination: TextureCopy,
+    ) {
+        let copy = self.push_texture_copy(source, layout, destination);
+        self.commands.push(Command::CopyBufferToTexture { copy });
+    }
+
+    /// Copies the region of a texture `source` names to buffer data at
+    /// `destination`, laid out as `layout`. The texture must be in the
+    /// layout of [`Access::CopyRead`].
+    ///
+    /// The copy is checked when the list is translated, since that needs
+    /// the texture.
+    ///
+    /// [`Access::CopyRead`]: crate::Access::CopyRead
+    pub fn copy_texture_to_buffer(
+        &mut self,
+        source: TextureCopy,
+        destination: GpuAddress,
+        layout: TextureDataLayout,
+    ) {
+        let copy = self.push_texture_copy(destination, layout, source);
+        self.commands.push(Command::CopyTextureToBuffer { copy });
+    }
+
+    /// Adds a copy between buffer data at `buffer`, laid out as `layout`,
+    /// and the region `texture` names to the arena, and returns its index.
+    fn push_texture_copy(
+        &mut self,
+        buffer: GpuAddress,
+        layout: TextureDataLayout,
+        texture: TextureCopy,
+    ) -> usize {
+        self.texture_copies.push(BufferTextureCopy {
+            buffer,
+            layout,
+            texture,
+        });
+        self.texture_copies.len() - 1
+    }
+
     /// Opens a debug region called `name`, which capture tools show around
     /// the commands recorded until the matching
     /// [`end_debug_region`](Self::end_debug_region). Regions nest.
@@ -260,12 +334,27 @@ impl CommandList {
     }
 }
 
+/// A copy between a buffer and a texture, in a list's arena.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct BufferTextureCopy {
+    /// The buffer data's address, which the layout's offset is from.
+    pub buffer: GpuAddress,
+    /// How the data is laid out in the buffer.
+    pub layout: TextureDataLayout,
+    /// The region of the texture.
+    pub texture: TextureCopy,
+}
+
 /// A recorded command as tests see it, with its arena data resolved.
 #[cfg(test)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum RecordedCommand<'a> {
     /// See [`CommandList::barrier`].
     Barrier(&'a [Barrier]),
+    /// See [`CommandList::copy_buffer_to_texture`].
+    CopyBufferToTexture(&'a BufferTextureCopy),
+    /// See [`CommandList::copy_texture_to_buffer`].
+    CopyTextureToBuffer(&'a BufferTextureCopy),
     /// See [`CommandList::fill_buffer`].
     FillBuffer {
         /// The first byte to fill.
@@ -320,6 +409,12 @@ impl CommandList {
                     destination,
                     size,
                 },
+                Command::CopyBufferToTexture { copy } => {
+                    RecordedCommand::CopyBufferToTexture(&self.texture_copies[copy])
+                }
+                Command::CopyTextureToBuffer { copy } => {
+                    RecordedCommand::CopyTextureToBuffer(&self.texture_copies[copy])
+                }
                 Command::BeginDebugRegion { ref text } => {
                     RecordedCommand::BeginDebugRegion(&self.text[text.clone()])
                 }
@@ -349,7 +444,7 @@ mod tests {
 
     use super::*;
     use crate::handle::HandleTable;
-    use crate::{Access, Buffer, Texture};
+    use crate::{Access, Buffer, Extent3d, Format, Texture};
 
     /// Barriers are recorded together, in order, and an empty slice records
     /// nothing.
@@ -396,6 +491,37 @@ mod tests {
         let mut list = CommandList::new("open");
         list.begin_debug_region("outer");
         list.check_complete();
+    }
+
+    /// Copies between buffers and textures are recorded in order, each with
+    /// its buffer address, layout and region.
+    #[test]
+    fn texture_copies_are_recorded() {
+        let texture = Texture::from_handle(HandleTable::new("texture").insert("albedo", ()));
+        let extent = Extent3d::new_2d(4, 4);
+        let layout = TextureDataLayout::tight(Format::Rgba8Unorm, extent);
+        let region = TextureCopy {
+            texture,
+            mip: 0,
+            layers: 0..1,
+            origin: [0; 3],
+            extent,
+        };
+        let mut list = CommandList::new("upload");
+        list.copy_buffer_to_texture(GpuAddress(0x1000), layout, region.clone());
+        list.copy_texture_to_buffer(region.clone(), GpuAddress(0x2000), layout);
+        let copy = |buffer| BufferTextureCopy {
+            buffer: GpuAddress(buffer),
+            layout,
+            texture: region.clone(),
+        };
+        assert_eq!(
+            list.recorded(),
+            [
+                RecordedCommand::CopyBufferToTexture(&copy(0x1000)),
+                RecordedCommand::CopyTextureToBuffer(&copy(0x2000)),
+            ],
+        );
     }
 
     /// Recording a barrier checks it, naming the list.
