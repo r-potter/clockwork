@@ -18,6 +18,7 @@ mod buffers;
 mod capabilities;
 mod command_pools;
 mod descriptor_heaps;
+mod destruction;
 mod device;
 mod device_selection;
 mod error;
@@ -38,7 +39,7 @@ mod translate;
 mod validation;
 
 use std::ffi::CStr;
-use std::sync::{Arc, PoisonError, RwLock};
+use std::sync::{Arc, Mutex, PoisonError, RwLock};
 use std::{fmt, slice};
 
 use anyhow::{Context, Result, bail};
@@ -52,10 +53,12 @@ use super::{
     GraphicsApi, PresentCapabilities, Queue, QueueKind, RenderHardwareInterface, RhiResult,
     Sampler, SamplerDesc, Texture, TextureDesc, WindowSize, WindowTarget,
 };
+use crate::deferred::DeferredQueue;
 use crate::error::DeviceLoss;
 use crate::handle::HandleTable;
 use buffers::BufferEntry;
 use descriptor_heaps::DescriptorHeaps;
+use destruction::Retired;
 use device::LogicalDevice;
 use device_selection::{Candidate, Selection};
 use frames::Frames;
@@ -131,10 +134,13 @@ pub(crate) struct VulkanRenderHardwareInterface {
 /// [`GpuResources`] or a [`Queue`] share it.
 ///
 /// It's destroyed with its last `Arc`, on whichever thread drops it: it
-/// waits for the device to be idle, destroys every resource left in its
-/// tables, then drops its fields in declaration order, so each is declared
-/// before the objects it was created from.
+/// waits for the device to be idle, frees every retired object, destroys
+/// every resource left in its tables, then drops its fields in declaration
+/// order, so each is declared before the objects it was created from.
 pub(crate) struct VulkanDevice {
+    /// Destroyed buffers, textures and samplers, until nothing translated
+    /// before their destruction can use them (see [`destruction`]).
+    deferred: Mutex<DeferredQueue<Retired>>,
     /// Every live buffer.
     buffers: RwLock<HandleTable<BufferEntry>>,
     /// Every live texture.
@@ -270,6 +276,7 @@ impl VulkanRenderHardwareInterface {
             }
         };
         let core = Arc::new(VulkanDevice {
+            deferred: Mutex::new(DeferredQueue::new()),
             buffers: RwLock::new(HandleTable::new("buffer")),
             textures: RwLock::new(HandleTable::new("texture")),
             samplers: RwLock::new(HandleTable::new("sampler")),
@@ -687,18 +694,6 @@ fn should_enable_debug_utils(entry: &Entry, validate: bool) -> Result<bool> {
         .any(|extension| extension.extension_name_as_c_str() == Ok(debug_utils::NAME)))
 }
 
-impl VulkanDevice {
-    /// Waits for every submission so far to complete, before an object is
-    /// destroyed, until deferred destruction replaces the wait later in
-    /// `rhi-commands`. If waiting fails, the device is lost, so nothing
-    /// runs on it, and destruction goes ahead.
-    fn wait_for_submissions(&self) {
-        let _ = self
-            .lost
-            .guard(|| self.queues.wait_for_submissions(self.device.handle()));
-    }
-}
-
 /// The queue for each kind on `core`, indexed by `QueueKind as usize`, with
 /// a kind served by another kind's queue sharing its `Arc`.
 fn queues_for(core: &Arc<VulkanDevice>) -> [Arc<dyn Queue>; 3] {
@@ -791,6 +786,8 @@ impl Drop for VulkanDevice {
         // SAFETY: The device was created on this core's instance, and is
         // still alive.
         let _ = unsafe { self.device.handle().device_wait_idle() };
+        // SAFETY: The device is idle.
+        unsafe { self.free_all_retired() };
         // Anything left in the tables is a leak, reported as it's drained.
         let buffers = self
             .buffers
@@ -871,6 +868,10 @@ impl GpuResources for VulkanDevice {
 
     fn sampler_index(&self, sampler: Sampler) -> DescriptorIndex {
         self.sampler_entry_index(sampler)
+    }
+
+    fn collect_garbage(&self) {
+        self.collect_retired();
     }
 }
 

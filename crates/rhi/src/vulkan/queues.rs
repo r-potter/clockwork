@@ -164,12 +164,9 @@ impl Queues {
         device: &ash::Device,
         kind: QueueKind,
     ) -> RhiResult<PooledCommands> {
-        let queue = self.get(kind);
-        queue.pools.check_out(device, || {
-            // SAFETY: The semaphore is a timeline created on `device`.
-            unsafe { device.get_semaphore_counter_value(queue.timeline) }
-                .map_err(|result| error(result, "read the timeline of queue", queue.kind.name()))
-        })
+        self.get(kind)
+            .pools
+            .check_out(device, || self.reached(device, kind))
     }
 
     /// Gives `commands` back to the queue `kind`'s work is submitted to,
@@ -309,24 +306,17 @@ impl Queues {
         Ok(reached >= point.value())
     }
 
-    /// Waits for every submission so far, on every queue, to complete.
+    /// The value the timeline of the queue `kind`'s work is submitted to
+    /// has reached.
     ///
     /// # Errors
     ///
-    /// Returns an error if waiting fails.
-    pub(super) fn wait_for_submissions(&self, device: &ash::Device) -> RhiResult<()> {
-        let (semaphores, values): (Vec<_>, Vec<_>) = self
-            .queues
-            .iter()
-            .map(|queue| (queue.timeline, queue.submitted.load(Ordering::Acquire)))
-            .unzip();
-        let wait_info = vk::SemaphoreWaitInfo::default()
-            .semaphores(&semaphores)
-            .values(&values);
-        // SAFETY: The semaphores are timelines created on `device`, each
-        // value has been submitted, and `wait_info` is valid for the call.
-        unsafe { device.wait_semaphores(&wait_info, u64::MAX) }
-            .map_err(|result| error(result, "wait for every queue", "all"))
+    /// Returns an error if the timeline can't be read.
+    pub(super) fn reached(&self, device: &ash::Device, kind: QueueKind) -> RhiResult<u64> {
+        let queue = self.get(kind);
+        // SAFETY: The semaphore is a timeline created on `device`.
+        unsafe { device.get_semaphore_counter_value(queue.timeline) }
+            .map_err(|result| error(result, "read the timeline of queue", queue.kind.name()))
     }
 
     /// Destroys the timelines and command pools.
@@ -412,8 +402,11 @@ impl Queue for VulkanQueue {
         core.lost.guard(|| core.translate(self.kind, commands))
     }
 
+    /// Frees what retired objects it can first, as design 0002's
+    /// "Deferred destruction" describes.
     fn submit(&self, desc: SubmitDesc<'_>) -> RhiResult<GpuPoint> {
         let core = &self.core;
+        core.collect_retired();
         core.lost
             .guard(|| core.queues.submit(core.device.handle(), self.kind, desc))
     }

@@ -30,11 +30,13 @@ use super::error::error;
 use crate::barrier::BarrierTarget;
 use crate::command_list::Command;
 use crate::copy::check_texture_copy;
+use crate::deferred::Translation;
 use crate::ffi::truncate_to_cstring;
-use crate::{Access, CommandBuffer, CommandList, QueueKind, RhiResult};
+use crate::{Access, CommandBuffer, CommandList, GpuPoint, QueueKind, RhiResult};
 
 /// A command list translated for one queue, holding the command pool its
-/// command buffer was recorded from until it's submitted or dropped.
+/// command buffer was recorded from, and holding back the destruction of
+/// what it may use, until it's submitted or dropped.
 pub(crate) struct VulkanCommandBuffer {
     /// The core, which owns the pool, so it outlives this.
     core: Arc<VulkanDevice>,
@@ -43,6 +45,9 @@ pub(crate) struct VulkanCommandBuffer {
     kind: QueueKind,
     /// The pool and its command buffer, or `None` once submitted.
     commands: Option<PooledCommands>,
+    /// Its translation's epoch, given back to the core's deferred queue
+    /// when it's submitted or dropped, or `None` once it has been.
+    translation: Option<Translation>,
     /// The command list's label.
     label: Box<str>,
 }
@@ -72,20 +77,29 @@ impl VulkanCommandBuffer {
     }
 
     /// Gives its pool back to its queue, reusable once the timeline reaches
-    /// `value`, which the submission it was in signals.
+    /// `value`, which the submission it was in signals, and its translation
+    /// back to the deferred queue, which keeps what it may use until then.
     pub(super) fn submitted(&mut self, value: u64) {
         if let Some(commands) = self.commands.take() {
             self.core.queues.give_back_pool(self.kind, commands, value);
+        }
+        if let Some(translation) = self.translation.take() {
+            self.core
+                .end_translation(translation, Some(GpuPoint::new(self.kind, value)));
         }
     }
 }
 
 impl Drop for VulkanCommandBuffer {
     /// Gives an unsubmitted command buffer's pool back to its queue, for
-    /// reuse straight away, since no submission uses it.
+    /// reuse straight away, and its translation back to the deferred queue,
+    /// since no submission uses either.
     fn drop(&mut self) {
         if let Some(commands) = self.commands.take() {
             self.core.queues.give_back_pool(self.kind, commands, 0);
+        }
+        if let Some(translation) = self.translation.take() {
+            self.core.end_translation(translation, None);
         }
     }
 }
@@ -120,11 +134,15 @@ impl VulkanDevice {
         list.check_complete();
         let device = self.device.handle();
         let commands = self.queues.check_out_pool(device, kind)?;
-        // From here, returning early or panicking gives the pool back.
+        // From here, returning early or panicking gives the pool and the
+        // translation back. The translation starts before any handle is
+        // looked up, so an object destroyed after its lookup is retired in
+        // this epoch or later, and kept while this is outstanding.
         let command_buffer = VulkanCommandBuffer {
             core: self.clone(),
             kind,
             commands: Some(commands),
+            translation: Some(self.begin_translation()),
             label: list.label().into(),
         };
         let begin_info = vk::CommandBufferBeginInfo::default()
