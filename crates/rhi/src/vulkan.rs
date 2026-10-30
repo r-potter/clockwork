@@ -49,6 +49,7 @@ use super::{
     GraphicsApi, PresentCapabilities, Queue, QueueKind, RenderHardwareInterface, RhiResult,
     Sampler, SamplerDesc, Texture, TextureDesc, WindowSize, WindowTarget,
 };
+use crate::error::DeviceLoss;
 use crate::handle::HandleTable;
 use buffers::BufferEntry;
 use descriptor_heaps::DescriptorHeaps;
@@ -142,6 +143,9 @@ pub(crate) struct VulkanDevice {
     /// The device's queues, with their locks and timelines. Their timelines
     /// are destroyed in `drop`, once the device is idle.
     queues: Queues,
+    /// Whether the device has been lost, after which every call that
+    /// touches the GPU returns `DeviceLost` without trying.
+    lost: DeviceLoss,
     /// Allocates memory for resources on `device`.
     allocator: MemoryAllocator,
     /// The logical device, and its queues, created on `physical_device`.
@@ -267,6 +271,7 @@ impl VulkanRenderHardwareInterface {
             samplers: RwLock::new(HandleTable::new("sampler")),
             heaps,
             queues,
+            lost: DeviceLoss::default(),
             allocator,
             device,
             physical_device,
@@ -812,7 +817,7 @@ impl GpuResources for VulkanDevice {
     }
 
     fn create_buffer(&self, desc: &BufferDesc<'_>) -> RhiResult<Buffer> {
-        self.create_buffer_entry(desc)
+        self.lost.guard(|| self.create_buffer_entry(desc))
     }
 
     fn destroy_buffer(&self, buffer: Buffer) {
@@ -828,11 +833,12 @@ impl GpuResources for VulkanDevice {
     }
 
     fn read_buffer(&self, buffer: Buffer, offset: u64, out: &mut [u8]) -> RhiResult<()> {
-        self.read_buffer_entry(buffer, offset, out)
+        self.lost
+            .guard(|| self.read_buffer_entry(buffer, offset, out))
     }
 
     fn create_texture(&self, desc: &TextureDesc<'_>) -> RhiResult<Texture> {
-        self.create_texture_entry(desc)
+        self.lost.guard(|| self.create_texture_entry(desc))
     }
 
     fn destroy_texture(&self, texture: Texture) {
@@ -840,7 +846,7 @@ impl GpuResources for VulkanDevice {
     }
 
     fn create_sampler(&self, desc: &SamplerDesc<'_>) -> RhiResult<Sampler> {
-        self.create_sampler_entry(desc)
+        self.lost.guard(|| self.create_sampler_entry(desc))
     }
 
     fn destroy_sampler(&self, sampler: Sampler) {
