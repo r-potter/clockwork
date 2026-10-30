@@ -79,7 +79,8 @@ fn buffer_round_trip() {
 }
 
 /// A fill writes its value to every word of its range, and nothing
-/// outside it, with a global barrier making it visible to the host.
+/// outside it, with a global barrier making it visible to the host. Debug
+/// regions and labels around the fills translate with no validation error.
 #[test]
 fn fills_write_their_range() {
     let session = TestSession::new();
@@ -89,9 +90,11 @@ fn fills_write_their_range() {
     let address = resources.buffer_address(readback).0;
 
     let mut list = CommandList::new("fill");
-    list.begin_label("clear");
+    list.begin_debug_region("clear");
     list.fill_buffer(crate::GpuAddress(address), 16, 0);
-    list.end_label();
+    list.insert_debug_label("cleared");
+    list.end_debug_region();
+    list.insert_debug_label("patterned");
     list.barrier(&[Barrier::global(Access::CopyWrite, Access::CopyWrite)]);
     list.fill_buffer(crate::GpuAddress(address + 4), 8, 0x0403_0201);
     list.barrier(&[Barrier::global(Access::CopyWrite, Access::HostRead)]);

@@ -107,7 +107,7 @@ impl CommandList {
         &self.commands
     }
 
-    /// The label text at `range` of the arena, for translation.
+    /// The debug text at `range` of the arena, for translation.
     pub(crate) fn text(&self, range: &Range<usize>) -> &str {
         &self.text[range.clone()]
     }
@@ -117,18 +117,18 @@ impl CommandList {
         &self.barriers[range.clone()]
     }
 
-    /// Checks that the list can be translated: that every debug label it
+    /// Checks that the list can be translated: that every debug region it
     /// opened is closed.
     ///
     /// # Panics
     ///
-    /// Panics, naming the list, if a label is still open.
+    /// Panics, naming the list, if a region is still open.
     pub(crate) fn check_complete(&self) {
         assert!(
-            self.open_labels == 0,
-            "command list \"{}\" is translated with {} debug labels still open",
+            self.open_regions == 0,
+            "command list \"{}\" is translated with {} debug regions still open",
             self.label,
-            self.open_labels,
+            self.open_regions,
         );
     }
 
@@ -374,21 +374,27 @@ mod tests {
         );
     }
 
-    /// A list whose labels are closed can be translated.
+    /// A list whose debug regions are closed can be translated, and debug
+    /// labels leave nothing to close.
     #[test]
-    fn closed_labels_are_complete() {
-        let mut list = CommandList::new("labels");
-        list.begin_label("outer");
-        list.end_label();
+    fn closed_regions_are_complete() {
+        let mut list = CommandList::new("regions");
+        list.begin_debug_region("outer");
+        list.insert_debug_label("inside");
+        list.end_debug_region();
+        list.insert_debug_label("after");
         list.check_complete();
     }
 
-    /// Translating a list with a label still open panics, naming the list.
+    /// Translating a list with a debug region still open panics, naming the
+    /// list.
     #[test]
-    #[should_panic(expected = "command list \"open\" is translated with 1 debug labels still open")]
-    fn open_labels_are_incomplete() {
+    #[should_panic(
+        expected = "command list \"open\" is translated with 1 debug regions still open"
+    )]
+    fn open_regions_are_incomplete() {
         let mut list = CommandList::new("open");
-        list.begin_label("outer");
+        list.begin_debug_region("outer");
         list.check_complete();
     }
 
