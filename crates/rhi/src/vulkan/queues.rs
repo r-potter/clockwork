@@ -24,6 +24,7 @@ use ash::vk;
 use ash::vk::TaggedStructure;
 
 use super::VulkanDevice;
+use super::command_pools::{CommandPools, PooledCommands};
 use super::device::LogicalDevice;
 use super::device_selection::QueueFamilies;
 use super::error::error;
@@ -53,6 +54,8 @@ struct KindQueue {
     /// The number of the last submission, so the value its completion
     /// signals. Written only while `queue` is locked.
     submitted: AtomicU64,
+    /// The command pools for its family that aren't checked out.
+    pools: CommandPools,
 }
 
 impl Queues {
@@ -98,6 +101,7 @@ impl Queues {
                 queue: Mutex::new(queue),
                 timeline,
                 submitted: AtomicU64::new(0),
+                pools: CommandPools::new(families.family(kind)),
             });
         }
         if let Some(present) = families.present
@@ -146,6 +150,39 @@ impl Queues {
             }
         };
         Some(lock(queue))
+    }
+
+    /// Checks out a command pool for the queue `kind`'s work is submitted
+    /// to, on `device` (see [`CommandPools::check_out`]).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the timeline can't be read, or a pool can't be
+    /// reset or created.
+    #[expect(dead_code, reason = "translation checks pools out in the next PR")]
+    pub(super) fn check_out_pool(
+        &self,
+        device: &ash::Device,
+        kind: QueueKind,
+    ) -> RhiResult<PooledCommands> {
+        let queue = self.get(kind);
+        queue.pools.check_out(device, || {
+            // SAFETY: The semaphore is a timeline created on `device`.
+            unsafe { device.get_semaphore_counter_value(queue.timeline) }
+                .map_err(|result| error(result, "read the timeline of queue", queue.kind.name()))
+        })
+    }
+
+    /// Gives `commands` back to the queue `kind`'s work is submitted to,
+    /// reusable once its timeline reaches `reusable_at`, or at once for 0.
+    #[expect(dead_code, reason = "command buffers give pools back in the next PR")]
+    pub(super) fn give_back_pool(
+        &self,
+        kind: QueueKind,
+        commands: PooledCommands,
+        reusable_at: u64,
+    ) {
+        self.get(kind).pools.give_back(commands, reusable_at);
     }
 
     /// Submits `desc` to the queue `kind`'s work is submitted to, on
@@ -258,17 +295,20 @@ impl Queues {
         Ok(reached >= point.value())
     }
 
-    /// Destroys the timelines.
+    /// Destroys the timelines and command pools.
     ///
     /// # Safety
     ///
-    /// The timelines must have been created on `device`, and no pending
-    /// submission may wait on or signal them, for example because the
-    /// device is idle.
+    /// They must have been created on `device`, no command pool may be
+    /// checked out, and no pending submission may use them, for example
+    /// because the device is idle.
     pub(super) unsafe fn destroy(&mut self, device: &ash::Device) {
-        for queue in self.queues.drain(..) {
+        for mut queue in self.queues.drain(..) {
             // SAFETY: Guaranteed by the caller.
-            unsafe { device.destroy_semaphore(queue.timeline, None) };
+            unsafe {
+                queue.pools.destroy(device);
+                device.destroy_semaphore(queue.timeline, None);
+            }
         }
     }
 }
