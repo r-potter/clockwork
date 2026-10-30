@@ -25,6 +25,7 @@ use ash::vk;
 use super::VulkanDevice;
 use super::access::{AccessInfo, access_info};
 use super::command_pools::PooledCommands;
+use super::device_selection::QueueFamilies;
 use super::error::error;
 use crate::barrier::BarrierTarget;
 use crate::command_list::Command;
@@ -133,7 +134,7 @@ impl VulkanDevice {
         unsafe { device.begin_command_buffer(commands.buffer, &begin_info) }
             .map_err(|result| error(result, "begin the command buffer for", list.label()))?;
         // SAFETY: The command buffer is recording, for this queue's family.
-        unsafe { self.record(commands.buffer, list) };
+        unsafe { self.record(commands.buffer, kind, list) };
         // SAFETY: The command buffer is recording.
         unsafe { device.end_command_buffer(commands.buffer) }
             .map_err(|result| error(result, "record the command buffer for", list.label()))?;
@@ -141,18 +142,21 @@ impl VulkanDevice {
         Ok(CommandBuffer(command_buffer))
     }
 
-    /// Records `list`'s commands into `buffer`.
+    /// Records `list`'s commands into `buffer`, for the queue of the kind
+    /// `kind`.
     ///
     /// # Safety
     ///
-    /// `buffer` must be recording, on this device, and no other thread may
-    /// use it.
+    /// `buffer` must be recording, on this device, for that queue's family,
+    /// and no other thread may use it.
     ///
     /// # Panics
     ///
-    /// Panics if `list` names a stale handle.
-    unsafe fn record(&self, buffer: vk::CommandBuffer, list: &CommandList) {
+    /// Panics if `list` names a stale handle, or has a queue transfer
+    /// neither from nor to that queue.
+    unsafe fn record(&self, buffer: vk::CommandBuffer, kind: QueueKind, list: &CommandList) {
         let device = self.device.handle();
+        let families = self.device.queue_families();
         let buffers = self.lock_buffers_for_reading();
         let textures = self.lock_textures_for_reading();
         // Reused for each barrier command, so recording them doesn't allocate
@@ -167,8 +171,26 @@ impl VulkanDevice {
                     buffer_barriers.clear();
                     image_barriers.clear();
                     for barrier in list.barriers(barriers) {
-                        let before = access_info(barrier.before());
-                        let after = access_info(barrier.after());
+                        let mut before = access_info(barrier.before());
+                        let mut after = access_info(barrier.after());
+                        let transfer =
+                            queue_transfer(families, kind, barrier.queue_transfer(), list.label());
+                        // A release's later accesses, and an acquire's
+                        // earlier ones, happen on the other queue, so each
+                        // half orders only its own queue's.
+                        let (src_family, dst_family) = match transfer {
+                            Transfer::None => (vk::QUEUE_FAMILY_IGNORED, vk::QUEUE_FAMILY_IGNORED),
+                            Transfer::Release { from, to } => {
+                                after.stages = vk::PipelineStageFlags2::NONE;
+                                after.access = vk::AccessFlags2::NONE;
+                                (from, to)
+                            }
+                            Transfer::Acquire { from, to } => {
+                                before.stages = vk::PipelineStageFlags2::NONE;
+                                before.access = vk::AccessFlags2::NONE;
+                                (from, to)
+                            }
+                        };
                         match barrier.target() {
                             BarrierTarget::Global => memory_barriers.push(
                                 vk::MemoryBarrier2::default()
@@ -183,8 +205,8 @@ impl VulkanDevice {
                                     .src_access_mask(before.access)
                                     .dst_stage_mask(after.stages)
                                     .dst_access_mask(after.access)
-                                    .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
-                                    .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                                    .src_queue_family_index(src_family)
+                                    .dst_queue_family_index(dst_family)
                                     .buffer(buffers.get(target.handle()).buffer())
                                     .offset(0)
                                     .size(vk::WHOLE_SIZE),
@@ -205,8 +227,8 @@ impl VulkanDevice {
                                         .dst_access_mask(after.access)
                                         .old_layout(layout(before))
                                         .new_layout(layout(after))
-                                        .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
-                                        .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                                        .src_queue_family_index(src_family)
+                                        .dst_queue_family_index(dst_family)
                                         .image(entry.image())
                                         .subresource_range(
                                             entry.subresource_range(label, subresource),
@@ -298,5 +320,137 @@ impl VulkanDevice {
                 }
             }
         }
+    }
+}
+
+/// How a barrier's queue transfer is recorded on one queue.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Transfer {
+    /// No transfer: the barrier has none, or both kinds share a family.
+    None,
+    /// The releasing half, on the queue ownership moves from.
+    Release {
+        /// The family ownership moves from.
+        from: u32,
+        /// The family ownership moves to.
+        to: u32,
+    },
+    /// The acquiring half, on the queue ownership moves to.
+    Acquire {
+        /// The family ownership moves from.
+        from: u32,
+        /// The family ownership moves to.
+        to: u32,
+    },
+}
+
+/// How `transfer`, a barrier's queue transfer, is recorded in the command
+/// list `list` translated for the queue of the kind `translating`, on a
+/// device whose queues are from `families`. Pure, so it's tested without a
+/// GPU.
+///
+/// # Panics
+///
+/// Panics, naming the list, if the transfer is between two families and
+/// the list is translated for neither.
+fn queue_transfer(
+    families: QueueFamilies,
+    translating: QueueKind,
+    transfer: Option<(QueueKind, QueueKind)>,
+    list: &str,
+) -> Transfer {
+    let Some((from, to)) = transfer else {
+        return Transfer::None;
+    };
+    let (from_family, to_family) = (families.family(from), families.family(to));
+    let family = families.family(translating);
+    if from_family == to_family {
+        Transfer::None
+    } else if family == from_family {
+        Transfer::Release {
+            from: from_family,
+            to: to_family,
+        }
+    } else if family == to_family {
+        Transfer::Acquire {
+            from: from_family,
+            to: to_family,
+        }
+    } else {
+        panic!(
+            "command list \"{list}\" has a queue transfer from the {} queue to the {} queue, but \
+             is translated for the {} queue",
+            from.name(),
+            to.name(),
+            translating.name(),
+        );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    //! T0 tests of recording queue transfers (design 0002,
+    //! "Synchronization").
+
+    use super::*;
+
+    /// A device with graphics, compute and transfer families of their own.
+    const DEDICATED: QueueFamilies = QueueFamilies {
+        graphics: 0,
+        compute: 2,
+        transfer: 1,
+        present: None,
+    };
+
+    /// A device whose kinds all share one family, as lavapipe's do.
+    const SHARED: QueueFamilies = QueueFamilies {
+        graphics: 0,
+        compute: 0,
+        transfer: 0,
+        present: None,
+    };
+
+    /// From transfers to graphics.
+    const UPLOAD: Option<(QueueKind, QueueKind)> = Some((QueueKind::Transfer, QueueKind::Graphics));
+
+    /// A transfer between families is a release on the queue it's from, and
+    /// an acquire on the queue it's to, naming both families.
+    #[test]
+    fn transfers_between_families_release_and_acquire() {
+        assert_eq!(
+            queue_transfer(DEDICATED, QueueKind::Transfer, UPLOAD, "upload"),
+            Transfer::Release { from: 1, to: 0 },
+        );
+        assert_eq!(
+            queue_transfer(DEDICATED, QueueKind::Graphics, UPLOAD, "upload"),
+            Transfer::Acquire { from: 1, to: 0 },
+        );
+    }
+
+    /// A transfer between kinds that share a family is dropped, on any of
+    /// their queues, as is a barrier with no transfer.
+    #[test]
+    fn transfers_within_a_family_are_dropped() {
+        for kind in QueueKind::ALL {
+            assert_eq!(
+                queue_transfer(SHARED, kind, UPLOAD, "upload"),
+                Transfer::None
+            );
+            assert_eq!(
+                queue_transfer(DEDICATED, kind, None, "upload"),
+                Transfer::None
+            );
+        }
+    }
+
+    /// Translating a transfer for a queue it doesn't involve panics, naming
+    /// the list and all three queues.
+    #[test]
+    #[should_panic(
+        expected = "command list \"upload\" has a queue transfer from the transfer queue to the \
+                    graphics queue, but is translated for the compute queue"
+    )]
+    fn transfers_for_another_queue_panic() {
+        queue_transfer(DEDICATED, QueueKind::Compute, UPLOAD, "upload");
     }
 }

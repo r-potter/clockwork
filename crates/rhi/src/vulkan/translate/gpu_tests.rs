@@ -1,5 +1,5 @@
 //! T1 tests of translating and submitting command lists on a real device
-//! (design 0002, R4 and R7).
+//! (design 0002, R4, R7, R9 and R16).
 //!
 //! Synchronization validation doesn't track copies and fills by address
 //! (`VK_KHR_device_address_commands`), so a missing barrier between them
@@ -77,6 +77,125 @@ fn buffer_round_trip() {
     for buffer in [upload, device, readback] {
         resources.destroy_buffer(buffer);
     }
+}
+
+/// A copy on the transfer queue, waited on by a copy on the graphics queue,
+/// with the buffer released by one and acquired by the other (R9's
+/// `cross_queue_wait`). On a device without a dedicated transfer family,
+/// both run on the graphics queue, the transfer is dropped, and the test
+/// still passes.
+#[test]
+fn cross_queue_wait() {
+    let session = TestSession::new();
+    let backend = VulkanTestBackend::headless(&session);
+    let resources = backend.resources();
+    let transfer = backend.queue(QueueKind::Transfer);
+    let graphics = backend.queue(QueueKind::Graphics);
+    let bytes: Vec<u8> = (0..=255).rev().collect();
+    let size = bytes.len() as u64;
+    let upload = create(&**resources, "upload", size, MemoryLocation::Upload);
+    let device = create(&**resources, "device", size, MemoryLocation::Device);
+    let readback = create(&**resources, "readback", size, MemoryLocation::Readback);
+    resources.write_buffer(upload, 0, &bytes);
+    let address = |buffer| resources.buffer_address(buffer);
+    let handover = Barrier::buffer(device, Access::CopyWrite, Access::CopyRead)
+        .with_queue_transfer(QueueKind::Transfer, QueueKind::Graphics);
+
+    let mut upload_list = CommandList::new("upload");
+    upload_list.barrier(&[Barrier::buffer(upload, Access::HostWrite, Access::CopyRead)]);
+    upload_list.copy_buffer(address(upload), address(device), size);
+    upload_list.barrier(std::slice::from_ref(&handover));
+    let uploaded = transfer
+        .submit(SubmitDesc::new(vec![
+            transfer.translate(&upload_list).unwrap(),
+        ]))
+        .unwrap();
+
+    let mut read_list = CommandList::new("read");
+    read_list.barrier(std::slice::from_ref(&handover));
+    read_list.copy_buffer(address(device), address(readback), size);
+    read_list.barrier(&[Barrier::buffer(
+        readback,
+        Access::CopyWrite,
+        Access::HostRead,
+    )]);
+    let read = graphics
+        .submit(SubmitDesc {
+            command_buffers: vec![graphics.translate(&read_list).unwrap()],
+            wait_for: &[uploaded],
+        })
+        .unwrap();
+    graphics.wait(read).unwrap();
+
+    let mut out = vec![0; bytes.len()];
+    resources.read_buffer(readback, 0, &mut out).unwrap();
+    assert_eq!(out, bytes);
+    for buffer in [upload, device, readback] {
+        resources.destroy_buffer(buffer);
+    }
+}
+
+/// Eight threads each translate a list that fills a different region of
+/// one buffer, and the command buffers are submitted as one batch, in a
+/// chosen order (R16's `parallel_translation`). Each thread enters the
+/// test's session span, so validation messages reach the test.
+#[test]
+fn parallel_translation() {
+    const THREADS: u64 = 8;
+    /// The bytes each thread fills.
+    const REGION: u64 = 16;
+    let session = TestSession::new();
+    let backend = VulkanTestBackend::headless(&session);
+    let resources = backend.resources();
+    let graphics = backend.queue(QueueKind::Graphics);
+    let readback = create(
+        &**resources,
+        "readback",
+        THREADS * REGION,
+        MemoryLocation::Readback,
+    );
+    let base = resources.buffer_address(readback).0;
+
+    let lists: Vec<_> = (0..THREADS)
+        .map(|index| {
+            let mut list = CommandList::new(&format!("region {index}"));
+            let value = u32::from_le_bytes([index as u8 + 1; 4]);
+            list.fill_buffer(crate::GpuAddress(base + index * REGION), REGION, value);
+            list
+        })
+        .collect();
+    let mut command_buffers: Vec<_> = std::thread::scope(|scope| {
+        let threads: Vec<_> = lists
+            .iter()
+            .map(|list| {
+                let span = session.span().clone();
+                scope.spawn(move || span.in_scope(|| graphics.translate(list).unwrap()))
+            })
+            .collect();
+        threads
+            .into_iter()
+            .map(|thread| thread.join().unwrap())
+            .collect()
+    });
+    let mut last = CommandList::new("make visible");
+    last.barrier(&[Barrier::buffer(
+        readback,
+        Access::CopyWrite,
+        Access::HostRead,
+    )]);
+    command_buffers.push(graphics.translate(&last).unwrap());
+    let done = graphics.submit(SubmitDesc::new(command_buffers)).unwrap();
+    graphics.wait(done).unwrap();
+
+    let mut out = vec![0; (THREADS * REGION) as usize];
+    resources.read_buffer(readback, 0, &mut out).unwrap();
+    for (index, region) in out.chunks(REGION as usize).enumerate() {
+        assert!(
+            region.iter().all(|&byte| byte == index as u8 + 1),
+            "region {index}: {region:?}"
+        );
+    }
+    resources.destroy_buffer(readback);
 }
 
 /// A fill writes its value to every word of its range, and nothing
