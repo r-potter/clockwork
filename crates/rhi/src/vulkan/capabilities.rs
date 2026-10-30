@@ -3,43 +3,31 @@
 
 use ash::{ext, khr, vk};
 
-use super::device_selection::{self, QueueFamilies};
+use super::device_selection::QueueFamilies;
 use super::physical_device::PhysicalDevice;
 use crate::{Capabilities, Limits, PresentCapabilities, QueueKind, QueueKindSet};
 
-/// The capabilities of `device`, when it renders on the graphics family in
+/// The capabilities of `device`, when its queues are from
 /// `queue_families`. Pure, so it's tested with fake devices.
 ///
-/// Compute work uses a dedicated compute family if the device has one, and
-/// the graphics family otherwise. Transfers use a dedicated transfer family,
-/// then a dedicated compute family, then the graphics family. A queue kind
-/// can write timestamps if the family it uses can.
+/// A kind's queue is dedicated if it serves itself, and a kind can write
+/// timestamps if the family it uses can.
 pub(super) fn derive(device: &PhysicalDevice, queue_families: QueueFamilies) -> Capabilities {
-    let dedicated_compute = device_selection::dedicated_compute_family(device);
-    let dedicated_transfer = device_selection::dedicated_transfer_family(device);
-    let graphics = queue_families.graphics;
-    let compute = dedicated_compute.unwrap_or(graphics);
-    let transfer = dedicated_transfer.or(dedicated_compute).unwrap_or(graphics);
-
-    let has_timestamps =
-        |family: u32| device.queue_families[family as usize].timestamp_valid_bits > 0;
     let mut timestamps = QueueKindSet::EMPTY;
-    for (kind, family) in [
-        (QueueKind::Graphics, graphics),
-        (QueueKind::Compute, compute),
-        (QueueKind::Transfer, transfer),
-    ] {
-        if has_timestamps(family) {
+    for kind in QueueKind::ALL {
+        let family = queue_families.family(kind);
+        if device.queue_families[family as usize].timestamp_valid_bits > 0 {
             timestamps = timestamps.with(kind);
         }
     }
+    let dedicated = |kind| queue_families.serving_kind(kind) == kind;
 
     let features = &device.features;
     let limits = device.limits();
     Capabilities {
         device_name: device.name().into_owned(),
-        dedicated_compute_queue: dedicated_compute.is_some(),
-        dedicated_transfer_queue: dedicated_transfer.is_some(),
+        dedicated_compute_queue: dedicated(QueueKind::Compute),
+        dedicated_transfer_queue: dedicated(QueueKind::Transfer),
         timestamps,
         bc_compression: features.core.texture_compression_bc == vk::TRUE,
         limits: Limits {
@@ -112,14 +100,16 @@ mod tests {
         }
     }
 
-    /// The families when rendering on family 0, headless.
+    /// The families when every kind uses family 0, headless.
     const FAMILY_0: QueueFamilies = QueueFamilies {
         graphics: 0,
+        compute: 0,
+        transfer: 0,
         present: None,
     };
 
-    /// A device with only a graphics family has no dedicated queues, and
-    /// every kind shares the graphics family's timestamps.
+    /// When every kind shares the graphics family, no queue is dedicated,
+    /// and every kind shares the graphics family's timestamps.
     #[test]
     fn a_single_family_is_shared_by_every_kind() {
         let capabilities = derive(&device(&[]), FAMILY_0);
@@ -134,14 +124,19 @@ mod tests {
         );
     }
 
-    /// Dedicated families are found, and a kind on a family without
-    /// timestamps can't write them.
+    /// Each kind on a family of its own is dedicated, with that family's
+    /// timestamps, so one on a family without them can't write them.
     #[test]
     fn dedicated_families_have_their_own_timestamps() {
         let device = device(&[])
             .with_family(vk::QueueFlags::COMPUTE, 64)
             .with_family(vk::QueueFlags::empty(), 0);
-        let capabilities = derive(&device, FAMILY_0);
+        let families = QueueFamilies {
+            compute: 1,
+            transfer: 2,
+            ..FAMILY_0
+        };
+        let capabilities = derive(&device, families);
         assert!(capabilities.dedicated_compute_queue);
         assert!(capabilities.dedicated_transfer_queue);
         assert_eq!(
@@ -152,12 +147,17 @@ mod tests {
         );
     }
 
-    /// Without a dedicated transfer family, transfers use the dedicated
-    /// compute family, and share its timestamps.
+    /// Transfers sharing the dedicated compute family aren't dedicated, and
+    /// share its timestamps.
     #[test]
-    fn transfers_fall_back_to_the_compute_family() {
+    fn transfers_share_the_compute_family() {
         let device = device(&[]).with_family(vk::QueueFlags::COMPUTE, 0);
-        let capabilities = derive(&device, FAMILY_0);
+        let families = QueueFamilies {
+            compute: 1,
+            transfer: 1,
+            ..FAMILY_0
+        };
+        let capabilities = derive(&device, families);
         assert!(capabilities.dedicated_compute_queue);
         assert!(!capabilities.dedicated_transfer_queue);
         assert_eq!(
