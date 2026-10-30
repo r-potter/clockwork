@@ -105,7 +105,7 @@ impl VulkanDevice {
     ///
     /// # Panics
     ///
-    /// Panics if `list` has a debug label open, or names a stale handle.
+    /// Panics if `list` has a debug region open, or names a stale handle.
     pub(super) fn translate(
         self: &Arc<Self>,
         kind: QueueKind,
@@ -241,7 +241,7 @@ impl VulkanDevice {
                             .cmd_copy_memory(buffer, &copy_info);
                     }
                 }
-                Command::BeginLabel { text } => {
+                Command::BeginDebugRegion { text } => {
                     if let Some(debug_utils) = self.device.debug_utils() {
                         let name = truncate_to_cstring(list.text(text));
                         let label = vk::DebugUtilsLabelEXT::default().label_name(&name);
@@ -250,11 +250,20 @@ impl VulkanDevice {
                         unsafe { debug_utils.cmd_begin_debug_utils_label(buffer, &label) };
                     }
                 }
-                Command::EndLabel => {
+                Command::EndDebugRegion => {
                     if let Some(debug_utils) = self.device.debug_utils() {
                         // SAFETY: Guaranteed by the caller, and recording
-                        // checked that a label is open.
+                        // checked that a region is open.
                         unsafe { debug_utils.cmd_end_debug_utils_label(buffer) };
+                    }
+                }
+                Command::InsertDebugLabel { text } => {
+                    if let Some(debug_utils) = self.device.debug_utils() {
+                        let name = truncate_to_cstring(list.text(text));
+                        let label = vk::DebugUtilsLabelEXT::default().label_name(&name);
+                        // SAFETY: Guaranteed by the caller, and `label` is
+                        // valid for the call.
+                        unsafe { debug_utils.cmd_insert_debug_utils_label(buffer, &label) };
                     }
                 }
             }

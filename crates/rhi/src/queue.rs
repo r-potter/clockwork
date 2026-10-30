@@ -96,7 +96,7 @@ pub trait Queue: Debug + Send + Sync {
     ///
     /// # Panics
     ///
-    /// Panics if `commands` names a stale handle, or has a debug label still
+    /// Panics if `commands` names a stale handle, or has a debug region still
     /// open.
     fn translate(&self, commands: &CommandList) -> RhiResult<CommandBuffer>;
 
