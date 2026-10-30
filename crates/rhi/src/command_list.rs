@@ -2,8 +2,8 @@
 //! queue (design 0002, "Command lists and translation").
 //!
 //! A [`CommandList`] holds its commands as a `Vec` of the private
-//! [`Command`] enum, with variable-length data, such as debug text, in an
-//! arena beside it, so that each command stays small. Recording checks the
+//! [`Command`] enum, with variable-length data, such as debug text and
+//! barriers, in arenas beside it, so that each command stays small. Recording checks the
 //! rules it can see on its own, and panics on misuse, which is a bug in the
 //! caller. Rules that need the backend's state are checked when the list is
 //! translated.
@@ -15,7 +15,7 @@
 
 use std::ops::Range;
 
-use crate::GpuAddress;
+use crate::{Barrier, GpuAddress};
 
 /// The alignment, in bytes, of a fill's address and size, as Vulkan
 /// requires of fills.
@@ -37,6 +37,8 @@ pub struct CommandList {
     /// The text of every debug region and label, which commands refer to by
     /// range.
     text: String,
+    /// Every barrier, which commands refer to by range.
+    barriers: Vec<Barrier>,
     /// How many debug regions are open.
     open_regions: u32,
 }
@@ -48,6 +50,12 @@ pub struct CommandList {
     expect(dead_code, reason = "queues translate commands in the next PR")
 )]
 pub(crate) enum Command {
+    /// Orders accesses with the barriers in `barriers` in the list's arena,
+    /// together.
+    Barrier {
+        /// The barriers, as a range of the arena.
+        barriers: Range<usize>,
+    },
     /// Fills `size` bytes at `destination` with copies of `value`.
     FillBuffer {
         /// The first byte to fill.
@@ -88,6 +96,7 @@ impl CommandList {
             label: label.to_owned(),
             commands: Vec::new(),
             text: String::new(),
+            barriers: Vec::new(),
             open_regions: 0,
         }
     }
@@ -95,6 +104,27 @@ impl CommandList {
     /// The list's name, in messages and debug tools.
     pub fn label(&self) -> &str {
         &self.label
+    }
+
+    /// Orders the accesses each barrier names, together (design 0002,
+    /// "Synchronization"). Nothing is recorded for no barriers.
+    ///
+    /// # Panics
+    ///
+    /// Panics if a barrier's accesses don't suit what it applies to (see
+    /// [`Barrier`]).
+    pub fn barrier(&mut self, barriers: &[Barrier]) {
+        if barriers.is_empty() {
+            return;
+        }
+        for barrier in barriers {
+            barrier.check(&self.label);
+        }
+        let start = self.barriers.len();
+        self.barriers.extend_from_slice(barriers);
+        self.commands.push(Command::Barrier {
+            barriers: start..self.barriers.len(),
+        });
     }
 
     /// Fills `size` bytes at `destination` with copies of `value`.
@@ -208,6 +238,8 @@ impl CommandList {
 #[cfg(test)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum RecordedCommand<'a> {
+    /// See [`CommandList::barrier`].
+    Barrier(&'a [Barrier]),
     /// See [`CommandList::fill_buffer`].
     FillBuffer {
         /// The first byte to fill.
@@ -241,6 +273,9 @@ impl CommandList {
         self.commands
             .iter()
             .map(|command| match *command {
+                Command::Barrier { ref barriers } => {
+                    RecordedCommand::Barrier(&self.barriers[barriers.clone()])
+                }
                 Command::FillBuffer {
                     destination,
                     size,
@@ -287,6 +322,41 @@ mod tests {
     //! T0 tests of recording commands and its checks (design 0002, R7).
 
     use super::*;
+    use crate::handle::HandleTable;
+    use crate::{Access, Buffer, Texture};
+
+    /// Barriers are recorded together, in order, and an empty slice records
+    /// nothing.
+    #[test]
+    fn barriers_are_recorded_together() {
+        let buffer = Buffer::from_handle(HandleTable::new("buffer").insert("staging", ()));
+        let texture = Texture::from_handle(HandleTable::new("texture").insert("albedo", ()));
+        let barriers = [
+            Barrier::buffer(buffer, Access::HostWrite, Access::CopyRead),
+            Barrier::texture(texture, Access::None, Access::CopyWrite),
+        ];
+        let mut list = CommandList::new("upload");
+        list.barrier(&[]);
+        list.barrier(&barriers);
+        list.barrier(&barriers[..1]);
+        assert_eq!(
+            list.recorded(),
+            [
+                RecordedCommand::Barrier(&barriers),
+                RecordedCommand::Barrier(&barriers[..1]),
+            ],
+        );
+    }
+
+    /// Recording a barrier checks it, naming the list.
+    #[test]
+    #[should_panic(
+        expected = "command list \"upload\" has a barrier for all memory with Present, which \
+                    doesn't apply to all memory"
+    )]
+    fn recorded_barriers_are_checked() {
+        CommandList::new("upload").barrier(&[Barrier::global(Access::None, Access::Present)]);
+    }
 
     /// Commands are recorded in order, with their values, and debug regions
     /// and labels keep their text, including when regions nest.
