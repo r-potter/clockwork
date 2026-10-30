@@ -2,7 +2,7 @@
 //! queue (design 0002, "Command lists and translation").
 //!
 //! A [`CommandList`] holds its commands as a `Vec` of the private
-//! [`Command`] enum, with variable-length data, such as label text, in an
+//! [`Command`] enum, with variable-length data, such as debug text, in an
 //! arena beside it, so that each command stays small. Recording checks the
 //! rules it can see on its own, and panics on misuse, which is a bug in the
 //! caller. Rules that need the backend's state are checked when the list is
@@ -34,10 +34,11 @@ pub struct CommandList {
     label: String,
     /// The commands, in recording order.
     commands: Vec<Command>,
-    /// The text of every debug label, which commands refer to by range.
+    /// The text of every debug region and label, which commands refer to by
+    /// range.
     text: String,
-    /// How many debug labels are open.
-    open_labels: u32,
+    /// How many debug regions are open.
+    open_regions: u32,
 }
 
 /// A recorded command. Variable-length data is in the list's arena.
@@ -65,13 +66,19 @@ pub(crate) enum Command {
         /// How many bytes to copy.
         size: u64,
     },
-    /// Opens a debug label, whose text is `text` in the list's arena.
-    BeginLabel {
+    /// Opens a debug region, whose name is `text` in the list's arena.
+    BeginDebugRegion {
+        /// The region's name, as a range of the arena.
+        text: Range<usize>,
+    },
+    /// Closes the innermost open debug region.
+    EndDebugRegion,
+    /// Marks a point with a debug label, whose text is `text` in the list's
+    /// arena.
+    InsertDebugLabel {
         /// The label's text, as a range of the arena.
         text: Range<usize>,
     },
-    /// Closes the innermost open debug label.
-    EndLabel,
 }
 
 impl CommandList {
@@ -81,7 +88,7 @@ impl CommandList {
             label: label.to_owned(),
             commands: Vec::new(),
             text: String::new(),
-            open_labels: 0,
+            open_regions: 0,
         }
     }
 
@@ -136,31 +143,42 @@ impl CommandList {
         });
     }
 
-    /// Opens a debug label called `text`, which capture tools show around
-    /// the commands recorded until the matching [`end_label`](Self::end_label).
-    /// Labels nest.
-    pub fn begin_label(&mut self, text: &str) {
-        let start = self.text.len();
-        self.text.push_str(text);
-        self.commands.push(Command::BeginLabel {
-            text: start..self.text.len(),
-        });
-        self.open_labels += 1;
+    /// Opens a debug region called `name`, which capture tools show around
+    /// the commands recorded until the matching
+    /// [`end_debug_region`](Self::end_debug_region). Regions nest.
+    pub fn begin_debug_region(&mut self, name: &str) {
+        let text = self.push_text(name);
+        self.commands.push(Command::BeginDebugRegion { text });
+        self.open_regions += 1;
     }
 
-    /// Closes the innermost open debug label.
+    /// Closes the innermost open debug region.
     ///
     /// # Panics
     ///
-    /// Panics if no label is open.
-    pub fn end_label(&mut self) {
+    /// Panics if no region is open.
+    pub fn end_debug_region(&mut self) {
         assert!(
-            self.open_labels > 0,
-            "command list \"{}\" ends a debug label, but none is open",
+            self.open_regions > 0,
+            "command list \"{}\" ends a debug region, but none is open",
             self.label,
         );
-        self.open_labels -= 1;
-        self.commands.push(Command::EndLabel);
+        self.open_regions -= 1;
+        self.commands.push(Command::EndDebugRegion);
+    }
+
+    /// Marks this point in the list with a debug label, `text`, which
+    /// capture tools show between the commands recorded before and after it.
+    pub fn insert_debug_label(&mut self, text: &str) {
+        let text = self.push_text(text);
+        self.commands.push(Command::InsertDebugLabel { text });
+    }
+
+    /// Appends `text` to the arena, returning its range.
+    fn push_text(&mut self, text: &str) -> Range<usize> {
+        let start = self.text.len();
+        self.text.push_str(text);
+        start..self.text.len()
     }
 
     /// Checks that `size` bytes at `address` are a range a command can use:
@@ -208,10 +226,12 @@ pub(crate) enum RecordedCommand<'a> {
         /// How many bytes to copy.
         size: u64,
     },
-    /// See [`CommandList::begin_label`].
-    BeginLabel(&'a str),
-    /// See [`CommandList::end_label`].
-    EndLabel,
+    /// See [`CommandList::begin_debug_region`].
+    BeginDebugRegion(&'a str),
+    /// See [`CommandList::end_debug_region`].
+    EndDebugRegion,
+    /// See [`CommandList::insert_debug_label`].
+    InsertDebugLabel(&'a str),
 }
 
 #[cfg(test)]
@@ -239,10 +259,13 @@ impl CommandList {
                     destination,
                     size,
                 },
-                Command::BeginLabel { ref text } => {
-                    RecordedCommand::BeginLabel(&self.text[text.clone()])
+                Command::BeginDebugRegion { ref text } => {
+                    RecordedCommand::BeginDebugRegion(&self.text[text.clone()])
                 }
-                Command::EndLabel => RecordedCommand::EndLabel,
+                Command::EndDebugRegion => RecordedCommand::EndDebugRegion,
+                Command::InsertDebugLabel { ref text } => {
+                    RecordedCommand::InsertDebugLabel(&self.text[text.clone()])
+                }
             })
             .collect()
     }
@@ -265,35 +288,39 @@ mod tests {
 
     use super::*;
 
-    /// Commands are recorded in order, with their values, and labels keep
-    /// their text, including when they nest.
+    /// Commands are recorded in order, with their values, and debug regions
+    /// and labels keep their text, including when regions nest.
     #[test]
     fn commands_are_recorded_in_order() {
         let mut list = CommandList::new("upload");
-        list.begin_label("outer");
+        list.begin_debug_region("outer");
         list.fill_buffer(GpuAddress(0x1000), 256, 0xC10C_C0DE);
-        list.begin_label("inner");
+        list.insert_debug_label("filled");
+        list.begin_debug_region("inner");
         list.copy_buffer(GpuAddress(0x1000), GpuAddress(0x2000), 256);
-        list.end_label();
-        list.end_label();
+        list.end_debug_region();
+        list.end_debug_region();
+        list.insert_debug_label("copied");
         assert_eq!(list.label(), "upload");
         assert_eq!(
             list.recorded(),
             [
-                RecordedCommand::BeginLabel("outer"),
+                RecordedCommand::BeginDebugRegion("outer"),
                 RecordedCommand::FillBuffer {
                     destination: GpuAddress(0x1000),
                     size: 256,
                     value: 0xC10C_C0DE,
                 },
-                RecordedCommand::BeginLabel("inner"),
+                RecordedCommand::InsertDebugLabel("filled"),
+                RecordedCommand::BeginDebugRegion("inner"),
                 RecordedCommand::CopyBuffer {
                     source: GpuAddress(0x1000),
                     destination: GpuAddress(0x2000),
                     size: 256,
                 },
-                RecordedCommand::EndLabel,
-                RecordedCommand::EndLabel,
+                RecordedCommand::EndDebugRegion,
+                RecordedCommand::EndDebugRegion,
+                RecordedCommand::InsertDebugLabel("copied"),
             ],
         );
     }
@@ -322,14 +349,23 @@ mod tests {
         assert_eq!(list.recorded().len(), 1);
     }
 
-    /// Ending a label with none open panics, naming the list.
+    /// Ending a debug region with none open panics, naming the list.
     #[test]
-    #[should_panic(expected = "command list \"unbalanced\" ends a debug label, but none is open")]
-    fn ending_an_unopened_label_panics() {
+    #[should_panic(expected = "command list \"unbalanced\" ends a debug region, but none is open")]
+    fn ending_an_unopened_region_panics() {
         let mut list = CommandList::new("unbalanced");
-        list.begin_label("one");
-        list.end_label();
-        list.end_label();
+        list.begin_debug_region("one");
+        list.end_debug_region();
+        list.end_debug_region();
+    }
+
+    /// A debug label doesn't open a region, so a region can't end it.
+    #[test]
+    #[should_panic(expected = "command list \"label\" ends a debug region, but none is open")]
+    fn labels_open_no_region() {
+        let mut list = CommandList::new("label");
+        list.insert_debug_label("point");
+        list.end_debug_region();
     }
 
     /// Filling no bytes panics, naming the list.
