@@ -10,8 +10,9 @@ use clockwork_diagnostics::capture::TestSession;
 
 use crate::vulkan::test_support::VulkanTestBackend;
 use crate::{
-    Access, Barrier, Buffer, BufferDesc, BufferUsage, CommandList, GpuResources, MemoryLocation,
-    QueueKind, RenderHardwareInterface, SubmitDesc,
+    Access, Barrier, Buffer, BufferDesc, BufferUsage, CommandList, Extent3d, Format, GpuResources,
+    MemoryLocation, QueueKind, RenderHardwareInterface, SubmitDesc, Subresource, Texture,
+    TextureDesc, TextureDimension, TextureUsage,
 };
 
 /// A buffer of `size` bytes in `location`, for copies.
@@ -104,6 +105,113 @@ fn fills_write_their_range() {
     resources.read_buffer(readback, 0, &mut out).unwrap();
     assert_eq!(out, [0, 0, 0, 0, 1, 2, 3, 4, 1, 2, 3, 4, 0, 0, 0, 0]);
     resources.destroy_buffer(readback);
+}
+
+/// A 4×4 texture of `format`, with three mips and two layers, for
+/// `usage`.
+fn create_texture(
+    resources: &dyn GpuResources,
+    label: &str,
+    format: Format,
+    usage: TextureUsage,
+) -> Texture {
+    resources
+        .create_texture(&TextureDesc {
+            label,
+            dimension: TextureDimension::D2,
+            format,
+            extent: Extent3d::new_2d(4, 4),
+            mip_levels: 3,
+            array_layers: 2,
+            usage,
+        })
+        .unwrap()
+}
+
+/// Texture barriers move each subresource they name between the layouts
+/// their accesses need, so different mips can be in different layouts,
+/// which validation checks against each image's tracked layouts when it's
+/// submitted. A depth texture's barriers use its depth aspect.
+#[test]
+fn texture_barriers_move_subresources_between_layouts() {
+    let session = TestSession::new();
+    let backend = VulkanTestBackend::headless(&session);
+    let resources = backend.resources();
+    let colour = create_texture(
+        &**resources,
+        "colour",
+        Format::Rgba8Unorm,
+        TextureUsage::SAMPLED | TextureUsage::COPY_SOURCE | TextureUsage::COPY_DESTINATION,
+    );
+    let depth = create_texture(
+        &**resources,
+        "depth",
+        Format::Depth32Float,
+        TextureUsage::DEPTH_ATTACHMENT | TextureUsage::SAMPLED,
+    );
+
+    let mut list = CommandList::new("layouts");
+    list.barrier(&[
+        Barrier::texture(colour, Access::None, Access::CopyWrite),
+        Barrier::texture(depth, Access::None, Access::DepthAttachmentWrite),
+    ]);
+    list.barrier(&[
+        Barrier::subresource(
+            colour,
+            Subresource::mip(0),
+            Access::CopyWrite,
+            Access::CopyRead,
+        ),
+        Barrier::subresource(
+            colour,
+            Subresource {
+                mips: 1..Subresource::REMAINING,
+                layers: 0..Subresource::REMAINING,
+            },
+            Access::CopyWrite,
+            Access::FragmentShaderSampledRead,
+        ),
+    ]);
+    list.barrier(&[
+        Barrier::subresource(
+            colour,
+            Subresource::mip_layer(0, 1),
+            Access::CopyRead,
+            Access::FragmentShaderSampledRead,
+        ),
+        Barrier::texture(
+            depth,
+            Access::DepthAttachmentWrite,
+            Access::FragmentShaderSampledRead,
+        ),
+    ]);
+    run(&backend, &list);
+    resources.destroy_texture(colour);
+    resources.destroy_texture(depth);
+}
+
+/// A barrier naming a mip the texture doesn't have panics when the list is
+/// translated, naming the texture.
+#[test]
+#[should_panic(expected = "texture \"colour\" has 3 mips, so a subresource can't name mips 3..4")]
+fn subresources_outside_their_texture_panic() {
+    let session = TestSession::new();
+    let backend = VulkanTestBackend::headless(&session);
+    let resources = backend.resources();
+    let colour = create_texture(
+        &**resources,
+        "colour",
+        Format::Rgba8Unorm,
+        TextureUsage::SAMPLED,
+    );
+    let mut list = CommandList::new("past the last mip");
+    list.barrier(&[Barrier::subresource(
+        colour,
+        Subresource::mip(3),
+        Access::None,
+        Access::FragmentShaderSampledRead,
+    )]);
+    let _ = backend.queue(QueueKind::Graphics).translate(&list);
 }
 
 /// A command buffer's pool is reused once its submission completes, and an
