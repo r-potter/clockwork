@@ -69,7 +69,7 @@ pub use capabilities::{
 pub use command_list::CommandList;
 pub use descriptor::{DescriptorIndex, HeapKind};
 pub use error::{RhiError, RhiResult};
-pub use queue::{GpuPoint, Queue, SubmitDesc};
+pub use queue::{CommandBuffer, GpuPoint, Queue, SubmitDesc};
 pub use sampler::{AddressMode, Filter, Sampler, SamplerDesc};
 pub use texture::{Extent3d, Format, Texture, TextureDesc, TextureDimension, TextureUsage};
 use vulkan::VulkanRenderHardwareInterface;

@@ -45,10 +45,6 @@ pub struct CommandList {
 
 /// A recorded command. Variable-length data is in the list's arena.
 #[derive(Debug)]
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "queues translate commands in the next PR")
-)]
 pub(crate) enum Command {
     /// Orders accesses with the barriers in `barriers` in the list's arena,
     /// together.
@@ -104,6 +100,36 @@ impl CommandList {
     /// The list's name, in messages and debug tools.
     pub fn label(&self) -> &str {
         &self.label
+    }
+
+    /// The commands, in recording order, for translation.
+    pub(crate) fn commands(&self) -> &[Command] {
+        &self.commands
+    }
+
+    /// The debug text at `range` of the arena, for translation.
+    pub(crate) fn text(&self, range: &Range<usize>) -> &str {
+        &self.text[range.clone()]
+    }
+
+    /// The barriers at `range` of the arena, for translation.
+    pub(crate) fn barriers(&self, range: &Range<usize>) -> &[Barrier] {
+        &self.barriers[range.clone()]
+    }
+
+    /// Checks that the list can be translated: that every debug region it
+    /// opened is closed.
+    ///
+    /// # Panics
+    ///
+    /// Panics, naming the list, if a region is still open.
+    pub(crate) fn check_complete(&self) {
+        assert!(
+            self.open_regions == 0,
+            "command list \"{}\" is translated with {} debug regions still open",
+            self.label,
+            self.open_regions,
+        );
     }
 
     /// Orders the accesses each barrier names, together (design 0002,
@@ -346,6 +372,30 @@ mod tests {
                 RecordedCommand::Barrier(&barriers[..1]),
             ],
         );
+    }
+
+    /// A list whose debug regions are closed can be translated, and debug
+    /// labels leave nothing to close.
+    #[test]
+    fn closed_regions_are_complete() {
+        let mut list = CommandList::new("regions");
+        list.begin_debug_region("outer");
+        list.insert_debug_label("inside");
+        list.end_debug_region();
+        list.insert_debug_label("after");
+        list.check_complete();
+    }
+
+    /// Translating a list with a debug region still open panics, naming the
+    /// list.
+    #[test]
+    #[should_panic(
+        expected = "command list \"open\" is translated with 1 debug regions still open"
+    )]
+    fn open_regions_are_incomplete() {
+        let mut list = CommandList::new("open");
+        list.begin_debug_region("outer");
+        list.check_complete();
     }
 
     /// Recording a barrier checks it, naming the list.

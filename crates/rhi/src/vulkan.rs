@@ -34,6 +34,7 @@ mod swapchain;
 #[cfg(test)]
 pub(crate) mod test_support;
 mod textures;
+mod translate;
 mod validation;
 
 use std::ffi::CStr;
@@ -66,6 +67,7 @@ use shaders::TriangleShaders;
 use surface::Surface;
 use swapchain::Swapchain;
 use textures::TextureEntry;
+pub(crate) use translate::VulkanCommandBuffer;
 use validation::{Availability, LayerSettings, VALIDATION_LAYER};
 
 /// Name reported to the Vulkan driver for both the application and the engine.
@@ -683,6 +685,18 @@ fn should_enable_debug_utils(entry: &Entry, validate: bool) -> Result<bool> {
     Ok(extensions
         .iter()
         .any(|extension| extension.extension_name_as_c_str() == Ok(debug_utils::NAME)))
+}
+
+impl VulkanDevice {
+    /// Waits for every submission so far to complete, before an object is
+    /// destroyed, until deferred destruction replaces the wait later in
+    /// `rhi-commands`. If waiting fails, the device is lost, so nothing
+    /// runs on it, and destruction goes ahead.
+    fn wait_for_submissions(&self) {
+        let _ = self
+            .lost
+            .guard(|| self.queues.wait_for_submissions(self.device.handle()));
+    }
 }
 
 /// The queue for each kind on `core`, indexed by `QueueKind as usize`, with
