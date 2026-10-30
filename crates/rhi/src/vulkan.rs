@@ -46,8 +46,8 @@ use tracing::{info, warn};
 
 use super::{
     BackendOptions, Buffer, BufferDesc, Capabilities, DescriptorIndex, GpuAddress, GpuResources,
-    GraphicsApi, PresentCapabilities, QueueKind, RenderHardwareInterface, RhiResult, Sampler,
-    SamplerDesc, Texture, TextureDesc, WindowSize, WindowTarget,
+    GraphicsApi, PresentCapabilities, Queue, QueueKind, RenderHardwareInterface, RhiResult,
+    Sampler, SamplerDesc, Texture, TextureDesc, WindowSize, WindowTarget,
 };
 use crate::handle::HandleTable;
 use buffers::BufferEntry;
@@ -57,7 +57,7 @@ use device_selection::{Candidate, Selection};
 use frames::Frames;
 use memory::MemoryAllocator;
 use physical_device::PhysicalDevice;
-use queues::Queues;
+use queues::{Queues, VulkanQueue};
 use samplers::SamplerEntry;
 use shaders::TriangleShaders;
 use surface::Surface;
@@ -82,7 +82,7 @@ const CLEAR_COLOUR: [f32; 4] = [0.02, 0.05, 0.1, 1.0];
 /// window surface and swapchain. Also owns, until design 0002 moves them
 /// out, the resources for frames in flight and the triangle's shader
 /// objects. Everything else is in the shared [`VulkanDevice`], which it
-/// hands out as the [`GpuResources`].
+/// hands out as the [`GpuResources`] and the [`Queue`]s.
 ///
 /// Fields are dropped in declaration order, so each is declared before the
 /// objects it was created from, and the core, with the instance, last.
@@ -110,6 +110,9 @@ pub(crate) struct VulkanRenderHardwareInterface {
     present_capabilities: PresentCapabilities,
     /// `core`, as the resources the application shares between threads.
     resources: Arc<dyn GpuResources>,
+    /// The queue for each kind, indexed by `QueueKind as usize`. A kind
+    /// served by another kind's queue shares its `Arc`.
+    queues: [Arc<dyn Queue>; 3],
     /// The instance and devices. Declared last so that this backend's
     /// reference to it is dropped last, after every object created from it.
     /// Holders of `resources` may keep it alive longer.
@@ -120,16 +123,12 @@ pub(crate) struct VulkanRenderHardwareInterface {
 /// lifetimes"): the instance, the selected device and the logical device,
 /// its queues, the memory allocator, and the resource tables. The
 /// [`VulkanRenderHardwareInterface`] and every holder of its
-/// [`GpuResources`] share it.
+/// [`GpuResources`] or a [`Queue`] share it.
 ///
 /// It's destroyed with its last `Arc`, on whichever thread drops it: it
 /// waits for the device to be idle, destroys every resource left in its
 /// tables, then drops its fields in declaration order, so each is declared
 /// before the objects it was created from.
-///
-/// Its queues are locked for each use, so any thread can submit to them.
-/// Only the owner thread does so far, through the
-/// [`VulkanRenderHardwareInterface`], until the next PR adds `Queue`.
 pub(crate) struct VulkanDevice {
     /// Every live buffer.
     buffers: RwLock<HandleTable<BufferEntry>>,
@@ -140,7 +139,8 @@ pub(crate) struct VulkanDevice {
     /// The resource and sampler heaps. Destroyed in `drop`, after the
     /// tables, so that no entry's slot outlives its heap.
     heaps: DescriptorHeaps,
-    /// The device's queues, with their locks.
+    /// The device's queues, with their locks and timelines. Their timelines
+    /// are destroyed in `drop`, once the device is idle.
     queues: Queues,
     /// Allocates memory for resources on `device`.
     allocator: MemoryAllocator,
@@ -248,12 +248,19 @@ impl VulkanRenderHardwareInterface {
         let triangle_shaders = TriangleShaders::new(&device)?;
 
         let allocator = MemoryAllocator::new(device.handle(), physical_device.memory_properties);
-        let heaps = DescriptorHeaps::new(
+        let mut queues = Queues::new(&device)?;
+        let heaps = match DescriptorHeaps::new(
             &device,
             &allocator,
             &physical_device.properties.descriptor_heap,
-        )?;
-        let queues = Queues::new(&device);
+        ) {
+            Ok(heaps) => heaps,
+            Err(err) => {
+                // SAFETY: Nothing has been submitted yet.
+                unsafe { queues.destroy(device.handle()) };
+                return Err(err);
+            }
+        };
         let core = Arc::new(VulkanDevice {
             buffers: RwLock::new(HandleTable::new("buffer")),
             textures: RwLock::new(HandleTable::new("texture")),
@@ -275,6 +282,7 @@ impl VulkanRenderHardwareInterface {
             surface,
             present_capabilities,
             resources: core.clone(),
+            queues: queues_for(&core),
             core,
         };
         if let Some(size) = window_size {
@@ -670,6 +678,26 @@ fn should_enable_debug_utils(entry: &Entry, validate: bool) -> Result<bool> {
         .any(|extension| extension.extension_name_as_c_str() == Ok(debug_utils::NAME)))
 }
 
+/// The queue for each kind on `core`, indexed by `QueueKind as usize`, with
+/// a kind served by another kind's queue sharing its `Arc`.
+fn queues_for(core: &Arc<VulkanDevice>) -> [Arc<dyn Queue>; 3] {
+    let mut queues: Vec<Arc<dyn Queue>> = Vec::with_capacity(QueueKind::ALL.len());
+    for kind in QueueKind::ALL {
+        // A kind is served by itself or by a more capable kind, which comes
+        // earlier in `ALL`, so its queue already exists.
+        let serving = core.queues.serving_kind(kind);
+        let queue = if serving == kind {
+            Arc::new(VulkanQueue::new(core.clone(), kind))
+        } else {
+            queues[serving as usize].clone()
+        };
+        queues.push(queue);
+    }
+    queues
+        .try_into()
+        .unwrap_or_else(|_| unreachable!("there's a queue for each kind"))
+}
+
 /// Formats a Vulkan version number as `major.minor.patch`.
 fn format_version(version: u32) -> String {
     format!(
@@ -773,6 +801,8 @@ impl Drop for VulkanDevice {
         // SAFETY: The heaps were created on this device, with memory from
         // this allocator, and the device is idle.
         unsafe { self.heaps.destroy(self.device.handle(), &self.allocator) };
+        // SAFETY: The timelines were created on this device, and it's idle.
+        unsafe { self.queues.destroy(self.device.handle()) };
     }
 }
 
@@ -830,6 +860,10 @@ impl RenderHardwareInterface for VulkanRenderHardwareInterface {
 
     fn resources(&self) -> &Arc<dyn GpuResources> {
         &self.resources
+    }
+
+    fn queue(&self, kind: QueueKind) -> &Arc<dyn Queue> {
+        &self.queues[kind as usize]
     }
 
     fn present_capabilities(&self) -> &PresentCapabilities {

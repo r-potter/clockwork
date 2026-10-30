@@ -1,8 +1,8 @@
 //! Fixtures for the Vulkan backend's T1 tests: [`VulkanTestBackend`], the
 //! test-only [`Capability`] list, and [`require_capabilities!`].
 //!
-//! [`Capability`] names the optional parts of the RHI's [`Capabilities`] and
-//! [`PresentCapabilities`], so that tests can require them by name in
+//! [`Capability`] names the optional parts of the RHI's [`Capabilities`],
+//! [`PresentCapabilities`] and queues, so that tests can require them by name in
 //! `CLOCKWORK_REQUIRED_CAPABILITIES`. Whether a device has one is read from
 //! the object that reports it, as the RHI's users read it (design 0002,
 //! "Capabilities").
@@ -11,7 +11,7 @@ use clockwork_diagnostics::capture::TestSession;
 
 use super::VulkanRenderHardwareInterface;
 use crate::test_support::{self, RequiredCapabilities};
-use crate::{Capabilities, PresentCapabilities, RenderHardwareInterface};
+use crate::{Capabilities, PresentCapabilities, QueueKind, QueueKindSet, RenderHardwareInterface};
 
 /// An optional capability some T1 tests need, which some devices lack.
 ///
@@ -27,9 +27,11 @@ pub(crate) enum Capability {
     PresentTiming,
     /// [`PresentCapabilities::swapchain_maintenance`].
     SwapchainMaintenance,
-    /// [`Capabilities::dedicated_compute_queue`].
+    /// A compute queue of its own, whose [`Queue::kind`](crate::Queue::kind)
+    /// is [`QueueKind::Compute`].
     DedicatedComputeQueue,
-    /// [`Capabilities::dedicated_transfer_queue`].
+    /// A transfer queue of its own, whose [`Queue::kind`](crate::Queue::kind)
+    /// is [`QueueKind::Transfer`].
     DedicatedTransferQueue,
     /// [`Capabilities::bc_compression`].
     BcCompression,
@@ -57,14 +59,19 @@ impl Capability {
         }
     }
 
-    /// Whether a device with `capabilities` and `present` has the
-    /// capability.
-    pub(crate) fn is_in(self, capabilities: &Capabilities, present: &PresentCapabilities) -> bool {
+    /// Whether a device with `capabilities` and `present`, whose queues of
+    /// their own are of the kinds in `dedicated`, has the capability.
+    pub(crate) fn is_in(
+        self,
+        capabilities: &Capabilities,
+        present: &PresentCapabilities,
+        dedicated: QueueKindSet,
+    ) -> bool {
         match self {
             Self::PresentTiming => present.present_timing,
             Self::SwapchainMaintenance => present.swapchain_maintenance,
-            Self::DedicatedComputeQueue => capabilities.dedicated_compute_queue,
-            Self::DedicatedTransferQueue => capabilities.dedicated_transfer_queue,
+            Self::DedicatedComputeQueue => dedicated.contains(QueueKind::Compute),
+            Self::DedicatedTransferQueue => dedicated.contains(QueueKind::Transfer),
             Self::BcCompression => capabilities.bc_compression,
         }
     }
@@ -114,7 +121,11 @@ impl VulkanTestBackend {
     /// Panics if the device lacks `capability` and it's required.
     pub(crate) fn has(&self, capability: Capability) -> bool {
         let capabilities = self.rhi.resources().capabilities();
-        let supported = capability.is_in(capabilities, self.rhi.present_capabilities());
+        let dedicated = QueueKind::ALL
+            .into_iter()
+            .filter(|&kind| self.rhi.queue(kind).kind() == kind)
+            .fold(QueueKindSet::EMPTY, QueueKindSet::with);
+        let supported = capability.is_in(capabilities, self.rhi.present_capabilities(), dedicated);
         if !supported {
             test_support::missing_capability(
                 capability.name(),
@@ -165,7 +176,7 @@ mod tests {
     use std::cell::RefCell;
 
     use super::*;
-    use crate::{Limits, QueueKind, QueueKindSet};
+    use crate::Limits;
 
     /// Every capability has a distinct name, so none can be required by
     /// mistake in place of another.
@@ -177,12 +188,11 @@ mod tests {
         assert_eq!(names.len(), Capability::ALL.len());
     }
 
-    /// Capabilities with every optional one set to `has`.
-    fn capabilities(has: bool) -> (Capabilities, PresentCapabilities) {
+    /// Capabilities, present capabilities and dedicated queue kinds, with
+    /// every optional one set to `has`.
+    fn capabilities(has: bool) -> (Capabilities, PresentCapabilities, QueueKindSet) {
         let capabilities = Capabilities {
             device_name: "device".to_owned(),
-            dedicated_compute_queue: has,
-            dedicated_transfer_queue: has,
             timestamps: QueueKindSet::EMPTY.with(QueueKind::Graphics),
             bc_compression: has,
             limits: Limits {
@@ -195,7 +205,14 @@ mod tests {
             present_timing: has,
             swapchain_maintenance: has,
         };
-        (capabilities, present)
+        let dedicated = if has {
+            QueueKindSet::EMPTY
+                .with(QueueKind::Compute)
+                .with(QueueKind::Transfer)
+        } else {
+            QueueKindSet::EMPTY
+        };
+        (capabilities, present, dedicated)
     }
 
     /// Each capability reads its own field: a device has it when that
@@ -203,11 +220,14 @@ mod tests {
     #[test]
     fn each_capability_reads_its_field() {
         for capability in Capability::ALL {
-            let (with, with_present) = capabilities(true);
-            assert!(capability.is_in(&with, &with_present), "{capability:?}");
-            let (without, without_present) = capabilities(false);
+            let (with, with_present, with_dedicated) = capabilities(true);
             assert!(
-                !capability.is_in(&without, &without_present),
+                capability.is_in(&with, &with_present, with_dedicated),
+                "{capability:?}"
+            );
+            let (without, without_present, without_dedicated) = capabilities(false);
+            assert!(
+                !capability.is_in(&without, &without_present, without_dedicated),
                 "{capability:?}"
             );
             for other in Capability::ALL
@@ -216,20 +236,20 @@ mod tests {
             {
                 // Clearing another capability's field doesn't change this
                 // one.
-                let (mut capabilities, mut present) = capabilities(true);
+                let (mut capabilities, mut present, mut dedicated) = capabilities(true);
                 match other {
                     Capability::PresentTiming => present.present_timing = false,
                     Capability::SwapchainMaintenance => present.swapchain_maintenance = false,
                     Capability::DedicatedComputeQueue => {
-                        capabilities.dedicated_compute_queue = false;
+                        dedicated = QueueKindSet::EMPTY.with(QueueKind::Transfer);
                     }
                     Capability::DedicatedTransferQueue => {
-                        capabilities.dedicated_transfer_queue = false;
+                        dedicated = QueueKindSet::EMPTY.with(QueueKind::Compute);
                     }
                     Capability::BcCompression => capabilities.bc_compression = false,
                 }
                 assert!(
-                    capability.is_in(&capabilities, &present),
+                    capability.is_in(&capabilities, &present, dedicated),
                     "{capability:?}, {other:?}"
                 );
             }

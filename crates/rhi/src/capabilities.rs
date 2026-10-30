@@ -7,7 +7,8 @@
 //! [`GpuResources`](crate::GpuResources), for resources and shaders, and
 //! [`PresentCapabilities`], from the
 //! [`RenderHardwareInterface`](crate::RenderHardwareInterface), for
-//! presenting. Backends derive both once, when the device is selected.
+//! presenting. Whether a queue is dedicated is its
+//! [`Queue::kind`](crate::Queue::kind). Backends derive both once, when the device is selected.
 
 /// The most push data, in bytes, that one draw or dispatch can carry (design
 /// 0002, "Binding model"). Device selection requires at least this much, so
@@ -87,12 +88,6 @@ impl QueueKindSet {
 pub struct Capabilities {
     /// The device's name, as its driver reports it.
     pub device_name: String,
-    /// A queue that supports compute but not graphics, so that compute work
-    /// can run alongside rendering.
-    pub dedicated_compute_queue: bool,
-    /// A queue that supports transfers but neither graphics nor compute, so
-    /// that uploads can run alongside other work.
-    pub dedicated_transfer_queue: bool,
     /// Which queue kinds can write timestamps. Always includes
     /// [`QueueKind::Graphics`], which device selection requires.
     pub timestamps: QueueKindSet,
@@ -127,7 +122,7 @@ pub struct PresentCapabilities {
 }
 
 /// Summarises the optional capabilities the device has and lacks, for the
-/// log: for example, `has dedicated compute queue, BC compression; lacks
+/// log: for example, `has swapchain maintenance, BC compression; lacks
 /// present timing`.
 ///
 /// The log contract counts an optional capability a device lacks as notable,
@@ -136,14 +131,6 @@ pub(crate) fn summary(capabilities: &Capabilities, present: &PresentCapabilities
     let capabilities = [
         ("present timing", present.present_timing),
         ("swapchain maintenance", present.swapchain_maintenance),
-        (
-            "dedicated compute queue",
-            capabilities.dedicated_compute_queue,
-        ),
-        (
-            "dedicated transfer queue",
-            capabilities.dedicated_transfer_queue,
-        ),
         ("BC compression", capabilities.bc_compression),
     ];
     let names = |wanted: bool| -> Vec<&str> {
@@ -171,8 +158,6 @@ mod tests {
     fn none() -> Capabilities {
         Capabilities {
             device_name: "device".to_owned(),
-            dedicated_compute_queue: false,
-            dedicated_transfer_queue: false,
             timestamps: QueueKindSet::EMPTY.with(QueueKind::Graphics),
             bc_compression: false,
             limits: Limits {
@@ -199,8 +184,6 @@ mod tests {
     #[test]
     fn the_summary_lists_what_a_device_has() {
         let capabilities = Capabilities {
-            dedicated_compute_queue: true,
-            dedicated_transfer_queue: true,
             bc_compression: true,
             ..none()
         };
@@ -210,8 +193,7 @@ mod tests {
         };
         assert_eq!(
             summary(&capabilities, &present),
-            "has present timing, swapchain maintenance, dedicated compute queue, dedicated \
-             transfer queue, BC compression",
+            "has present timing, swapchain maintenance, BC compression",
         );
     }
 
@@ -228,8 +210,7 @@ mod tests {
         };
         assert_eq!(
             summary(&capabilities, &present),
-            "has swapchain maintenance, BC compression; lacks present timing, dedicated \
-             compute queue, dedicated transfer queue",
+            "has swapchain maintenance, BC compression; lacks present timing",
         );
     }
 
@@ -242,8 +223,7 @@ mod tests {
         };
         assert_eq!(
             summary(&none(), &present),
-            "lacks present timing, swapchain maintenance, dedicated compute queue, dedicated \
-             transfer queue, BC compression",
+            "lacks present timing, swapchain maintenance, BC compression",
         );
     }
 }
