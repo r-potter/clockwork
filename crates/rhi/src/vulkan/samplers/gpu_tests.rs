@@ -52,10 +52,12 @@ fn samplers_are_slots_in_the_sampler_heap() {
     for sampler in samplers {
         resources.destroy_sampler(sampler);
     }
+    resources.collect_garbage();
     assert_eq!(heap.slots_in_use(), 0);
 }
 
-/// Destroying a sampler frees its slot for the next one (R6).
+/// Destroying a sampler frees its slot for the next one, once it's
+/// collected (R6).
 #[test]
 fn freed_sampler_slots_are_reused() {
     let session = TestSession::new();
@@ -65,6 +67,7 @@ fn freed_sampler_slots_are_reused() {
     let second = resources.create_sampler(&desc("second")).unwrap();
     let freed = resources.sampler_index(first);
     resources.destroy_sampler(first);
+    resources.collect_garbage();
     let third = resources.create_sampler(&desc("third")).unwrap();
     assert_eq!(resources.sampler_index(third), freed);
     assert_ne!(resources.sampler_index(second), freed);
@@ -93,6 +96,7 @@ fn full_sampler_heap_is_reported() {
     );
 
     resources.destroy_sampler(samplers[0]);
+    resources.collect_garbage();
     let fits = resources.create_sampler(&desc("fits")).unwrap();
     for sampler in samplers.into_iter().skip(1).chain([fits]) {
         resources.destroy_sampler(sampler);
