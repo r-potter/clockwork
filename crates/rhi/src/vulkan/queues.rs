@@ -32,6 +32,7 @@ use ash::vk;
 use ash::vk::TaggedStructure;
 
 use super::VulkanDevice;
+use super::command_pools::{CommandPools, PooledCommands};
 use super::device::LogicalDevice;
 use super::device_selection::QueueFamilies;
 use super::error::error;
@@ -104,7 +105,8 @@ const _: () = {
 /// device has one queue for each distinct family in use, so between one and
 /// four, and roles on the same family share its queue. On a device with a
 /// single family, every role uses one queue. A shared queue must have one
-/// lock and one timeline, so the queues can't be stored once for each role.
+/// lock, one timeline and one set of command pools, so the queues can't be
+/// stored once for each role.
 /// Instead, two fields record the mapping, one in each direction:
 /// - [`roles`](Self::roles) maps each role to the queue it uses. Several
 ///   roles may map to one queue. Every lookup by role or kind goes through
@@ -152,10 +154,12 @@ pub(super) struct Queues {
     roles: [Option<usize>; QueueRole::ALL.len()],
 }
 
-/// One of the device's queues, with its lock and its timeline.
+/// One of the device's queues, with its lock, its timeline and its command
+/// pools.
 ///
-/// A queue only presenting uses has a timeline too, which nothing signals,
-/// so that every queue is the same.
+/// A queue only presenting uses has a timeline and pools too, which nothing
+/// uses, so that every queue is the same. Its pools are created only when
+/// checked out, so they cost nothing.
 struct DeviceQueue {
     /// The first role in [`QueueRole::ALL`] that uses it, which owns it: the
     /// kind it serves as, which [`Queue::kind`] reports, or presenting if no
@@ -169,6 +173,8 @@ struct DeviceQueue {
     /// The number of the last submission, so the value its completion
     /// signals. Written only while `queue` is locked.
     submitted: AtomicU64,
+    /// The command pools for its family that aren't checked out.
+    pools: CommandPools,
 }
 
 impl Queues {
@@ -237,6 +243,7 @@ impl Queues {
             queue: Mutex::new(queue),
             timeline,
             submitted: AtomicU64::new(0),
+            pools: CommandPools::new(family),
         });
         self.roles[role.index()] = Some(self.queues.len() - 1);
         Ok(())
@@ -272,6 +279,34 @@ impl Queues {
     pub(super) fn lock(&self, role: QueueRole) -> Option<MutexGuard<'_, vk::Queue>> {
         let index = self.roles[role.index()]?;
         Some(lock(&self.queues[index].queue))
+    }
+
+    /// Checks out a command pool for the queue `id`, on `device` (see
+    /// [`CommandPools::check_out`]).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the timeline can't be read, or a pool can't be
+    /// reset or created.
+    #[expect(dead_code, reason = "translation checks pools out in the next PR")]
+    pub(super) fn check_out_pool(
+        &self,
+        device: &ash::Device,
+        id: QueueId,
+    ) -> RhiResult<PooledCommands> {
+        let queue = self.get(id);
+        queue.pools.check_out(device, || {
+            // SAFETY: The semaphore is a timeline created on `device`.
+            unsafe { device.get_semaphore_counter_value(queue.timeline) }
+                .map_err(|result| error(result, "read the timeline of queue", queue.role.name()))
+        })
+    }
+
+    /// Gives `commands` back to the queue `id`, reusable once its timeline
+    /// reaches `reusable_at`, or at once for 0.
+    #[expect(dead_code, reason = "command buffers give pools back in the next PR")]
+    pub(super) fn give_back_pool(&self, id: QueueId, commands: PooledCommands, reusable_at: u64) {
+        self.get(id).pools.give_back(commands, reusable_at);
     }
 
     /// Submits `desc` to the queue `id`, on `device`, and returns the point
@@ -392,17 +427,20 @@ impl Queues {
         queue
     }
 
-    /// Destroys the timelines.
+    /// Destroys the timelines and command pools.
     ///
     /// # Safety
     ///
-    /// The timelines must have been created on `device`, and no pending
-    /// submission may wait on or signal them, for example because the
-    /// device is idle.
+    /// They must have been created on `device`, no command pool may be
+    /// checked out, and no pending submission may use them, for example
+    /// because the device is idle.
     pub(super) unsafe fn destroy(&mut self, device: &ash::Device) {
-        for queue in self.queues.drain(..) {
+        for mut queue in self.queues.drain(..) {
             // SAFETY: Guaranteed by the caller.
-            unsafe { device.destroy_semaphore(queue.timeline, None) };
+            unsafe {
+                queue.pools.destroy(device);
+                device.destroy_semaphore(queue.timeline, None);
+            }
         }
     }
 }

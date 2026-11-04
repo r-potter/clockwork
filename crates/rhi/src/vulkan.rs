@@ -16,6 +16,7 @@
 mod access;
 mod buffers;
 mod capabilities;
+mod command_pools;
 mod descriptor_heaps;
 mod device;
 mod device_selection;
