@@ -30,10 +30,6 @@ pub(super) struct AccessInfo {
 /// nothing, and its layout is `UNDEFINED`, so a barrier from it discards a
 /// texture's contents. [`Access::Present`] has none either, since the
 /// swapchain's semaphores order presenting.
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "translation emits barriers in the next PR")
-)]
 pub(super) fn access_info(access: Access) -> AccessInfo {
     use vk::AccessFlags2 as A;
     use vk::ImageLayout as L;
