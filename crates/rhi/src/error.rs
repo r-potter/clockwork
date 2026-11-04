@@ -5,9 +5,13 @@
 //! variant is added with the code that returns it, and only if a caller
 //! handles it differently from `Other`, so the set stays small. Bugs in the
 //! caller, such as a stale handle, panic instead.
+//!
+//! A lost device is sticky: [`DeviceLoss`] records it, and every later call
+//! that touches the GPU returns [`RhiError::DeviceLost`] without trying.
 
 use std::error::Error;
 use std::fmt;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::HeapKind;
 
@@ -32,6 +36,10 @@ pub enum RhiError {
         /// The label of the texture or sampler that needed a slot.
         label: String,
     },
+    /// The device was lost, so nothing more can run on it. Every later call
+    /// that touches the GPU returns this too. The caller can stop rendering
+    /// and exit cleanly, since recovering is out of scope.
+    DeviceLost,
     /// Anything with no specific recovery, with its context.
     Other(anyhow::Error),
 }
@@ -52,6 +60,7 @@ impl fmt::Display for RhiError {
             Self::DescriptorHeapFull { heap, label } => {
                 write!(f, "the {heap} has no free slot for \"{label}\"")
             }
+            Self::DeviceLost => f.write_str("the device was lost"),
             Self::Other(err) => fmt::Display::fmt(err, f),
         }
     }
@@ -63,7 +72,9 @@ impl Error for RhiError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
             Self::Other(err) => err.source(),
-            Self::OutOfDeviceMemory { .. } | Self::DescriptorHeapFull { .. } => None,
+            Self::OutOfDeviceMemory { .. } | Self::DescriptorHeapFull { .. } | Self::DeviceLost => {
+                None
+            }
         }
     }
 }
@@ -72,6 +83,36 @@ impl From<anyhow::Error> for RhiError {
     /// Wraps the error as [`RhiError::Other`].
     fn from(err: anyhow::Error) -> Self {
         Self::Other(err)
+    }
+}
+
+/// Whether a backend's device has been lost, which is sticky (design 0002,
+/// "Error handling"): once any call returns [`RhiError::DeviceLost`], every
+/// later call through [`guard`](Self::guard) returns it without running.
+#[derive(Debug, Default)]
+pub(crate) struct DeviceLoss {
+    /// Set when a call first returns [`RhiError::DeviceLost`], and never
+    /// cleared.
+    lost: AtomicBool,
+}
+
+impl DeviceLoss {
+    /// Runs `call`, a call that touches the GPU, unless the device is
+    /// already lost, and records a loss it returns.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RhiError::DeviceLost`] if the device was already lost, and
+    /// otherwise whatever `call` returns.
+    pub(crate) fn guard<T>(&self, call: impl FnOnce() -> RhiResult<T>) -> RhiResult<T> {
+        if self.lost.load(Ordering::Acquire) {
+            return Err(RhiError::DeviceLost);
+        }
+        let result = call();
+        if matches!(result, Err(RhiError::DeviceLost)) {
+            self.lost.store(true, Ordering::Release);
+        }
+        result
     }
 }
 
@@ -125,6 +166,44 @@ mod tests {
             err.to_string(),
             "the resource heap has no free slot for \"albedo\""
         );
+    }
+
+    /// A lost device has a message, and no cause.
+    #[test]
+    fn device_lost_says_so() {
+        assert_eq!(RhiError::DeviceLost.to_string(), "the device was lost");
+        assert!(RhiError::DeviceLost.source().is_none());
+    }
+
+    /// Calls run, and return what they return, until one loses the
+    /// device. Errors other than a lost device aren't sticky.
+    #[test]
+    fn calls_run_until_the_device_is_lost() {
+        let loss = DeviceLoss::default();
+        assert!(matches!(loss.guard(|| Ok(1)), Ok(1)));
+        assert!(matches!(
+            loss.guard::<()>(|| Err(RhiError::Other(anyhow!("invalid SPIR-V")))),
+            Err(RhiError::Other(_))
+        ));
+        assert!(matches!(loss.guard(|| Ok(2)), Ok(2)));
+    }
+
+    /// Once a call loses the device, every later call returns `DeviceLost`
+    /// without running.
+    #[test]
+    fn a_lost_device_is_sticky() {
+        let loss = DeviceLoss::default();
+        assert!(matches!(
+            loss.guard::<()>(|| Err(RhiError::DeviceLost)),
+            Err(RhiError::DeviceLost)
+        ));
+        let mut ran = false;
+        let result = loss.guard(|| {
+            ran = true;
+            Ok(())
+        });
+        assert!(matches!(result, Err(RhiError::DeviceLost)));
+        assert!(!ran);
     }
 
     /// `Other` keeps its `anyhow` context chain, through `?` into an
