@@ -13,6 +13,7 @@
 //! on [`VALIDATION_TARGET`](clockwork_diagnostics::VALIDATION_TARGET), attributed
 //! to [`BackendOptions::session`]. See the [`validation`] module.
 
+mod access;
 mod buffers;
 mod capabilities;
 mod descriptor_heaps;
