@@ -70,6 +70,14 @@ impl Drop for Translation {
     }
 }
 
+/// How many pending submissions a queue keeps before
+/// [`needs_collecting`](DeferredQueue::needs_collecting) asks for them to be
+/// pruned, even with nothing retired, so that submitting without destroying
+/// anything doesn't grow the queue for good. With more left pending after
+/// the last prune, it waits for twice as many, so that a long queue of work
+/// in flight isn't rescanned at every submission.
+const PRUNE_PENDING_AFTER: usize = 64;
+
 /// The source of [`DeferredQueue::id`]s.
 static NEXT_QUEUE_ID: AtomicU64 = AtomicU64::new(0);
 
@@ -89,15 +97,10 @@ pub(crate) struct DeferredQueue<T> {
     pending: Vec<(u64, GpuTimepoint)>,
     /// Retired objects, with the epoch each was destroyed in, oldest first.
     retired: VecDeque<(u64, T)>,
+    /// How many submissions were still pending after the last collection.
+    pending_after_collection: usize,
 }
 
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "the backend retires objects through it in the next PR"
-    )
-)]
 impl<T> DeferredQueue<T> {
     /// An empty queue, at the first epoch.
     pub(crate) fn new() -> Self {
@@ -107,6 +110,7 @@ impl<T> DeferredQueue<T> {
             unsubmitted: BTreeMap::new(),
             pending: Vec::new(),
             retired: VecDeque::new(),
+            pending_after_collection: 0,
         }
     }
 
@@ -166,14 +170,8 @@ impl<T> DeferredQueue<T> {
                 .map_or(0, |&(_, value)| value);
             timepoint.value() > value
         });
-        let oldest_outstanding = self
-            .unsubmitted
-            .keys()
-            .next()
-            .copied()
-            .into_iter()
-            .chain(self.pending.iter().map(|&(epoch, _)| epoch))
-            .min();
+        self.pending_after_collection = self.pending.len();
+        let oldest_outstanding = self.oldest_outstanding();
         let mut freed = Vec::new();
         while let Some(&(destroyed, _)) = self.retired.front() {
             // An outstanding command buffer translated in or before the
@@ -191,6 +189,33 @@ impl<T> DeferredQueue<T> {
     /// is idle, when nothing can use them.
     pub(crate) fn drain(&mut self) -> Vec<T> {
         self.retired.drain(..).map(|(_, object)| object).collect()
+    }
+
+    /// How many retired objects are waiting to be freed.
+    pub(crate) fn retired_len(&self) -> usize {
+        self.retired.len()
+    }
+
+    /// The oldest epoch an outstanding command buffer was translated in,
+    /// which holds back every object destroyed in it or later, or `None`
+    /// if none is outstanding. Submissions count until the last
+    /// [`collect`](Self::collect) saw them complete.
+    pub(crate) fn oldest_outstanding(&self) -> Option<u64> {
+        self.unsubmitted
+            .keys()
+            .next()
+            .copied()
+            .into_iter()
+            .chain(self.pending.iter().map(|&(epoch, _)| epoch))
+            .min()
+    }
+
+    /// Whether a [`collect`](Self::collect) could free anything, or has
+    /// enough pending submissions to prune, so that a caller can skip
+    /// reading the timelines when it couldn't.
+    pub(crate) fn needs_collecting(&self) -> bool {
+        let prune_after = PRUNE_PENDING_AFTER.max(2 * self.pending_after_collection);
+        !self.retired.is_empty() || self.pending.len() > prune_after
     }
 
     /// Counts one fewer unsubmitted command buffer from `epoch`.
@@ -352,6 +377,57 @@ mod tests {
     fn lost_translations_panic() {
         let mut queue = DeferredQueue::<&str>::new();
         drop(queue.translating());
+    }
+
+    /// A queue with nothing retired needs collecting only once it has
+    /// enough pending submissions to prune, and reports the oldest epoch
+    /// holding objects back.
+    #[test]
+    fn queues_say_when_collecting_helps() {
+        let mut queue = DeferredQueue::new();
+        assert!(!queue.needs_collecting());
+        assert_eq!(queue.oldest_outstanding(), None);
+        for value in 1..=PRUNE_PENDING_AFTER as u64 {
+            let translation = queue.translating();
+            queue.submitted(translation, graphics(value));
+        }
+        assert!(!queue.needs_collecting());
+        assert_eq!(queue.oldest_outstanding(), Some(0));
+        let translation = queue.translating();
+        queue.submitted(translation, graphics(PRUNE_PENDING_AFTER as u64 + 1));
+        assert!(queue.needs_collecting());
+        assert_eq!(
+            queue.collect(&at(PRUNE_PENDING_AFTER as u64 + 1)),
+            [] as [&str; 0]
+        );
+        assert!(!queue.needs_collecting());
+        queue.retire("buffer");
+        assert!(queue.needs_collecting());
+        assert_eq!(queue.retired_len(), 1);
+    }
+
+    /// With more submissions still in flight after a collection than the
+    /// threshold, the next prune waits for twice as many, rather than every
+    /// submission reading the timelines.
+    #[test]
+    fn long_queues_of_work_are_pruned_less_often() {
+        let mut queue = DeferredQueue::<&str>::new();
+        let in_flight = PRUNE_PENDING_AFTER + 10;
+        for value in 1..=in_flight as u64 {
+            let translation = queue.translating();
+            queue.submitted(translation, graphics(value));
+        }
+        assert!(queue.needs_collecting());
+        assert_eq!(queue.collect(&at(0)), [] as [&str; 0]);
+        assert!(!queue.needs_collecting());
+        for value in in_flight as u64 + 1..=2 * in_flight as u64 {
+            let translation = queue.translating();
+            queue.submitted(translation, graphics(value));
+        }
+        assert!(!queue.needs_collecting());
+        let translation = queue.translating();
+        queue.submitted(translation, graphics(2 * in_flight as u64 + 1));
+        assert!(queue.needs_collecting());
     }
 
     /// Draining returns every retired object, whatever is outstanding.

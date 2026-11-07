@@ -338,11 +338,11 @@ pub trait GpuResources: Debug + Send + Sync {
     /// Panics if `desc.size` is zero.
     fn create_buffer(&self, desc: &BufferDesc<'_>) -> RhiResult<Buffer>;
 
-    /// Destroys the buffer. Its handle is stale from then on.
-    ///
-    /// Nothing can submit work through a `Queue` yet, so the buffer is
-    /// freed straight away. Once it can, design 0002 frees it only once
-    /// nothing translated before now can use it.
+    /// Destroys the buffer. Its handle is stale from then on, and it's freed
+    /// once no command buffer translated before now is outstanding: not yet
+    /// submitted, or submitted and not yet complete (design 0002, "Deferred
+    /// destruction"). So it can be destroyed straight after submitting work
+    /// that uses it.
     ///
     /// # Panics
     ///
@@ -404,9 +404,8 @@ pub trait GpuResources: Debug + Send + Sync {
 
     /// Destroys the texture. Its handle is stale from then on.
     ///
-    /// Nothing can submit work through a `Queue` yet, so the texture is
-    /// freed straight away, as [`destroy_buffer`](Self::destroy_buffer)
-    /// describes.
+    /// It's freed once nothing translated before now can use it, as
+    /// [`destroy_buffer`](Self::destroy_buffer) describes.
     ///
     /// # Panics
     ///
@@ -424,9 +423,8 @@ pub trait GpuResources: Debug + Send + Sync {
     /// Destroys the sampler, freeing its slot. Its handle is stale from then
     /// on.
     ///
-    /// Nothing can submit work through a `Queue` yet, so the slot is freed
-    /// straight away, as [`destroy_buffer`](Self::destroy_buffer)
-    /// describes.
+    /// The slot is freed once nothing translated before now can use it, as
+    /// [`destroy_buffer`](Self::destroy_buffer) describes.
     ///
     /// # Panics
     ///
@@ -439,6 +437,11 @@ pub trait GpuResources: Debug + Send + Sync {
     ///
     /// Panics if the handle is stale.
     fn sampler_index(&self, sampler: Sampler) -> DescriptorIndex;
+
+    /// Frees destroyed objects that nothing can still use. Each submission
+    /// does this too, so call it once a frame to free objects while nothing
+    /// is being submitted.
+    fn collect_garbage(&self);
 }
 
 // The resources are shared between threads, as an `Arc<dyn GpuResources>`

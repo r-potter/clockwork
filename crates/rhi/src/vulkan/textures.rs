@@ -19,6 +19,7 @@ use std::sync::{PoisonError, RwLockReadGuard, RwLockWriteGuard};
 use ash::vk;
 
 use super::VulkanDevice;
+use super::destruction::Retired;
 use super::error::{error, error_from_chain};
 use super::memory::{MemoryAllocation, MemoryRequest, Resource, image_memory_requirements};
 use crate::copy::CopiedTexture;
@@ -287,26 +288,15 @@ impl VulkanDevice {
         ))
     }
 
-    /// Removes `texture` from the table, then destroys it and frees its
-    /// memory.
+    /// Removes `texture` from the table, and retires it, to be destroyed
+    /// and its memory freed once nothing translated before now can use it.
     ///
     /// # Panics
     ///
     /// Panics if the handle is stale.
     pub(super) fn destroy_texture_entry(&self, texture: Texture) {
-        self.check_no_outstanding_command_buffers("texture", || {
-            self.textures
-                .read()
-                .unwrap_or_else(PoisonError::into_inner)
-                .label(texture.handle())
-                .to_owned()
-        });
         let (_, entry) = self.lock_textures_for_writing().remove(texture.handle());
-        self.wait_for_submissions();
-        // SAFETY: Every submission so far has completed, and no command
-        // buffer translated since is outstanding, so nothing pending or to
-        // be submitted names the texture.
-        unsafe { self.free_texture(entry) };
+        self.retire(Retired::Texture(entry));
     }
 
     /// Destroys a texture taken out of the table, and frees its memory.
