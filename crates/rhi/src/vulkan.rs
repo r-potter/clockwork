@@ -34,9 +34,11 @@ mod swapchain;
 #[cfg(test)]
 pub(crate) mod test_support;
 mod textures;
+mod translate;
 mod validation;
 
 use std::ffi::CStr;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, PoisonError, RwLock};
 use std::{fmt, slice};
 
@@ -65,6 +67,7 @@ use shaders::TriangleShaders;
 use surface::Surface;
 use swapchain::Swapchain;
 use textures::TextureEntry;
+pub(crate) use translate::VulkanCommandBuffer;
 use validation::{Availability, LayerSettings, VALIDATION_LAYER};
 
 /// Name reported to the Vulkan driver for both the application and the engine.
@@ -144,6 +147,11 @@ pub(crate) struct VulkanDevice {
     /// The device's queues, with their locks and timelines. Their timelines
     /// are destroyed in `drop`, once the device is idle.
     queues: Queues,
+    /// How many command buffers translated on the device are neither
+    /// submitted nor dropped. Destroying an object while any are panics,
+    /// since one may use it, until deferred destruction replaces the check
+    /// later in `rhi-commands`.
+    outstanding_command_buffers: AtomicUsize,
     /// Allocates memory for resources on `device`.
     allocator: MemoryAllocator,
     /// The logical device, and its queues, created on `physical_device`.
@@ -269,6 +277,7 @@ impl VulkanRenderHardwareInterface {
             samplers: RwLock::new(HandleTable::new("sampler")),
             heaps,
             queues,
+            outstanding_command_buffers: AtomicUsize::new(0),
             allocator,
             device,
             physical_device,
@@ -689,6 +698,38 @@ fn should_enable_debug_utils(entry: &Entry, validate: bool) -> Result<bool> {
     Ok(extensions
         .iter()
         .any(|extension| extension.extension_name_as_c_str() == Ok(debug_utils::NAME)))
+}
+
+impl VulkanDevice {
+    /// Checks that no translated command buffer is outstanding, before the
+    /// `kind` object `label` names is destroyed.
+    ///
+    /// Destroying waits for every submission so far, but not for a command
+    /// buffer translated and not yet submitted, which may use the object.
+    /// Until deferred destruction, later in `rhi-commands`, keeps the object
+    /// until such a command buffer is done with it, destroying one panics
+    /// instead. A translation started on another thread during the check
+    /// isn't caught, but that thread races the destruction anyway.
+    ///
+    /// # Panics
+    ///
+    /// Panics, naming the object, if a command buffer is outstanding.
+    fn check_no_outstanding_command_buffers(&self, kind: &str, label: impl FnOnce() -> String) {
+        assert!(
+            self.outstanding_command_buffers.load(Ordering::Acquire) == 0,
+            "the {kind} \"{}\" is destroyed while a translated command buffer, which may use \
+             it, is neither submitted nor dropped, which deferred destruction will allow",
+            label(),
+        );
+    }
+
+    /// Waits for every submission so far to complete, before an object is
+    /// destroyed, until deferred destruction replaces the wait later in
+    /// `rhi-commands`. If waiting fails, the device is lost, so nothing
+    /// runs on it, and destruction goes ahead.
+    fn wait_for_submissions(&self) {
+        let _ = self.queues.wait_for_submissions(self.device.handle());
+    }
 }
 
 /// The queue for each kind on `core`, indexed by `QueueKind as usize`, with

@@ -126,10 +126,16 @@ impl VulkanDevice {
     ///
     /// Panics if the handle is stale.
     pub(super) fn destroy_sampler_entry(&self, sampler: Sampler) {
+        self.check_no_outstanding_command_buffers("sampler", || {
+            self.lock_samplers_for_reading()
+                .label(sampler.handle())
+                .to_owned()
+        });
         let (_, entry) = self.lock_samplers_for_writing().remove(sampler.handle());
-        // Nothing can submit work through a `Queue` yet, so no submitted work
-        // reads the descriptor. Once it can, deferred destruction
-        // (`rhi-commands`) frees the slot only once nothing can.
+        // Once every submission so far has completed, with no command buffer
+        // translated since outstanding, nothing reads the descriptor.
+        // Deferred destruction, later in `rhi-commands`, replaces the wait.
+        self.wait_for_submissions();
         self.free_sampler(entry);
     }
 

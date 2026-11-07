@@ -217,10 +217,18 @@ impl VulkanDevice {
     ///
     /// Panics if the handle is stale.
     pub(super) fn destroy_texture_entry(&self, texture: Texture) {
+        self.check_no_outstanding_command_buffers("texture", || {
+            self.textures
+                .read()
+                .unwrap_or_else(PoisonError::into_inner)
+                .label(texture.handle())
+                .to_owned()
+        });
         let (_, entry) = self.lock_textures_for_writing().remove(texture.handle());
-        // SAFETY: Nothing can submit work through a `Queue` yet, so no
-        // submitted work uses the texture. Once it can, deferred destruction
-        // (`rhi-commands`) calls this only once nothing can.
+        self.wait_for_submissions();
+        // SAFETY: Every submission so far has completed, and no command
+        // buffer translated since is outstanding, so nothing pending or to
+        // be submitted names the texture.
         unsafe { self.free_texture(entry) };
     }
 

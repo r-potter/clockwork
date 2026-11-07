@@ -56,9 +56,14 @@ impl CommandPool {
     /// The command buffer claimed with the pool: a primary command buffer
     /// in the initial state when claimed. A claimed pool has always handed
     /// out at least one.
-    #[expect(dead_code, reason = "translation records into it in the next PR")]
     pub(super) fn buffer(&self) -> vk::CommandBuffer {
         self.buffers[self.used - 1]
+    }
+
+    /// The pool, for tests that check which pool is claimed.
+    #[cfg(test)]
+    pub(super) fn pool(&self) -> vk::CommandPool {
+        self.pool
     }
 }
 

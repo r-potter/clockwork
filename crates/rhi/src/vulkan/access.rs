@@ -26,10 +26,6 @@ pub(super) struct AccessInfo {
 
 /// Which side of a barrier an [`AccessSet`] is on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "translation emits barriers in a later PR")
-)]
 pub(super) enum Side {
     /// The accesses before the barrier, which it waits for.
     Before,
@@ -82,10 +78,6 @@ pub(super) fn access_info(access: Access) -> AccessInfo {
 /// access's, so earlier writes are made visible to each. Before it, they're
 /// only the writes', since only writes need making available, and Vulkan
 /// ignores read flags there.
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "translation emits barriers in a later PR")
-)]
 pub(super) fn scope(set: AccessSet, side: Side) -> AccessInfo {
     let mut scope = AccessInfo {
         stages: vk::PipelineStageFlags2::NONE,
