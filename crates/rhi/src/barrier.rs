@@ -2,21 +2,27 @@
 //! (design 0002, "Synchronization" and "Subresources and views").
 //!
 //! An [`Access`] is a way a resource is used, such as being sampled by a
-//! fragment shader or written by a copy. A [`Barrier`] names a buffer, a
-//! texture's [`Subresource`], or all memory, and the accesses before and
-//! after it. Backends map each access to their own synchronization
-//! vocabulary with a table, so a texture's layout always follows from its
-//! access, rather than being stated separately.
+//! fragment shader or written by a copy: a single read or write, in one
+//! stage. An [`AccessSet`] is every way a resource is used on one side of a
+//! barrier. A [`Barrier`] names a buffer, a texture's [`Subresource`], or all
+//! memory, and the access sets before and after it. Each access names the
+//! engine-level [`Layout`] a texture must be in for it, and recording
+//! chooses one for each set, so a texture's layout always follows from its
+//! accesses, rather than being stated separately. Backends map each access
+//! and layout to their own synchronization vocabulary with a table.
 
-use std::ops::Range;
+use std::fmt;
+use std::ops::{BitOr, BitOrAssign, Range};
 
 use crate::{Buffer, Texture};
 
-/// A way a resource is used, which a barrier orders against another.
+/// A way a resource is used, which a barrier orders against another: a
+/// single read or write, in one stage. A use that reads and writes names
+/// both, in an [`AccessSet`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Access {
     /// Not used: a new resource, or one whose contents are discarded. A
-    /// texture's contents are lost by a barrier from it.
+    /// texture's contents are lost by a barrier from it. Only valid alone.
     None,
     /// Read as indirect draw or dispatch arguments. Buffers only.
     IndirectRead,
@@ -36,14 +42,20 @@ pub enum Access {
     /// Sampled by a compute shader, through a sampled view.
     ComputeShaderSampledRead,
     /// Written by a compute shader, through a buffer's address or a storage
-    /// view.
+    /// view. A shader that also reads what it writes, for example with
+    /// atomics, is [`ComputeShaderRead`](Self::ComputeShaderRead) too.
     ComputeShaderWrite,
-    /// Rendered to as a colour attachment, which also reads it to load its
-    /// contents or blend with them.
+    /// Read as a colour attachment, to load its contents or blend with
+    /// them.
+    ColorAttachmentRead,
+    /// Written as a colour attachment. Rendering that loads its contents or
+    /// blends with them is [`ColorAttachmentRead`](Self::ColorAttachmentRead)
+    /// too.
     ColorAttachmentWrite,
-    /// Depth-tested against as a depth attachment, without writing it.
+    /// Depth-tested against as a depth attachment.
     DepthAttachmentRead,
-    /// Depth-tested and written as a depth attachment.
+    /// Written as a depth attachment. Depth testing that writes is
+    /// [`DepthAttachmentRead`](Self::DepthAttachmentRead) too.
     DepthAttachmentWrite,
     /// Read by a copy.
     CopyRead,
@@ -54,13 +66,13 @@ pub enum Access {
     /// Read by the CPU, through a mapping. Buffers only.
     HostRead,
     /// Presented to the window. Textures only: a surface image ends its
-    /// frame here.
+    /// frame here. Only valid alone.
     Present,
 }
 
 impl Access {
     /// Every access.
-    pub const ALL: [Self; 17] = [
+    pub const ALL: [Self; 18] = [
         Self::None,
         Self::IndirectRead,
         Self::IndexRead,
@@ -70,6 +82,7 @@ impl Access {
         Self::ComputeShaderRead,
         Self::ComputeShaderSampledRead,
         Self::ComputeShaderWrite,
+        Self::ColorAttachmentRead,
         Self::ColorAttachmentWrite,
         Self::DepthAttachmentRead,
         Self::DepthAttachmentWrite,
@@ -98,6 +111,7 @@ impl Access {
             self,
             Self::FragmentShaderSampledRead
                 | Self::ComputeShaderSampledRead
+                | Self::ColorAttachmentRead
                 | Self::ColorAttachmentWrite
                 | Self::DepthAttachmentRead
                 | Self::DepthAttachmentWrite
@@ -107,10 +121,173 @@ impl Access {
 
     /// Whether a texture can be used this way.
     pub const fn applies_to_textures(self) -> bool {
-        !matches!(
-            self,
-            Self::IndirectRead | Self::IndexRead | Self::HostWrite | Self::HostRead
-        )
+        self.layout().is_some()
+    }
+
+    /// The layout a texture must be in for this access alone, or `None` for
+    /// an access only buffers have.
+    pub(crate) const fn layout(self) -> Option<Layout> {
+        match self {
+            Self::None => Some(Layout::Undefined),
+            Self::IndirectRead | Self::IndexRead | Self::HostWrite | Self::HostRead => None,
+            Self::VertexShaderRead
+            | Self::FragmentShaderRead
+            | Self::ComputeShaderRead
+            | Self::ComputeShaderWrite => Some(Layout::General),
+            Self::FragmentShaderSampledRead
+            | Self::ComputeShaderSampledRead
+            | Self::DepthAttachmentRead => Some(Layout::ReadOnly),
+            Self::ColorAttachmentRead | Self::ColorAttachmentWrite | Self::DepthAttachmentWrite => {
+                Some(Layout::Attachment)
+            }
+            Self::CopyRead => Some(Layout::CopySource),
+            Self::CopyWrite => Some(Layout::CopyDestination),
+            Self::Present => Some(Layout::Present),
+        }
+    }
+
+    /// Another layout this access can also happen in, beside accesses that
+    /// need it: depth testing happens in the attachment layout beside a
+    /// depth write.
+    const fn also_in(self) -> Option<Layout> {
+        match self {
+            Self::DepthAttachmentRead => Some(Layout::Attachment),
+            _ => None,
+        }
+    }
+
+    /// Whether the access is only valid alone in its set.
+    const fn is_alone_only(self) -> bool {
+        matches!(self, Self::None | Self::Present)
+    }
+
+    /// The access's bit in an [`AccessSet`].
+    const fn bit(self) -> u32 {
+        1 << self as u32
+    }
+}
+
+/// The layouts a texture can be in, which each [`Access`] names and
+/// recording chooses for each [`AccessSet`]. Backends map each to a layout
+/// of their own.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum Layout {
+    /// No contents: a new texture, or one whose contents are discarded.
+    Undefined,
+    /// Read and written by shaders through storage views.
+    General,
+    /// Sampled, or depth-tested without writing.
+    ReadOnly,
+    /// Rendered to as a colour or depth attachment.
+    Attachment,
+    /// Read by a copy.
+    CopySource,
+    /// Written by a copy.
+    CopyDestination,
+    /// Presented to the window.
+    Present,
+}
+
+/// Every way a resource is used on one side of a barrier, built with `|`
+/// from [`Access`] values. A single `Access` is a set of one, and a set is
+/// never empty.
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+pub struct AccessSet(u32);
+
+impl AccessSet {
+    /// The accesses in either set.
+    pub const fn union(self, other: Self) -> Self {
+        Self(self.0 | other.0)
+    }
+
+    /// Whether `access` is in the set.
+    pub const fn contains(self, access: Access) -> bool {
+        self.0 & access.bit() != 0
+    }
+
+    /// Whether any access in the set writes the resource.
+    pub fn is_write(self) -> bool {
+        self.iter().any(Access::is_write)
+    }
+
+    /// The accesses in the set, in the order of [`Access::ALL`].
+    pub fn iter(self) -> impl Iterator<Item = Access> {
+        Access::ALL
+            .into_iter()
+            .filter(move |&access| self.contains(access))
+    }
+
+    /// The one layout a texture can be in for every access in the set, or
+    /// `None` if there isn't one, or an access is one only buffers have.
+    ///
+    /// A set with writes takes their layout, and its reads must be able to
+    /// happen in it. A set of only reads takes the layout they share,
+    /// preferring the one its accesses use alone.
+    pub(crate) fn layout(self) -> Option<Layout> {
+        let can_be_in = |layout: Layout| {
+            self.iter()
+                .all(|access| access.layout() == Some(layout) || access.also_in() == Some(layout))
+        };
+        let preferred = match self.iter().find(|access| access.is_write()) {
+            Some(write) => write.layout(),
+            None => self.iter().find_map(Access::layout),
+        }?;
+        if can_be_in(preferred) {
+            return Some(preferred);
+        }
+        // Reads that use different layouts alone may share another, such
+        // as a colour attachment read beside a depth test.
+        if self.is_write() {
+            return None;
+        }
+        self.iter()
+            .filter_map(Access::also_in)
+            .find(|&layout| can_be_in(layout))
+    }
+}
+
+impl From<Access> for AccessSet {
+    /// The set of `access` alone.
+    fn from(access: Access) -> Self {
+        Self(access.bit())
+    }
+}
+
+impl<T: Into<AccessSet>> BitOr<T> for AccessSet {
+    type Output = Self;
+
+    /// The accesses in either set, as [`union`](Self::union).
+    fn bitor(self, other: T) -> Self {
+        self.union(other.into())
+    }
+}
+
+impl<T: Into<AccessSet>> BitOr<T> for Access {
+    type Output = AccessSet;
+
+    /// The set of this access and those in `other`.
+    fn bitor(self, other: T) -> AccessSet {
+        AccessSet::from(self) | other
+    }
+}
+
+impl<T: Into<AccessSet>> BitOrAssign<T> for AccessSet {
+    /// Adds the accesses in `other`.
+    fn bitor_assign(&mut self, other: T) {
+        *self = self.union(other.into());
+    }
+}
+
+impl fmt::Debug for AccessSet {
+    /// Formats the set as its accesses joined by `|`, as it's built.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        for (i, access) in self.iter().enumerate() {
+            if i > 0 {
+                f.write_str(" | ")?;
+            }
+            write!(f, "{access:?}")?;
+        }
+        Ok(())
     }
 }
 
@@ -175,39 +352,47 @@ pub(crate) enum BarrierTarget {
 }
 
 /// Orders the accesses to a resource before it against those after it, and
-/// moves a texture's subresource to the layout its next access needs.
+/// moves a texture's subresource to the layout its next accesses need.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Barrier {
     /// What the barrier applies to.
     target: BarrierTarget,
     /// How the resource was used before the barrier.
-    before: Access,
+    before: AccessSet,
     /// How it's used after it.
-    after: Access,
+    after: AccessSet,
 }
 
 impl Barrier {
-    /// A barrier for all memory: every access of the kind `before` comes
-    /// before every access of the kind `after`.
-    pub fn global(before: Access, after: Access) -> Self {
+    /// A barrier for all memory: every access in `before` comes before every
+    /// access in `after`.
+    pub fn global(before: impl Into<AccessSet>, after: impl Into<AccessSet>) -> Self {
         Self {
             target: BarrierTarget::Global,
-            before,
-            after,
+            before: before.into(),
+            after: after.into(),
         }
     }
 
     /// A barrier for `buffer`, whole.
-    pub fn buffer(buffer: Buffer, before: Access, after: Access) -> Self {
+    pub fn buffer(
+        buffer: Buffer,
+        before: impl Into<AccessSet>,
+        after: impl Into<AccessSet>,
+    ) -> Self {
         Self {
             target: BarrierTarget::Buffer(buffer),
-            before,
-            after,
+            before: before.into(),
+            after: after.into(),
         }
     }
 
     /// A barrier for every mip and layer of `texture`.
-    pub fn texture(texture: Texture, before: Access, after: Access) -> Self {
+    pub fn texture(
+        texture: Texture,
+        before: impl Into<AccessSet>,
+        after: impl Into<AccessSet>,
+    ) -> Self {
         Self::subresource(texture, Subresource::ALL, before, after)
     }
 
@@ -216,42 +401,56 @@ impl Barrier {
     pub fn subresource(
         texture: Texture,
         subresource: Subresource,
-        before: Access,
-        after: Access,
+        before: impl Into<AccessSet>,
+        after: impl Into<AccessSet>,
     ) -> Self {
         Self {
             target: BarrierTarget::Texture(texture, subresource),
-            before,
-            after,
+            before: before.into(),
+            after: after.into(),
         }
     }
 
     /// What the barrier applies to.
-    #[expect(dead_code, reason = "translation reads barriers in the next PR")]
+    #[expect(dead_code, reason = "translation reads barriers in a later PR")]
     pub(crate) fn target(&self) -> &BarrierTarget {
         &self.target
     }
 
     /// How the resource was used before the barrier.
-    pub fn before(&self) -> Access {
+    pub fn before(&self) -> AccessSet {
         self.before
     }
 
     /// How the resource is used after the barrier.
-    pub fn after(&self) -> Access {
+    pub fn after(&self) -> AccessSet {
         self.after
     }
 
-    /// Checks that the accesses suit what the barrier applies to, for a
+    /// Checks that the access sets suit what the barrier applies to, for a
     /// barrier recorded into the command list `list`.
     ///
     /// # Panics
     ///
-    /// Panics, naming the list, if a buffer is given an access only
-    /// textures have, a texture is given one only buffers have, all memory
-    /// is given [`Access::Present`], which needs a layout, or a texture is
-    /// moved to [`Access::None`], which has no layout to move to.
+    /// Panics, naming the list, if:
+    /// - [`Access::None`] or [`Access::Present`] isn't alone in its set;
+    /// - a buffer is given an access only textures have, or a texture one
+    ///   only buffers have;
+    /// - all memory is given [`Access::Present`], which needs a layout;
+    /// - a texture is moved to [`Access::None`], which has no layout to move
+    ///   to;
+    /// - a texture's set has no one layout, such as sampled and storage
+    ///   access together.
     pub(crate) fn check(&self, list: &str) {
+        for set in [self.before, self.after] {
+            for access in set.iter() {
+                assert!(
+                    !access.is_alone_only() || set == AccessSet::from(access),
+                    "command list \"{list}\" has a barrier with {set:?}, but {access:?} must be \
+                     alone",
+                );
+            }
+        }
         let (target, applies): (_, fn(Access) -> bool) = match self.target {
             // A global barrier orders memory accesses only, with no layout,
             // so it can't present.
@@ -259,7 +458,7 @@ impl Barrier {
             BarrierTarget::Buffer(_) => ("a buffer", Access::applies_to_buffers),
             BarrierTarget::Texture(..) => ("a texture", Access::applies_to_textures),
         };
-        for access in [self.before, self.after] {
+        for access in self.before.iter().chain(self.after.iter()) {
             assert!(
                 applies(access),
                 "command list \"{list}\" has a barrier for {target} with {access:?}, which \
@@ -268,10 +467,17 @@ impl Barrier {
         }
         if let BarrierTarget::Texture(..) = self.target {
             assert!(
-                self.after != Access::None,
+                !self.after.contains(Access::None),
                 "command list \"{list}\" has a barrier for a texture to Access::None, but a \
                  texture's contents are only discarded by a barrier from it",
             );
+            for set in [self.before, self.after] {
+                assert!(
+                    set.layout().is_some(),
+                    "command list \"{list}\" has a barrier for a texture with {set:?}, which \
+                     have no one layout",
+                );
+            }
         }
     }
 }
@@ -282,14 +488,15 @@ const _: () = {
     /// Compiles only for types that are `Send` and `Sync`.
     const fn assert_send_sync<T: Send + Sync>() {}
     assert_send_sync::<Access>();
+    assert_send_sync::<AccessSet>();
     assert_send_sync::<Subresource>();
     assert_send_sync::<Barrier>();
 };
 
 #[cfg(test)]
 mod tests {
-    //! T0 tests of accesses, subresources and barrier checks (design 0002,
-    //! R8 and part of R21).
+    //! T0 tests of accesses, access sets, subresources and barrier checks
+    //! (design 0002, R8 and part of R21).
 
     use super::*;
     use crate::handle::HandleTable;
@@ -334,14 +541,137 @@ mod tests {
         );
     }
 
+    /// Each access names the layout made for it: storage access is
+    /// `General`, sampling and depth testing `ReadOnly`, and attachment
+    /// writes and colour reads `Attachment`. Exactly the accesses only
+    /// buffers have name none.
+    #[test]
+    fn accesses_name_their_layouts() {
+        use Layout as L;
+        let expected = [
+            (Access::None, Some(L::Undefined)),
+            (Access::IndirectRead, None),
+            (Access::IndexRead, None),
+            (Access::VertexShaderRead, Some(L::General)),
+            (Access::FragmentShaderRead, Some(L::General)),
+            (Access::FragmentShaderSampledRead, Some(L::ReadOnly)),
+            (Access::ComputeShaderRead, Some(L::General)),
+            (Access::ComputeShaderSampledRead, Some(L::ReadOnly)),
+            (Access::ComputeShaderWrite, Some(L::General)),
+            (Access::ColorAttachmentRead, Some(L::Attachment)),
+            (Access::ColorAttachmentWrite, Some(L::Attachment)),
+            (Access::DepthAttachmentRead, Some(L::ReadOnly)),
+            (Access::DepthAttachmentWrite, Some(L::Attachment)),
+            (Access::CopyRead, Some(L::CopySource)),
+            (Access::CopyWrite, Some(L::CopyDestination)),
+            (Access::HostWrite, None),
+            (Access::HostRead, None),
+            (Access::Present, Some(L::Present)),
+        ];
+        assert_eq!(
+            expected.map(|(access, _)| access),
+            Access::ALL,
+            "every access is listed"
+        );
+        for (access, layout) in expected {
+            assert_eq!(access.layout(), layout, "{access:?}");
+        }
+    }
+
+    /// Sets are built with `|` from accesses, hold each access once, and
+    /// list them in a fixed order.
+    #[test]
+    fn sets_combine_accesses() {
+        let set = Access::ComputeShaderWrite | Access::ComputeShaderRead;
+        assert_eq!(
+            set.iter().collect::<Vec<_>>(),
+            [Access::ComputeShaderRead, Access::ComputeShaderWrite],
+        );
+        assert_eq!(set | Access::ComputeShaderRead, set);
+        let mut grown = AccessSet::from(Access::ComputeShaderRead);
+        grown |= Access::ComputeShaderWrite;
+        assert_eq!(grown, set);
+        assert!(set.is_write());
+        assert!(!AccessSet::from(Access::ComputeShaderRead).is_write());
+        assert_eq!(format!("{set:?}"), "ComputeShaderRead | ComputeShaderWrite");
+    }
+
+    /// A set takes its writes' layout, reads share the layout they use
+    /// alone, and depth tests move to the attachment layout beside a depth
+    /// write.
+    #[test]
+    fn sets_have_one_layout() {
+        use Layout as L;
+        for (set, layout) in [
+            (
+                Access::ComputeShaderRead | Access::ComputeShaderWrite,
+                L::General,
+            ),
+            (
+                Access::ColorAttachmentRead | Access::ColorAttachmentWrite,
+                L::Attachment,
+            ),
+            (
+                Access::DepthAttachmentRead | Access::DepthAttachmentWrite,
+                L::Attachment,
+            ),
+            (Access::DepthAttachmentRead.into(), L::ReadOnly),
+            (
+                Access::DepthAttachmentRead | Access::FragmentShaderSampledRead,
+                L::ReadOnly,
+            ),
+            (
+                Access::FragmentShaderSampledRead | Access::ComputeShaderSampledRead,
+                L::ReadOnly,
+            ),
+            (
+                Access::VertexShaderRead | Access::FragmentShaderRead,
+                L::General,
+            ),
+            (
+                Access::DepthAttachmentRead | Access::ColorAttachmentRead,
+                L::Attachment,
+            ),
+        ] {
+            assert_eq!(set.layout(), Some(layout), "{set:?}");
+        }
+    }
+
+    /// Sets whose accesses can't share a layout have none.
+    #[test]
+    fn mixed_sets_have_no_layout() {
+        for set in [
+            Access::FragmentShaderSampledRead | Access::FragmentShaderRead,
+            Access::CopyWrite | Access::ComputeShaderWrite,
+            Access::DepthAttachmentWrite | Access::FragmentShaderSampledRead,
+            Access::CopyRead | Access::FragmentShaderSampledRead,
+            Access::HostRead.into(),
+        ] {
+            assert_eq!(set.layout(), None, "{set:?}");
+        }
+    }
+
     /// Barriers whose accesses suit what they apply to pass, including
-    /// discarding a texture's contents with a barrier from `None`.
+    /// discarding a texture's contents with a barrier from `None`, and sets
+    /// with one layout.
     #[test]
     fn suitable_barriers_pass() {
         Barrier::global(Access::CopyWrite, Access::HostRead).check("list");
         Barrier::global(Access::ColorAttachmentWrite, Access::FragmentShaderRead).check("list");
         Barrier::buffer(buffer(), Access::HostWrite, Access::CopyRead).check("list");
+        Barrier::buffer(
+            buffer(),
+            Access::CopyWrite,
+            Access::ComputeShaderRead | Access::ComputeShaderWrite | Access::IndirectRead,
+        )
+        .check("list");
         Barrier::texture(texture(), Access::None, Access::ColorAttachmentWrite).check("list");
+        Barrier::texture(
+            texture(),
+            Access::DepthAttachmentRead | Access::DepthAttachmentWrite,
+            Access::DepthAttachmentRead | Access::FragmentShaderSampledRead,
+        )
+        .check("list");
         Barrier::subresource(
             texture(),
             Subresource::mip(1),
@@ -372,14 +702,20 @@ mod tests {
         Barrier::global(Access::ColorAttachmentWrite, Access::Present).check("frame");
     }
 
-    /// A texture barrier with an access only buffers have panics.
+    /// A texture barrier with an access only buffers have panics, in any
+    /// position in its set.
     #[test]
     #[should_panic(
         expected = "command list \"frame\" has a barrier for a texture with HostRead, which \
                     doesn't apply to a texture"
     )]
     fn texture_barriers_with_buffer_accesses_panic() {
-        Barrier::texture(texture(), Access::CopyWrite, Access::HostRead).check("frame");
+        Barrier::texture(
+            texture(),
+            Access::CopyWrite,
+            Access::CopyRead | Access::HostRead,
+        )
+        .check("frame");
     }
 
     /// A texture barrier to `None` panics, since there's no layout to move
@@ -391,5 +727,56 @@ mod tests {
     )]
     fn texture_barriers_to_none_panic() {
         Barrier::texture(texture(), Access::CopyRead, Access::None).check("frame");
+    }
+
+    /// `None` beside another access panics, naming the set.
+    #[test]
+    #[should_panic(
+        expected = "command list \"frame\" has a barrier with None | CopyRead, but None must be \
+                    alone"
+    )]
+    fn none_beside_another_access_panics() {
+        Barrier::buffer(buffer(), Access::None | Access::CopyRead, Access::HostRead).check("frame");
+    }
+
+    /// `Present` beside another access panics, naming the set.
+    #[test]
+    #[should_panic(
+        expected = "command list \"frame\" has a barrier with ColorAttachmentWrite | Present, \
+                    but Present must be alone"
+    )]
+    fn present_beside_another_access_panics() {
+        Barrier::texture(
+            texture(),
+            Access::ColorAttachmentWrite,
+            Access::ColorAttachmentWrite | Access::Present,
+        )
+        .check("frame");
+    }
+
+    /// A texture barrier with a set that has no one layout panics, naming
+    /// the list and the set.
+    #[test]
+    #[should_panic(expected = "command list \"frame\" has a barrier for a texture with \
+                    FragmentShaderRead | FragmentShaderSampledRead, which have no one layout")]
+    fn texture_sets_with_no_layout_panic() {
+        Barrier::texture(
+            texture(),
+            Access::ComputeShaderWrite,
+            Access::FragmentShaderSampledRead | Access::FragmentShaderRead,
+        )
+        .check("frame");
+    }
+
+    /// A buffer barrier's sets need no layout, so any accesses buffers can
+    /// have can share one.
+    #[test]
+    fn buffer_sets_need_no_layout() {
+        Barrier::buffer(
+            buffer(),
+            Access::CopyWrite,
+            Access::VertexShaderRead | Access::IndexRead | Access::CopyRead,
+        )
+        .check("list");
     }
 }
