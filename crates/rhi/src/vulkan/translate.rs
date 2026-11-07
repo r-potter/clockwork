@@ -22,7 +22,6 @@ mod gpu_tests;
 
 use std::fmt;
 use std::sync::Arc;
-use std::sync::atomic::Ordering;
 
 use ash::vk;
 
@@ -34,11 +33,13 @@ use super::queues::Queues;
 use crate::barrier::BarrierTarget;
 use crate::command_list::Command;
 use crate::copy::check_texture_copy;
+use crate::deferred::Translation;
 use crate::ffi::truncate_to_cstring;
-use crate::{Access, AccessSet, CommandBuffer, CommandList, QueueId, RhiResult};
+use crate::{Access, AccessSet, CommandBuffer, CommandList, GpuTimepoint, QueueId, RhiResult};
 
 /// A command list translated for one queue, holding the command pool its
-/// command buffer was recorded from until it's submitted or dropped.
+/// command buffer was recorded from, and holding back the destruction of
+/// what it may use, until it's submitted or dropped.
 pub(crate) struct VulkanCommandBuffer {
     /// The core, which owns the pool, so it outlives this.
     core: Arc<VulkanDevice>,
@@ -46,6 +47,9 @@ pub(crate) struct VulkanCommandBuffer {
     queue: QueueId,
     /// The pool and its command buffer, or `None` once submitted.
     commands: Option<CommandPool>,
+    /// Its translation's epoch, given back to the core's deferred queue
+    /// when it's submitted or dropped, or `None` once it has been.
+    translation: Option<Translation>,
     /// The command list's label.
     label: Box<str>,
 }
@@ -75,27 +79,42 @@ impl VulkanCommandBuffer {
         );
     }
 
-    /// Recycles its pool to its queue, reusable once the timeline reaches
-    /// `value`, which the submission it was in signals.
-    pub(super) fn submitted(&mut self, value: u64) {
-        if let Some(commands) = self.commands.take() {
-            self.core.queues.recycle_pool(self.queue, commands, value);
-            self.core
-                .outstanding_command_buffers
-                .fetch_sub(1, Ordering::Release);
+    /// Recycles the pools of `command_buffers`, all in the submission that
+    /// reaches `timepoint`, reusable once the timeline reaches it, and gives
+    /// their translations back to the deferred queue, which keeps what they
+    /// may use until then, taking its lock once for them all.
+    pub(super) fn all_submitted(command_buffers: Vec<CommandBuffer>, timepoint: GpuTimepoint) {
+        let Some(CommandBuffer(first)) = command_buffers.first() else {
+            return;
+        };
+        let core = first.core.clone();
+        let mut command_buffers = command_buffers;
+        // The translations are given back before any pool is recycled, so a
+        // panic while recycling can't drop one that's been taken.
+        let translations: Vec<_> = command_buffers
+            .iter_mut()
+            .filter_map(|CommandBuffer(command_buffer)| command_buffer.translation.take())
+            .collect();
+        core.end_submitted_translations(translations, timepoint);
+        for CommandBuffer(mut command_buffer) in command_buffers {
+            if let Some(commands) = command_buffer.commands.take() {
+                core.queues
+                    .recycle_pool(command_buffer.queue, commands, timepoint.value());
+            }
         }
     }
 }
 
 impl Drop for VulkanCommandBuffer {
-    /// Recycles an unsubmitted command buffer's pool to its queue, for
-    /// reuse straight away, since no submission uses it.
+    /// Recycles an unsubmitted command buffer's pool to its queue, for reuse
+    /// straight away, and gives its translation back to the deferred queue,
+    /// since no submission uses either.
     fn drop(&mut self) {
         if let Some(commands) = self.commands.take() {
             self.core.queues.recycle_pool(self.queue, commands, 0);
-            self.core
-                .outstanding_command_buffers
-                .fetch_sub(1, Ordering::Release);
+        }
+        if let Some(translation) = self.translation.take() {
+            self.core.end_dropped_translation(translation);
         }
     }
 }
@@ -130,14 +149,15 @@ impl VulkanDevice {
         let device = self.device.handle();
         let commands = self.queues.claim_pool(device, id)?;
         let buffer = commands.buffer();
-        // From here, returning early or panicking recycles the pool, and
-        // counts the command buffer as no longer outstanding.
-        self.outstanding_command_buffers
-            .fetch_add(1, Ordering::AcqRel);
+        // From here, returning early or panicking recycles the pool and gives
+        // the translation back. The translation starts before any handle is
+        // looked up, so an object destroyed after its lookup is retired in
+        // this epoch or later, and kept while this is outstanding.
         let command_buffer = VulkanCommandBuffer {
             core: self.clone(),
             queue: id,
             commands: Some(commands),
+            translation: Some(self.begin_translation()),
             label: list.label().into(),
         };
         let begin_info = vk::CommandBufferBeginInfo::default()

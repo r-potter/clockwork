@@ -27,6 +27,7 @@ use anyhow::anyhow;
 use ash::vk;
 
 use super::VulkanDevice;
+use super::destruction::Retired;
 use super::error::{error, error_from_chain};
 use super::memory::{MemoryAllocation, MemoryRequest, Resource, buffer_memory_requirements};
 use crate::handle::HandleTable;
@@ -147,24 +148,15 @@ impl VulkanDevice {
         ))
     }
 
-    /// Removes `buffer` from the table, then destroys it and frees its
-    /// memory.
+    /// Removes `buffer` from the table, and retires it, to be destroyed and
+    /// its memory freed once nothing translated before now can use it.
     ///
     /// # Panics
     ///
     /// Panics if the handle is stale.
     pub(super) fn destroy_buffer_entry(&self, buffer: Buffer) {
-        self.check_no_outstanding_command_buffers("buffer", || {
-            self.lock_buffers_for_reading()
-                .label(buffer.handle())
-                .to_owned()
-        });
         let (_, entry) = self.lock_buffers_for_writing().remove(buffer.handle());
-        self.wait_for_submissions();
-        // SAFETY: Every submission so far has completed, and no command
-        // buffer translated since is outstanding, so nothing pending or to
-        // be submitted names the buffer.
-        unsafe { self.free_buffer(entry) };
+        self.retire(Retired::Buffer(entry));
     }
 
     /// The device address of `buffer`.

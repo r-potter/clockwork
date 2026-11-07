@@ -39,6 +39,7 @@ use super::command_pools::{CommandPool, CommandPools};
 use super::device::LogicalDevice;
 use super::device_selection::QueueFamilies;
 use super::error::error;
+use super::translate::VulkanCommandBuffer;
 use crate::{
     CommandBuffer, CommandList, GpuTimepoint, Queue, QueueId, QueueKind, RhiResult, SubmitDesc,
 };
@@ -358,12 +359,9 @@ impl Queues {
     /// Returns an error if the timeline can't be read, or a pool can't be
     /// reset or created.
     pub(super) fn claim_pool(&self, device: &ash::Device, id: QueueId) -> RhiResult<CommandPool> {
-        let queue = self.queue(id);
-        queue.pools.claim(device, || {
-            // SAFETY: The semaphore is a timeline created on `device`.
-            unsafe { device.get_semaphore_counter_value(queue.timeline) }
-                .map_err(|result| error(result, "read the timeline of queue", queue.role.name()))
-        })
+        self.queue(id)
+            .pools
+            .claim(device, || self.reached(device, id))
     }
 
     /// Recycles `pool` for the queue `id`, reusable once its timeline
@@ -443,10 +441,13 @@ impl Queues {
         }
         .map_err(|result| error(result, "submit to queue", queue.role.name()))?;
         queue.submitted.store(value, Ordering::Release);
-        for CommandBuffer(mut command_buffer) in desc.command_buffers {
-            command_buffer.submitted(value);
-        }
-        Ok(GpuTimepoint::new(id, value))
+        // The command buffers are given back once the queue is unlocked, so
+        // other threads submitting to it don't wait on the pools' and the
+        // deferred queue's locks.
+        drop(locked);
+        let timepoint = GpuTimepoint::new(id, value);
+        VulkanCommandBuffer::all_submitted(desc.command_buffers, timepoint);
+        Ok(timepoint)
     }
 
     /// Blocks until `timepoint`, which the queue `id` returned, is reached.
@@ -514,24 +515,29 @@ impl Queues {
         queue
     }
 
-    /// Waits for every submission so far, on every queue, to complete.
+    /// The value the timeline of the queue `id` has reached.
     ///
     /// # Errors
     ///
-    /// Returns an error if waiting fails.
-    pub(super) fn wait_for_submissions(&self, device: &ash::Device) -> RhiResult<()> {
-        let (semaphores, values): (Vec<_>, Vec<_>) = self
-            .queues
-            .iter()
-            .map(|queue| (queue.timeline, queue.submitted.load(Ordering::Acquire)))
-            .unzip();
-        let wait_info = vk::SemaphoreWaitInfo::default()
-            .semaphores(&semaphores)
-            .values(&values);
-        // SAFETY: The semaphores are timelines created on `device`, each
-        // value has been submitted, and `wait_info` is valid for the call.
-        unsafe { device.wait_semaphores(&wait_info, u64::MAX) }
-            .map_err(|result| error(result, "wait for every queue", "all"))
+    /// Returns an error if the timeline can't be read.
+    pub(super) fn reached(&self, device: &ash::Device, id: QueueId) -> RhiResult<u64> {
+        let queue = self.queue(id);
+        // SAFETY: The semaphore is a timeline created on `device`.
+        unsafe { device.get_semaphore_counter_value(queue.timeline) }
+            .map_err(|result| error(result, "read the timeline of queue", queue.role.name()))
+    }
+
+    /// The value each queue's timeline has reached, with a timeline that
+    /// can't be read, as on a lost device, counting as having reached
+    /// nothing.
+    pub(super) fn all_reached(&self, device: &ash::Device) -> Vec<(QueueId, u64)> {
+        (0..self.queues.len())
+            .map(|index| {
+                let id =
+                    QueueId::new(u32::try_from(index).expect("a device has at most four queues"));
+                (id, self.reached(device, id).unwrap_or(0))
+            })
+            .collect()
     }
 
     /// Destroys the timelines and command pools.
@@ -628,10 +634,14 @@ impl Queue for VulkanQueue {
         self.core.translate(self.id, commands)
     }
 
+    /// Then frees what retired objects it can, as design 0002's "Deferred
+    /// destruction" describes, after submitting, so the GPU gets its work
+    /// first.
     fn submit(&self, desc: SubmitDesc<'_>) -> RhiResult<GpuTimepoint> {
-        self.core
-            .queues
-            .submit(self.core.device.handle(), self.id, desc)
+        let core = &self.core;
+        let submitted = core.queues.submit(core.device.handle(), self.id, desc);
+        core.collect_retired_if_needed();
+        submitted
     }
 
     fn wait(&self, timepoint: GpuTimepoint) -> RhiResult<()> {

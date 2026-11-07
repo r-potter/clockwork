@@ -18,6 +18,7 @@ mod buffers;
 mod capabilities;
 mod command_pools;
 mod descriptor_heaps;
+mod destruction;
 mod device;
 mod device_selection;
 mod error;
@@ -38,8 +39,7 @@ mod translate;
 mod validation;
 
 use std::ffi::CStr;
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, PoisonError, RwLock};
+use std::sync::{Arc, Mutex, PoisonError, RwLock};
 use std::{fmt, slice};
 
 use anyhow::{Context, Result, bail};
@@ -53,9 +53,11 @@ use super::{
     GraphicsApi, PresentCapabilities, Queue, QueueKind, RenderHardwareInterface, RhiResult,
     Sampler, SamplerDesc, Texture, TextureDesc, WindowSize, WindowTarget,
 };
+use crate::deferred::DeferredQueue;
 use crate::handle::HandleTable;
 use buffers::BufferEntry;
 use descriptor_heaps::DescriptorHeaps;
+use destruction::Retired;
 use device::LogicalDevice;
 use device_selection::{Candidate, Selection};
 use frames::Frames;
@@ -131,10 +133,13 @@ pub(crate) struct VulkanRenderHardwareInterface {
 /// [`GpuResources`] or a [`Queue`] share it.
 ///
 /// It's destroyed with its last `Arc`, on whichever thread drops it: it
-/// waits for the device to be idle, destroys every resource left in its
-/// tables, then drops its fields in declaration order, so each is declared
-/// before the objects it was created from.
+/// waits for the device to be idle, frees every retired object, destroys
+/// every resource left in its tables, then drops its fields in declaration
+/// order, so each is declared before the objects it was created from.
 pub(crate) struct VulkanDevice {
+    /// Destroyed buffers, textures and samplers, until nothing translated
+    /// before their destruction can use them (see [`destruction`]).
+    deferred: Mutex<DeferredQueue<Retired>>,
     /// Every live buffer.
     buffers: RwLock<HandleTable<BufferEntry>>,
     /// Every live texture.
@@ -147,11 +152,6 @@ pub(crate) struct VulkanDevice {
     /// The device's queues, with their locks and timelines. Their timelines
     /// are destroyed in `drop`, once the device is idle.
     queues: Queues,
-    /// How many command buffers translated on the device are neither
-    /// submitted nor dropped. Destroying an object while any are panics,
-    /// since one may use it, until deferred destruction replaces the check
-    /// later in `rhi-commands`.
-    outstanding_command_buffers: AtomicUsize,
     /// Allocates memory for resources on `device`.
     allocator: MemoryAllocator,
     /// The logical device, and its queues, created on `physical_device`.
@@ -272,12 +272,12 @@ impl VulkanRenderHardwareInterface {
             }
         };
         let core = Arc::new(VulkanDevice {
+            deferred: Mutex::new(DeferredQueue::new()),
             buffers: RwLock::new(HandleTable::new("buffer")),
             textures: RwLock::new(HandleTable::new("texture")),
             samplers: RwLock::new(HandleTable::new("sampler")),
             heaps,
             queues,
-            outstanding_command_buffers: AtomicUsize::new(0),
             allocator,
             device,
             physical_device,
@@ -700,38 +700,6 @@ fn should_enable_debug_utils(entry: &Entry, validate: bool) -> Result<bool> {
         .any(|extension| extension.extension_name_as_c_str() == Ok(debug_utils::NAME)))
 }
 
-impl VulkanDevice {
-    /// Checks that no translated command buffer is outstanding, before the
-    /// `kind` object `label` names is destroyed.
-    ///
-    /// Destroying waits for every submission so far, but not for a command
-    /// buffer translated and not yet submitted, which may use the object.
-    /// Until deferred destruction, later in `rhi-commands`, keeps the object
-    /// until such a command buffer is done with it, destroying one panics
-    /// instead. A translation started on another thread during the check
-    /// isn't caught, but that thread races the destruction anyway.
-    ///
-    /// # Panics
-    ///
-    /// Panics, naming the object, if a command buffer is outstanding.
-    fn check_no_outstanding_command_buffers(&self, kind: &str, label: impl FnOnce() -> String) {
-        assert!(
-            self.outstanding_command_buffers.load(Ordering::Acquire) == 0,
-            "the {kind} \"{}\" is destroyed while a translated command buffer, which may use \
-             it, is neither submitted nor dropped, which deferred destruction will allow",
-            label(),
-        );
-    }
-
-    /// Waits for every submission so far to complete, before an object is
-    /// destroyed, until deferred destruction replaces the wait later in
-    /// `rhi-commands`. If waiting fails, the device is lost, so nothing
-    /// runs on it, and destruction goes ahead.
-    fn wait_for_submissions(&self) {
-        let _ = self.queues.wait_for_submissions(self.device.handle());
-    }
-}
-
 /// The queue for each kind on `core`, indexed by `QueueKind as usize`, with
 /// kinds whose work is submitted to the same queue sharing its `Arc`.
 fn queues_for(core: &Arc<VulkanDevice>) -> [Arc<dyn Queue>; 3] {
@@ -819,6 +787,8 @@ impl Drop for VulkanDevice {
         // SAFETY: The device was created on this core's instance, is still
         // alive, and its queues were retrieved from it.
         let _ = unsafe { self.device.queue_locks().wait_idle(self.device.handle()) };
+        // SAFETY: The device is idle.
+        unsafe { self.free_all_retired() };
         // Anything left in the tables is a leak, reported as it's drained.
         let buffers = self
             .buffers
@@ -898,6 +868,10 @@ impl GpuResources for VulkanDevice {
 
     fn sampler_index(&self, sampler: Sampler) -> DescriptorIndex {
         self.sampler_entry_index(sampler)
+    }
+
+    fn collect_garbage(&self) {
+        self.collect_garbage_and_report();
     }
 }
 

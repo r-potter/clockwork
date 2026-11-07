@@ -7,8 +7,6 @@
 //! `missing_barrier_is_reported` waits for draws and dispatches in
 //! `rhi-shaders`.
 
-use std::panic::{self, AssertUnwindSafe};
-
 use clockwork_diagnostics::capture::TestSession;
 
 use crate::test_support::skip_for_driver_bug;
@@ -675,40 +673,6 @@ fn command_pools_are_reused() {
     assert_eq!(pool(&dropped), first);
     drop(dropped);
     assert_eq!(pool(&graphics.translate(&list).unwrap()), first);
-}
-
-/// Destroying an object while a translated command buffer is neither
-/// submitted nor dropped panics, naming it, since the command buffer may use
-/// it, until deferred destruction arrives. The check runs before the object
-/// leaves its table, so it can still be destroyed once the command buffer is
-/// dropped, and once one is submitted and done.
-#[test]
-fn destroying_while_a_command_buffer_is_outstanding_panics() {
-    let session = TestSession::new();
-    let backend = VulkanTestBackend::headless(&session);
-    let resources = backend.resources();
-    let graphics = backend.queue(QueueKind::Graphics);
-    let buffer = create(&**resources, "kept", 256, MemoryLocation::Device);
-
-    let outstanding = graphics.translate(&CommandList::new("empty")).unwrap();
-    let panic = panic::catch_unwind(AssertUnwindSafe(|| resources.destroy_buffer(buffer)))
-        .expect_err("destroying the buffer succeeded");
-    let message = panic
-        .downcast_ref::<String>()
-        .expect("the panic has a formatted message");
-    assert!(
-        message.starts_with(
-            "the buffer \"kept\" is destroyed while a translated command buffer, which may use \
-             it, is neither submitted nor dropped"
-        ),
-        "{message}"
-    );
-
-    drop(outstanding);
-    resources.destroy_buffer(buffer);
-    let other = create(&**resources, "other", 256, MemoryLocation::Device);
-    run(&backend, &CommandList::new("empty"));
-    resources.destroy_buffer(other);
 }
 
 /// A command buffer can only be submitted to the queue it was translated
