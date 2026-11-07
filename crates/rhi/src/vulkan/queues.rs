@@ -35,6 +35,7 @@ use ash::vk::TaggedStructure;
 use ash::{VkResult, vk};
 
 use super::VulkanDevice;
+use super::command_pools::{CommandPool, CommandPools};
 use super::device::LogicalDevice;
 use super::device_selection::QueueFamilies;
 use super::error::error;
@@ -178,9 +179,9 @@ impl QueueLocks {
 /// device has one queue for each distinct family in use, so between one and
 /// four, and roles on the same family share its queue. On a device with a
 /// single family, every role uses one queue. A shared queue must have one
-/// lock and one timeline, so the queues can't be stored once for each role.
-/// Instead, the device's [`QueueLayout`] records the mapping, one way in
-/// each direction:
+/// lock, one timeline and one set of command pools, so the queues can't be
+/// stored once for each role. Instead, the device's [`QueueLayout`] records
+/// the mapping, one way in each direction:
 /// - [`roles`](Self::roles) maps each role to the queue it uses. Several
 ///   roles may map to one queue. Every lookup by role or kind goes through
 ///   it.
@@ -216,16 +217,17 @@ pub(super) struct Queues {
     /// roles share an index when they share a family (see "Mapping roles to
     /// queues" above).
     roles: [Option<usize>; QueueRole::ALL.len()],
-    /// What each queue in `locks` is used for, and its timeline, at the same
-    /// index.
+    /// What each queue in `locks` is used for, its timeline and its command
+    /// pools, at the same index.
     queues: Vec<DeviceQueue>,
 }
 
-/// What one of the device's queues is used for, and its timeline. Its lock
-/// is at the same index in [`Queues::locks`].
+/// What one of the device's queues is used for, its timeline and its
+/// command pools. Its lock is at the same index in [`Queues::locks`].
 ///
-/// A queue only presenting uses has a timeline too, which nothing signals,
-/// so that every queue is the same.
+/// A queue only presenting uses has a timeline and pools too, which nothing
+/// uses, so that every queue is the same. Its pools are created only when
+/// claimed, so they cost nothing.
 struct DeviceQueue {
     /// The first role in [`QueueRole::ALL`] that uses it, which owns it: the
     /// kind it serves as, which [`Queue::kind`] reports, or presenting if no
@@ -237,6 +239,8 @@ struct DeviceQueue {
     /// The number of the last submission, so the value its completion
     /// signals. Written only while the queue is locked.
     submitted: AtomicU64,
+    /// The command pools for its family that aren't claimed.
+    pools: CommandPools,
 }
 
 impl Queues {
@@ -254,8 +258,8 @@ impl Queues {
             roles: layout.roles,
             queues: Vec::with_capacity(layout.queues.len()),
         };
-        for &(_, role) in &layout.queues {
-            if let Err(err) = queues.add(device, role) {
+        for &(family, role) in &layout.queues {
+            if let Err(err) = queues.add(device, role, family) {
                 // SAFETY: Nothing has been submitted to wait on or signal
                 // the timelines created so far.
                 unsafe { queues.destroy(device.handle()) };
@@ -265,13 +269,13 @@ impl Queues {
         Ok(queues)
     }
 
-    /// Adds the next queue, which `role` owns, with a timeline named after
-    /// it.
+    /// Adds the next queue, of `family`, which `role` owns, with a timeline
+    /// named after it.
     ///
     /// # Errors
     ///
     /// Returns an error if the timeline semaphore can't be created.
-    fn add(&mut self, device: &LogicalDevice, role: QueueRole) -> Result<()> {
+    fn add(&mut self, device: &LogicalDevice, role: QueueRole, family: u32) -> Result<()> {
         let mut type_create_info = vk::SemaphoreTypeCreateInfo::default()
             .semaphore_type(vk::SemaphoreType::TIMELINE)
             .initial_value(0);
@@ -285,6 +289,7 @@ impl Queues {
             role,
             timeline,
             submitted: AtomicU64::new(0),
+            pools: CommandPools::new(family),
         });
         Ok(())
     }
@@ -327,6 +332,30 @@ impl Queues {
     /// [`QueueLocks::wait_idle`]).
     pub(super) fn lock(&self, role: QueueRole) -> Option<MutexGuard<'_, vk::Queue>> {
         self.get(role).map(QueueLock::lock)
+    }
+
+    /// Claims a command pool for the queue `id`, on `device` (see
+    /// [`CommandPools::claim`]).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the timeline can't be read, or a pool can't be
+    /// reset or created.
+    #[expect(dead_code, reason = "translation claims pools in the next PR")]
+    pub(super) fn claim_pool(&self, device: &ash::Device, id: QueueId) -> RhiResult<CommandPool> {
+        let queue = self.queue(id);
+        queue.pools.claim(device, || {
+            // SAFETY: The semaphore is a timeline created on `device`.
+            unsafe { device.get_semaphore_counter_value(queue.timeline) }
+                .map_err(|result| error(result, "read the timeline of queue", queue.role.name()))
+        })
+    }
+
+    /// Recycles `pool` for the queue `id`, reusable once its timeline
+    /// reaches `reusable_at`, or at once for 0.
+    #[expect(dead_code, reason = "command buffers recycle pools in the next PR")]
+    pub(super) fn recycle_pool(&self, id: QueueId, pool: CommandPool, reusable_at: u64) {
+        self.queue(id).pools.recycle(pool, reusable_at);
     }
 
     /// Submits `desc` to the queue `id`, on `device`, and returns the timepoint
@@ -455,17 +484,20 @@ impl Queues {
         queue
     }
 
-    /// Destroys the timelines.
+    /// Destroys the timelines and command pools.
     ///
     /// # Safety
     ///
-    /// The timelines must have been created on `device`, and no pending
-    /// submission may wait on or signal them, for example because the
-    /// device is idle.
+    /// They must have been created on `device`, no command pool may be
+    /// claimed, and no pending submission may use them, for example
+    /// because the device is idle.
     pub(super) unsafe fn destroy(&mut self, device: &ash::Device) {
-        for queue in self.queues.drain(..) {
+        for mut queue in self.queues.drain(..) {
             // SAFETY: Guaranteed by the caller.
-            unsafe { device.destroy_semaphore(queue.timeline, None) };
+            unsafe {
+                queue.pools.destroy(device);
+                device.destroy_semaphore(queue.timeline, None);
+            }
         }
     }
 }
