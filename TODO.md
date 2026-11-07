@@ -192,6 +192,13 @@ Outstanding tasks and future work.
       (2026-10-19 to 2026-11-19) can't change the packages `linux-lavapipe`
       installs, or the libraries its lavapipe build links. Moving to 26.04 is
       a deliberate change, as "CI" in `docs/testing.md` describes.
+- [ ] **Check buffer hazards once synchronization validation sees
+      copies and fills by address.** The RHI copies and fills buffers with
+      `VK_KHR_device_address_commands`, which synchronization validation
+      doesn't track, so a missing barrier between them isn't reported (see
+      "Validation is required" in `docs/testing.md`). When a validation
+      layer release tracks them, add a buffer case to
+      `missing_barrier_is_reported`.
 - [ ] **Move CI off actions that run on Node.js 20.** GitHub warns that
       `actions/cache@v4` targets Node.js 20, which is deprecated, and runs
       it on Node.js 24 instead. Move to a version that targets Node.js 24

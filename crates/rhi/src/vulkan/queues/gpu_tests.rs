@@ -124,6 +124,7 @@ fn a_wait_holds_back_the_submission() {
         let after = queue
             .submit(SubmitDesc {
                 wait_for: &[held.timepoint],
+                ..SubmitDesc::default()
             })
             .unwrap();
         thread::sleep(Duration::from_millis(50));
