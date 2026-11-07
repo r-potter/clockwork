@@ -236,6 +236,8 @@ struct DeviceQueue {
     /// kind uses it. It's the reverse of [`Queues::roles`] (see "Mapping
     /// roles to queues" on [`Queues`]).
     role: QueueRole,
+    /// Its family.
+    family: u32,
     /// A timeline semaphore, signalled with the number of each submission.
     timeline: vk::Semaphore,
     /// The number of the last submission, so the value its completion
@@ -289,6 +291,7 @@ impl Queues {
         device.set_object_name(timeline, &format!("{} timeline", role.name()));
         self.queues.push(DeviceQueue {
             role,
+            family,
             timeline,
             submitted: AtomicU64::new(0),
             pools: CommandPools::new(family),
@@ -312,6 +315,11 @@ impl Queues {
     /// `present` for one only presenting uses.
     pub(super) fn name(&self, id: QueueId) -> &'static str {
         self.queue(id).role.name()
+    }
+
+    /// The family of the queue `id`.
+    pub(super) fn family(&self, id: QueueId) -> u32 {
+        self.queue(id).family
     }
 
     /// The queue `id`.
