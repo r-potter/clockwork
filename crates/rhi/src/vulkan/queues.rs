@@ -1,23 +1,44 @@
-//! The device's queues and their locks (design 0002, "Queues and
-//! submission").
+//! The device's queues, their locks and their timelines (design 0002,
+//! "Queues and submission").
 //!
 //! Each family in use has one queue. Each [`QueueRole`], a kind's work or
 //! presenting, is mapped to its family's queue when the device is created,
 //! so roles that share a family share the queue the first of them in
 //! [`QueueRole::ALL`] created (see [`QueueLayout`]).
 //!
+//! A queue's [`QueueId`] is its index among the device's queues, so kinds that
+//! share a queue share its ID, and the ID, not the kind, is how a timepoint or
+//! a command buffer names its queue.
+//!
+//! Each queue has one timeline semaphore, which counts its submissions: the
+//! `n`th submission signals `n`. A wait on one of a queue's own timepoints is
+//! kept, like any other: Vulkan starts a queue's submissions in order, but
+//! doesn't wait for one to complete before running the next, so kinds that
+//! share a queue are ordered as if they had their own.
+//!
 //! Vulkan requires a queue to be used by one thread at a time, so each is
-//! behind a `Mutex`, held for each submission and present. Waiting for the
-//! whole device to be idle uses every queue, so it holds every lock (see
-//! [`QueueLocks::wait_idle`]).
+//! behind a `Mutex`, held for each submission and present. Timeline values
+//! are assigned under the same lock, so they increase in submission order.
+//! Waiting and polling only read the semaphore, so they take no lock.
+//! Waiting for the whole device to be idle uses every queue, so it holds
+//! every lock (see [`QueueLocks::wait_idle`]).
 
+#[cfg(test)]
+mod gpu_tests;
+
+use std::fmt;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
+use anyhow::{Context, Result};
+use ash::vk::TaggedStructure;
 use ash::{VkResult, vk};
 
+use super::VulkanDevice;
 use super::device::LogicalDevice;
 use super::device_selection::QueueFamilies;
-use crate::QueueKind;
+use super::error::error;
+use crate::{GpuTimepoint, Queue, QueueId, QueueKind, RhiResult, SubmitDesc};
 
 /// What a queue is used for: one kind's work, or presenting.
 ///
@@ -148,23 +169,148 @@ impl QueueLocks {
     }
 }
 
-/// The queue each role uses, locked for each use.
+/// The device's queues, each with its lock and its timeline. Owned by the
+/// core, which destroys the timelines with [`destroy`](Self::destroy).
+///
+/// # Mapping roles to queues
+///
+/// Roles and queues aren't one to one. There are always four roles, but the
+/// device has one queue for each distinct family in use, so between one and
+/// four, and roles on the same family share its queue. On a device with a
+/// single family, every role uses one queue. A shared queue must have one
+/// lock and one timeline, so the queues can't be stored once for each role.
+/// Instead, the device's [`QueueLayout`] records the mapping, one way in
+/// each direction:
+/// - [`roles`](Self::roles) maps each role to the queue it uses. Several
+///   roles may map to one queue. Every lookup by role or kind goes through
+///   it.
+/// - [`DeviceQueue::role`] maps each queue to the role that owns it: the
+///   first role in [`QueueRole::ALL`] that uses it. That's the kind
+///   [`Queue::kind`] reports for every kind sharing the queue, and the name
+///   the queue and its timeline are given.
+///
+/// A queue's index in `queues`, which is also its index in `locks`, is its
+/// [`QueueId`], so once a kind is mapped to its queue's ID, everything else
+/// looks the queue up by ID. When headless, presenting has no family, and
+/// isn't mapped.
+///
+/// For example, on a device with a dedicated compute family 1 but no
+/// dedicated transfer family, and with graphics family 0 able to present:
+///
+/// | Role | Family | Index in `queues` | Owned by |
+/// |------|--------|-------------------|----------|
+/// | `Kind(Graphics)` | 0 | 0 | itself |
+/// | `Kind(Compute)` | 1 | 1 | itself |
+/// | `Kind(Transfer)` | 1 | 1 | `Kind(Compute)` |
+/// | `Present` | 0 | 0 | `Kind(Graphics)` |
+///
+/// So `queues` holds the graphics queue and then the compute queue, `roles`
+/// is `[Some(0), Some(1), Some(1), Some(0)]`, the compute and transfer
+/// queues are both `QueueId(1)`, and their [`Queue::kind`] is `Compute`.
 pub(super) struct Queues {
-    /// The device's queues.
+    /// The device's queues, each behind its lock, at the index its
+    /// [`QueueId`] names.
     locks: QueueLocks,
-    /// The index in `locks` of the queue each role uses, in the order of
-    /// [`QueueRole::ALL`], or `None` for presenting when headless.
+    /// The index in `queues` of the queue each role uses, in the order of
+    /// [`QueueRole::ALL`], or `None` for presenting when headless. Several
+    /// roles share an index when they share a family (see "Mapping roles to
+    /// queues" above).
     roles: [Option<usize>; QueueRole::ALL.len()],
+    /// What each queue in `locks` is used for, and its timeline, at the same
+    /// index.
+    queues: Vec<DeviceQueue>,
+}
+
+/// What one of the device's queues is used for, and its timeline. Its lock
+/// is at the same index in [`Queues::locks`].
+///
+/// A queue only presenting uses has a timeline too, which nothing signals,
+/// so that every queue is the same.
+struct DeviceQueue {
+    /// The first role in [`QueueRole::ALL`] that uses it, which owns it: the
+    /// kind it serves as, which [`Queue::kind`] reports, or presenting if no
+    /// kind uses it. It's the reverse of [`Queues::roles`] (see "Mapping
+    /// roles to queues" on [`Queues`]).
+    role: QueueRole,
+    /// A timeline semaphore, signalled with the number of each submission.
+    timeline: vk::Semaphore,
+    /// The number of the last submission, so the value its completion
+    /// signals. Written only while the queue is locked.
+    submitted: AtomicU64,
 }
 
 impl Queues {
     /// Maps each role to the queue it uses among `device`'s queues, as the
-    /// layout `device` created them from says.
-    pub(super) fn new(device: &LogicalDevice) -> Self {
-        Self {
+    /// layout `device` created them from says, and creates a timeline for
+    /// each queue, named after the role that owns it.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if a timeline semaphore can't be created.
+    pub(super) fn new(device: &LogicalDevice) -> Result<Self> {
+        let layout = device.queue_layout();
+        let mut queues = Self {
             locks: device.queue_locks().clone(),
-            roles: device.queue_layout().roles,
+            roles: layout.roles,
+            queues: Vec::with_capacity(layout.queues.len()),
+        };
+        for &(_, role) in &layout.queues {
+            if let Err(err) = queues.add(device, role) {
+                // SAFETY: Nothing has been submitted to wait on or signal
+                // the timelines created so far.
+                unsafe { queues.destroy(device.handle()) };
+                return Err(err);
+            }
         }
+        Ok(queues)
+    }
+
+    /// Adds the next queue, which `role` owns, with a timeline named after
+    /// it.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the timeline semaphore can't be created.
+    fn add(&mut self, device: &LogicalDevice, role: QueueRole) -> Result<()> {
+        let mut type_create_info = vk::SemaphoreTypeCreateInfo::default()
+            .semaphore_type(vk::SemaphoreType::TIMELINE)
+            .initial_value(0);
+        let create_info = vk::SemaphoreCreateInfo::default().push(&mut type_create_info);
+        // SAFETY: `create_info` is valid for the call, and timeline
+        // semaphores are enabled on the device.
+        let timeline = unsafe { device.handle().create_semaphore(&create_info, None) }
+            .with_context(|| format!("failed to create the {} queue's timeline", role.name()))?;
+        device.set_object_name(timeline, &format!("{} timeline", role.name()));
+        self.queues.push(DeviceQueue {
+            role,
+            timeline,
+            submitted: AtomicU64::new(0),
+        });
+        Ok(())
+    }
+
+    /// The ID of the queue `kind`'s work is submitted to.
+    pub(super) fn id(&self, kind: QueueKind) -> QueueId {
+        let index = self.roles[QueueRole::Kind(kind).index()].expect("every kind has a queue");
+        QueueId::new(u32::try_from(index).expect("a device has at most four queues"))
+    }
+
+    /// The kind the queue `id` serves as, which [`Queue::kind`] reports: the
+    /// most capable kind whose work is submitted to it.
+    pub(super) fn kind(&self, id: QueueId) -> QueueKind {
+        self.queue(id).kind()
+    }
+
+    /// The queue `id`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the device has no queue `id`, which only a timepoint from
+    /// another device can name.
+    fn queue(&self, id: QueueId) -> &DeviceQueue {
+        self.queues
+            .get(id.index())
+            .unwrap_or_else(|| panic!("the device has no queue {id:?}"))
     }
 
     /// The queue `role` uses, or `None` if it has none, which is only
@@ -181,6 +327,176 @@ impl Queues {
     /// [`QueueLocks::wait_idle`]).
     pub(super) fn lock(&self, role: QueueRole) -> Option<MutexGuard<'_, vk::Queue>> {
         self.get(role).map(QueueLock::lock)
+    }
+
+    /// Submits `desc` to the queue `id`, on `device`, and returns the timepoint
+    /// its completion reaches.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the submission fails.
+    ///
+    /// # Panics
+    ///
+    /// Panics if a timepoint to wait for wasn't returned by its queue.
+    pub(super) fn submit(
+        &self,
+        device: &ash::Device,
+        id: QueueId,
+        desc: SubmitDesc<'_>,
+    ) -> RhiResult<GpuTimepoint> {
+        let queue = self.queue(id);
+        // Timepoints on this queue are waited for too: a queue starts its
+        // submissions in order, but a later one may run before an earlier one
+        // completes, and the wait is what makes the earlier one's writes
+        // visible. Even a timepoint already reached is waited for, for its
+        // writes.
+        let waits: Vec<_> = desc
+            .wait_for
+            .iter()
+            .map(|&timepoint| {
+                let waited = self.queue(timepoint.queue());
+                waited.check_returned(timepoint);
+                vk::SemaphoreSubmitInfo::default()
+                    .semaphore(waited.timeline)
+                    .value(timepoint.value())
+                    .stage_mask(vk::PipelineStageFlags2::ALL_COMMANDS)
+            })
+            .collect();
+
+        let locked = lock(&self.locks.0[id.index()]);
+        let value = queue.submitted.load(Ordering::Relaxed) + 1;
+        let signal = vk::SemaphoreSubmitInfo::default()
+            .semaphore(queue.timeline)
+            .value(value)
+            .stage_mask(vk::PipelineStageFlags2::ALL_COMMANDS);
+        let submit_info = vk::SubmitInfo2::default()
+            .wait_semaphore_infos(&waits)
+            .signal_semaphore_infos(std::slice::from_ref(&signal));
+        // SAFETY: The queue and semaphores were created on `device`, the
+        // queue is locked, so no other thread uses it, the info structures
+        // outlive the call, and `value` is greater than any value signalled
+        // or waited for on this timeline so far. Every value waited for was
+        // returned by a submission, so its signal has been submitted.
+        unsafe {
+            device.queue_submit2(
+                *locked,
+                std::slice::from_ref(&submit_info),
+                vk::Fence::null(),
+            )
+        }
+        .map_err(|result| error(result, "submit to queue", queue.role.name()))?;
+        queue.submitted.store(value, Ordering::Release);
+        Ok(GpuTimepoint::new(id, value))
+    }
+
+    /// Blocks until `timepoint`, which the queue `id` returned, is reached.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if waiting fails.
+    ///
+    /// # Panics
+    ///
+    /// Panics if that queue didn't return `timepoint`.
+    pub(super) fn wait(
+        &self,
+        device: &ash::Device,
+        id: QueueId,
+        timepoint: GpuTimepoint,
+    ) -> RhiResult<()> {
+        let queue = self.check_own(id, timepoint);
+        let value = timepoint.value();
+        let wait_info = vk::SemaphoreWaitInfo::default()
+            .semaphores(std::slice::from_ref(&queue.timeline))
+            .values(std::slice::from_ref(&value));
+        // SAFETY: The semaphore is a timeline created on `device`, and
+        // `wait_info` is valid for the call. Waiting needs no lock.
+        unsafe { device.wait_semaphores(&wait_info, u64::MAX) }
+            .map_err(|result| error(result, "wait for queue", queue.role.name()))
+    }
+
+    /// Whether `timepoint`, which the queue `id` returned, has been reached.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the timeline can't be read.
+    ///
+    /// # Panics
+    ///
+    /// Panics if that queue didn't return `timepoint`.
+    pub(super) fn is_complete(
+        &self,
+        device: &ash::Device,
+        id: QueueId,
+        timepoint: GpuTimepoint,
+    ) -> RhiResult<bool> {
+        let queue = self.check_own(id, timepoint);
+        // SAFETY: The semaphore is a timeline created on `device`.
+        let reached = unsafe { device.get_semaphore_counter_value(queue.timeline) }
+            .map_err(|result| error(result, "read the timeline of queue", queue.role.name()))?;
+        Ok(reached >= timepoint.value())
+    }
+
+    /// Checks that `timepoint` is one the queue `id` returned, and returns the
+    /// queue.
+    ///
+    /// # Panics
+    ///
+    /// Panics if it isn't.
+    fn check_own(&self, id: QueueId, timepoint: GpuTimepoint) -> &DeviceQueue {
+        let queue = self.queue(id);
+        assert!(
+            timepoint.queue() == id,
+            "{timepoint:?} isn't on the {} queue's timeline",
+            queue.role.name(),
+        );
+        queue.check_returned(timepoint);
+        queue
+    }
+
+    /// Destroys the timelines.
+    ///
+    /// # Safety
+    ///
+    /// The timelines must have been created on `device`, and no pending
+    /// submission may wait on or signal them, for example because the
+    /// device is idle.
+    pub(super) unsafe fn destroy(&mut self, device: &ash::Device) {
+        for queue in self.queues.drain(..) {
+            // SAFETY: Guaranteed by the caller.
+            unsafe { device.destroy_semaphore(queue.timeline, None) };
+        }
+    }
+}
+
+impl DeviceQueue {
+    /// The kind the queue serves as.
+    ///
+    /// # Panics
+    ///
+    /// Panics if only presenting uses the queue. Only a queue that kinds
+    /// use has a [`VulkanQueue`], which is what asks, so this can't happen.
+    fn kind(&self) -> QueueKind {
+        match self.role {
+            QueueRole::Kind(kind) => kind,
+            QueueRole::Present => panic!("no kind's work is submitted to the present queue"),
+        }
+    }
+
+    /// Checks that `timepoint`, which is on this queue's timeline, was returned
+    /// by a submission.
+    ///
+    /// # Panics
+    ///
+    /// Panics if no submission returned it.
+    fn check_returned(&self, timepoint: GpuTimepoint) {
+        let submitted = self.submitted.load(Ordering::Acquire);
+        assert!(
+            (1..=submitted).contains(&timepoint.value()),
+            "the {} queue never returned {timepoint:?}: it has made {submitted} submissions",
+            self.role.name(),
+        );
     }
 }
 
@@ -200,6 +516,60 @@ impl<'a> QueueLock<'a> {
 /// leaves nothing inconsistent (design 0002, "Error handling").
 fn lock(queue: &Mutex<vk::Queue>) -> MutexGuard<'_, vk::Queue> {
     queue.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// A [`Queue`] of the Vulkan backend: a view of one of the core's queues.
+pub(super) struct VulkanQueue {
+    /// The core, whose queues this is a view of.
+    core: Arc<VulkanDevice>,
+    /// Which of the core's queues this is.
+    id: QueueId,
+}
+
+impl VulkanQueue {
+    /// A view of the queue `id` on `core`.
+    pub(super) fn new(core: Arc<VulkanDevice>, id: QueueId) -> Self {
+        Self { core, id }
+    }
+}
+
+impl Queue for VulkanQueue {
+    fn id(&self) -> QueueId {
+        self.id
+    }
+
+    fn kind(&self) -> QueueKind {
+        self.core.queues.kind(self.id)
+    }
+
+    fn submit(&self, desc: SubmitDesc<'_>) -> RhiResult<GpuTimepoint> {
+        self.core
+            .queues
+            .submit(self.core.device.handle(), self.id, desc)
+    }
+
+    fn wait(&self, timepoint: GpuTimepoint) -> RhiResult<()> {
+        self.core
+            .queues
+            .wait(self.core.device.handle(), self.id, timepoint)
+    }
+
+    fn is_complete(&self, timepoint: GpuTimepoint) -> RhiResult<bool> {
+        self.core
+            .queues
+            .is_complete(self.core.device.handle(), self.id, timepoint)
+    }
+}
+
+impl fmt::Debug for VulkanQueue {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let kind = self.kind();
+        f.debug_struct("VulkanQueue")
+            .field("id", &self.id)
+            .field("kind", &kind)
+            .field("family", &self.core.device.queue_families().family(kind))
+            .finish_non_exhaustive()
+    }
 }
 
 #[cfg(test)]

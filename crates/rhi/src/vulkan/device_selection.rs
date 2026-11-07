@@ -74,17 +74,6 @@ impl QueueFamilies {
             QueueKind::Transfer => self.transfer,
         }
     }
-
-    /// Whether `kind` has its family to itself, with no more capable kind
-    /// using it, so its work gets a queue of its own. The graphics kind
-    /// always does.
-    pub(super) fn is_dedicated(self, kind: QueueKind) -> bool {
-        let family = self.family(kind);
-        QueueKind::ALL
-            .into_iter()
-            .take_while(|&other| other != kind)
-            .all(|other| self.family(other) != family)
-    }
 }
 
 /// The push data, in bytes, that each draw or dispatch can carry (design
@@ -993,7 +982,7 @@ mod tests {
         select(headless(vec![device]), None).unwrap().queue_families
     }
 
-    /// With one family, every kind shares it, so only graphics is dedicated.
+    /// With one family, every kind shares it.
     #[test]
     fn a_single_family_serves_every_kind() {
         let families = headless_families(device(
@@ -1002,9 +991,6 @@ mod tests {
             8 * GIB,
         ));
         assert_eq!((families.compute, families.transfer), (0, 0));
-        assert!(families.is_dedicated(QueueKind::Graphics));
-        assert!(!families.is_dedicated(QueueKind::Compute));
-        assert!(!families.is_dedicated(QueueKind::Transfer));
     }
 
     /// Dedicated compute and transfer families are found by their flags,
@@ -1021,13 +1007,10 @@ mod tests {
         );
         let families = headless_families(device);
         assert_eq!((families.compute, families.transfer), (1, 2));
-        for kind in QueueKind::ALL {
-            assert!(families.is_dedicated(kind), "{kind:?}");
-        }
     }
 
     /// Without a dedicated transfer family, transfers share the dedicated
-    /// compute family, so they aren't dedicated.
+    /// compute family.
     #[test]
     fn transfers_fall_back_to_the_compute_family() {
         let device = with_family(
@@ -1036,8 +1019,6 @@ mod tests {
         );
         let families = headless_families(device);
         assert_eq!((families.compute, families.transfer), (1, 1));
-        assert!(families.is_dedicated(QueueKind::Compute));
-        assert!(!families.is_dedicated(QueueKind::Transfer));
     }
 
     /// Without a dedicated compute family, a dedicated transfer family is
@@ -1050,8 +1031,6 @@ mod tests {
         );
         let families = headless_families(device);
         assert_eq!((families.compute, families.transfer), (0, 1));
-        assert!(!families.is_dedicated(QueueKind::Compute));
-        assert!(families.is_dedicated(QueueKind::Transfer));
     }
 
     /// The selection carries the device's capabilities, for its queue
