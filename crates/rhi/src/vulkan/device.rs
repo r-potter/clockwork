@@ -102,6 +102,11 @@ impl LogicalDevice {
         let mut vulkan13_features = vk::PhysicalDeviceVulkan13Features::default()
             .dynamic_rendering(true)
             .synchronization2(true);
+        // Once any call returns `ERROR_DEVICE_LOST`, every later call that can
+        // return it does so, rather than a wait returning success for lost
+        // work (design 0002, "Error handling"). Every 1.4 device supports it.
+        let mut vulkan14_features =
+            vk::PhysicalDeviceVulkan14Features::default().maintenance5(true);
         let mut shader_object_features =
             vk::PhysicalDeviceShaderObjectFeaturesEXT::default().shader_object(true);
         let mut descriptor_heap_features =
@@ -119,6 +124,7 @@ impl LogicalDevice {
             .push(&mut vulkan11_features)
             .push(&mut vulkan12_features)
             .push(&mut vulkan13_features)
+            .push(&mut vulkan14_features)
             .push(&mut shader_object_features)
             .push(&mut descriptor_heap_features)
             .push(&mut device_address_commands_features);
