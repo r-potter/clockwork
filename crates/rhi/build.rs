@@ -1,5 +1,6 @@
 //! Compiles the Slang shaders in `shaders/` to SPIR-V with `slangc`, writing
-//! `<name>.spv` files to `OUT_DIR` for the Vulkan backend to embed.
+//! `<name>.spv` files to `OUT_DIR` for the Vulkan backend to embed, with
+//! heap access through `SPV_EXT_descriptor_heap`.
 //!
 //! `slangc` is found by [`slangc::find`]: from the `SLANGC` environment
 //! variable, then the Vulkan SDK, then `PATH`.
@@ -42,10 +43,20 @@ fn main() {
         let output = out_dir.join(format!("{name}.spv"));
 
         // Every entry point in the file (marked with `[shader(...)]`) is
-        // compiled into the one SPIR-V module, keeping its name.
+        // compiled into the one SPIR-V module, keeping its name. Shaders
+        // read the descriptor heaps directly, through
+        // `SPV_EXT_descriptor_heap`, so no mapping is given when their
+        // shader objects are created (design 0002, "Binding model"). The
+        // capability changes nothing in a shader that doesn't read them.
         let status = Command::new(&slangc)
             .arg(&source)
-            .args(["-target", "spirv", "-o"])
+            .args([
+                "-target",
+                "spirv",
+                "-capability",
+                "spvDescriptorHeapEXT",
+                "-o",
+            ])
             .arg(&output)
             .status();
         match status {
