@@ -10,6 +10,7 @@ use std::{mem, thread};
 
 use clockwork_diagnostics::capture::TestSession;
 
+use crate::test_shaders;
 use crate::vulkan::test_support::VulkanTestBackend;
 use crate::{
     Access, AddressMode, Barrier, Buffer, BufferDesc, BufferUsage, CommandList, Extent3d, Filter,
@@ -179,10 +180,10 @@ fn dropped_lists_keep_nothing() {
     assert_eq!(retired(&backend), 0);
 }
 
-/// Textures and samplers are retired too, and with nothing outstanding
-/// they're freed at the next collection.
+/// Textures, samplers and programs are retired too, and with nothing
+/// outstanding they're freed at the next collection.
 #[test]
-fn textures_and_samplers_are_retired() {
+fn textures_samplers_and_programs_are_retired() {
     let session = TestSession::new();
     let backend = VulkanTestBackend::headless(&session);
     let resources = backend.resources();
@@ -206,10 +207,14 @@ fn textures_and_samplers_are_retired() {
             address_modes: [AddressMode::Repeat; 3],
         })
         .unwrap();
+    let program = resources
+        .create_program(&test_shaders::write_value().desc())
+        .unwrap();
     let slots = backend.core.heaps.sampler.slots_in_use();
     resources.destroy_texture(texture);
     resources.destroy_sampler(sampler);
-    assert_eq!(retired(&backend), 2);
+    resources.destroy_program(program);
+    assert_eq!(retired(&backend), 3);
     assert_eq!(backend.core.heaps.sampler.slots_in_use(), slots);
     resources.collect_garbage();
     assert_eq!(retired(&backend), 0);

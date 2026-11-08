@@ -27,6 +27,7 @@ mod frames;
 mod gpu_tests;
 mod memory;
 mod physical_device;
+mod programs;
 mod query_pools;
 mod queues;
 mod samplers;
@@ -52,8 +53,9 @@ use tracing::{info, warn};
 
 use super::{
     BackendOptions, Buffer, BufferDesc, Capabilities, DescriptorIndex, GpuAddress, GpuResources,
-    GraphicsApi, PresentCapabilities, Queue, QueueKind, RenderHardwareInterface, RhiResult,
-    Sampler, SamplerDesc, Texture, TextureDesc, WindowSize, WindowTarget,
+    GraphicsApi, PresentCapabilities, Program, ProgramDesc, Queue, QueueKind,
+    RenderHardwareInterface, RhiResult, Sampler, SamplerDesc, Texture, TextureDesc, WindowSize,
+    WindowTarget,
 };
 use crate::deferred::DeferredQueue;
 use crate::handle::HandleTable;
@@ -65,6 +67,7 @@ use device_selection::{Candidate, Selection};
 use frames::Frames;
 use memory::MemoryAllocator;
 use physical_device::PhysicalDevice;
+use programs::ProgramEntry;
 use query_pools::QueryPools;
 use queues::{QueueRole, Queues, VulkanQueue};
 use samplers::SamplerEntry;
@@ -140,8 +143,9 @@ pub(crate) struct VulkanRenderHardwareInterface {
 /// every resource left in its tables, then drops its fields in declaration
 /// order, so each is declared before the objects it was created from.
 pub(crate) struct VulkanDevice {
-    /// Destroyed buffers, textures and samplers, until nothing translated
-    /// before their destruction can use them (see [`destruction`]).
+    /// Destroyed buffers, textures, samplers and programs, until nothing
+    /// translated before their destruction can use them (see
+    /// [`destruction`]).
     deferred: Mutex<DeferredQueue<Retired>>,
     /// Every live buffer.
     buffers: RwLock<HandleTable<BufferEntry>>,
@@ -149,6 +153,8 @@ pub(crate) struct VulkanDevice {
     textures: RwLock<HandleTable<TextureEntry>>,
     /// Every live sampler.
     samplers: RwLock<HandleTable<SamplerEntry>>,
+    /// Every live program.
+    programs: RwLock<HandleTable<ProgramEntry>>,
     /// The resource and sampler heaps. Destroyed in `drop`, after the
     /// tables, so that no entry's slot outlives its heap.
     heaps: DescriptorHeaps,
@@ -282,6 +288,7 @@ impl VulkanRenderHardwareInterface {
             buffers: RwLock::new(HandleTable::new("buffer")),
             textures: RwLock::new(HandleTable::new("texture")),
             samplers: RwLock::new(HandleTable::new("sampler")),
+            programs: RwLock::new(HandleTable::new("program")),
             heaps,
             queues,
             query_pools: QueryPools::new(),
@@ -824,6 +831,15 @@ impl Drop for VulkanDevice {
         for entry in samplers {
             self.free_sampler(entry);
         }
+        let programs = self
+            .programs
+            .get_mut()
+            .unwrap_or_else(PoisonError::into_inner)
+            .drain_leaked();
+        for entry in programs {
+            // SAFETY: As above.
+            unsafe { self.free_program(entry) };
+        }
         // SAFETY: The heaps were created on this device, with memory from
         // this allocator, and the device is idle.
         unsafe { self.heaps.destroy(self.device.handle(), &self.allocator) };
@@ -887,6 +903,14 @@ impl GpuResources for VulkanDevice {
 
     fn sampler_index(&self, sampler: Sampler) -> DescriptorIndex {
         self.sampler_entry_index(sampler)
+    }
+
+    fn create_program(&self, desc: &ProgramDesc<'_>) -> RhiResult<Program> {
+        self.create_program_entry(desc)
+    }
+
+    fn destroy_program(&self, program: Program) {
+        self.destroy_program_entry(program);
     }
 
     fn collect_garbage(&self) {

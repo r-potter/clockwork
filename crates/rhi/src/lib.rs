@@ -48,8 +48,11 @@ mod ffi;
 #[cfg(test)]
 mod gpu_tests;
 mod handle;
+mod program;
 mod queue;
 mod sampler;
+#[cfg(test)]
+mod test_shaders;
 #[cfg(test)]
 mod test_support;
 mod texture;
@@ -71,6 +74,7 @@ pub use command_list::CommandList;
 pub use copy::{TextureCopy, TextureDataLayout};
 pub use descriptor::{DescriptorIndex, HeapKind};
 pub use error::{RhiError, RhiResult};
+pub use program::{Program, ProgramDesc, ShaderStage};
 pub use queue::{CommandBuffer, GpuTimepoint, Queue, QueueId, SubmitDesc};
 pub use sampler::{AddressMode, Filter, Sampler, SamplerDesc};
 pub use texture::{
@@ -437,6 +441,31 @@ pub trait GpuResources: Debug + Send + Sync {
     ///
     /// Panics if the handle is stale.
     fn sampler_index(&self, sampler: Sampler) -> DescriptorIndex;
+
+    /// Creates a program: its stages, linked, from SPIR-V that reaches the
+    /// descriptor heaps directly (design 0002, "Programs").
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RhiError::OutOfDeviceMemory`] if there's no memory for the
+    /// compiled stages, or [`RhiError::Other`] if they can't be created
+    /// otherwise, such as from SPIR-V the driver rejects.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the description is invalid: no SPIR-V, or stages that
+    /// aren't a vertex and a fragment stage or a compute stage alone.
+    fn create_program(&self, desc: &ProgramDesc<'_>) -> RhiResult<Program>;
+
+    /// Destroys the program. Its handle is stale from then on.
+    ///
+    /// Its stages are destroyed once nothing translated before now can use
+    /// them, as [`destroy_buffer`](Self::destroy_buffer) describes.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the handle is stale.
+    fn destroy_program(&self, program: Program);
 
     /// Frees destroyed objects that nothing can still use. Each submission
     /// does this too, so call it once a frame to free objects while nothing

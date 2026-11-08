@@ -65,7 +65,11 @@ Outstanding tasks and future work.
       queue keeps until `take_timings` reads them back. Its later slices
       add programs and draws, transient memory, streaming and presentation,
       and `rhi-present` moves the triangle out of the backend, so that the
-      application decides what to draw.
+      application decides what to draw. `TriangleShaders`
+      (`crates/rhi/src/vulkan/shaders.rs`) still creates its shader objects
+      itself, the way `create_program` now does; make the triangle a
+      `Program` once draws arrive, and remove `TriangleShaders` and its
+      second copy of `triangle.spv`.
 - [x] **Compile shaders for other backends.** Not needed: ADR 0003 keeps
       Vulkan as the only graphics API on every planned platform, so SPIR-V
       stays the only shader target.
