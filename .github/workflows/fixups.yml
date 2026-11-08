@@ -1,0 +1,48 @@
+# Fails a pull request while it has fixup commits, so it can't be merged
+# before they're squashed. See "CI" in docs/testing.md.
+#
+# Review comments are addressed with `git commit --fixup`, and the fixups
+# folded in with `git rebase --autosquash` once the pull request is approved
+# (CLAUDE.md, "How work is done"). Pull requests are merged by rebase, so a
+# fixup left in lands on `main` as a commit of its own, which the
+# linear-history ruleset then keeps. This check is required by the `main`
+# ruleset, so the merge button stays disabled until they're gone.
+#
+# It's red while a pull request is in review with fixups pushed, which is
+# expected. It's a workflow of its own, rather than a job in `ci.yml`, so the
+# CI run's status is only about the build and the tests.
+
+name: Fixups
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  squashed:
+    name: Fixups squashed
+    runs-on: ubuntu-24.04
+    steps:
+      # The pull request's own commits, not the merge GitHub would make,
+      # with enough history to list them.
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
+
+      # Commits `git commit --fixup` makes, in each of its forms, whose
+      # summaries `git rebase --autosquash` looks for.
+      - name: Check for unsquashed fixups
+        env:
+          BASE: ${{ github.event.pull_request.base.sha }}
+          HEAD: ${{ github.event.pull_request.head.sha }}
+        run: |
+          fixups=$(git log --format='%h %s' "$BASE..$HEAD" | grep -E '^[0-9a-f]+ (fixup|squash|amend)! ' || true)
+          if [ -n "$fixups" ]; then
+            echo "::error::Squash these commits with git rebase --autosquash before merging:"
+            echo "$fixups"
+            exit 1
+          fi
+          echo "No fixup commits."
