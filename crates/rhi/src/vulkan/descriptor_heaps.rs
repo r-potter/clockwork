@@ -302,6 +302,13 @@ pub(super) struct HeapLayout {
     capacity: u32,
     /// The distance between two slots: the descriptor size, rounded up to
     /// the descriptor alignment.
+    ///
+    /// On a conforming device that's the descriptor size itself, since
+    /// `VK_EXT_descriptor_heap` makes both powers of two, with the
+    /// alignment no larger than the size. Shaders depend on it: `slangc`
+    /// steps through a heap by one descriptor's size (`OpConstantSizeOfEXT`),
+    /// so slots spaced further apart would need the stride compiled into
+    /// every shader (design 0002, "Binding model").
     stride: vk::DeviceSize,
     /// The size of the driver's reserved range.
     reserved: vk::DeviceSize,
