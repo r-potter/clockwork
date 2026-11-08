@@ -9,8 +9,10 @@
 //! [`RenderHardwareInterface`](crate::RenderHardwareInterface), for
 //! presenting. Backends derive both once, when the device is selected.
 //!
-//! Whether a kind has a queue of its own isn't listed either: it's the kind
-//! of the queue it's given, [`Queue::kind`](crate::Queue::kind).
+//! Nor is what a queue can do: whether a kind has a queue of its own is
+//! the kind of the queue it's given, [`Queue::kind`](crate::Queue::kind),
+//! and whether it can write timestamps is
+//! [`Queue::timestamp_period_ns`](crate::Queue::timestamp_period_ns).
 
 /// The most push data, in bytes, that one draw or dispatch can carry (design
 /// 0002, "Binding model"). Device selection requires at least this much, so
@@ -45,54 +47,12 @@ impl QueueKind {
     }
 }
 
-/// A set of [`QueueKind`]s.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct QueueKindSet {
-    /// Whether [`QueueKind::Graphics`] is in the set.
-    graphics: bool,
-    /// Whether [`QueueKind::Compute`] is in the set.
-    compute: bool,
-    /// Whether [`QueueKind::Transfer`] is in the set.
-    transfer: bool,
-}
-
-impl QueueKindSet {
-    /// The empty set.
-    pub const EMPTY: Self = Self {
-        graphics: false,
-        compute: false,
-        transfer: false,
-    };
-
-    /// This set with `kind` added.
-    pub const fn with(mut self, kind: QueueKind) -> Self {
-        match kind {
-            QueueKind::Graphics => self.graphics = true,
-            QueueKind::Compute => self.compute = true,
-            QueueKind::Transfer => self.transfer = true,
-        }
-        self
-    }
-
-    /// Whether `kind` is in the set.
-    pub const fn contains(self, kind: QueueKind) -> bool {
-        match kind {
-            QueueKind::Graphics => self.graphics,
-            QueueKind::Compute => self.compute,
-            QueueKind::Transfer => self.transfer,
-        }
-    }
-}
-
 /// The selected device's name, and its optional features and limits for
 /// resources and shaders.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Capabilities {
     /// The device's name, as its driver reports it.
     pub device_name: String,
-    /// Which queue kinds can write timestamps. Always includes
-    /// [`QueueKind::Graphics`], which device selection requires.
-    pub timestamps: QueueKindSet,
     /// BC1 to BC7 compressed textures.
     pub bc_compression: bool,
     /// The device's limits that the RHI's users need to know.
@@ -106,8 +66,6 @@ pub struct Limits {
     pub max_texture_dimension_2d: u32,
     /// The largest compute workgroup, in invocations along each axis.
     pub max_compute_workgroup_size: [u32; 3],
-    /// How long one timestamp tick lasts, in nanoseconds.
-    pub timestamp_period_ns: f32,
 }
 
 /// What presenting to a window can do on the selected device. It describes
@@ -152,7 +110,7 @@ pub(crate) fn summary(capabilities: &Capabilities, present: &PresentCapabilities
 
 #[cfg(test)]
 mod tests {
-    //! T0 tests of [`QueueKindSet`] and the capability summary.
+    //! T0 tests of the capability summary.
 
     use super::*;
 
@@ -160,26 +118,12 @@ mod tests {
     fn none() -> Capabilities {
         Capabilities {
             device_name: "device".to_owned(),
-            timestamps: QueueKindSet::EMPTY.with(QueueKind::Graphics),
             bc_compression: false,
             limits: Limits {
                 max_texture_dimension_2d: 16_384,
                 max_compute_workgroup_size: [1_024, 1_024, 64],
-                timestamp_period_ns: 1.0,
             },
         }
-    }
-
-    /// A set contains exactly the kinds added to it.
-    #[test]
-    fn queue_kind_sets_contain_what_was_added() {
-        let kinds = QueueKindSet::EMPTY
-            .with(QueueKind::Graphics)
-            .with(QueueKind::Transfer);
-        assert!(kinds.contains(QueueKind::Graphics));
-        assert!(!kinds.contains(QueueKind::Compute));
-        assert!(kinds.contains(QueueKind::Transfer));
-        assert_eq!(QueueKindSet::default(), QueueKindSet::EMPTY);
     }
 
     /// The summary lists every optional capability a device has.

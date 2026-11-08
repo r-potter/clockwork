@@ -258,7 +258,7 @@ impl VulkanRenderHardwareInterface {
         let triangle_shaders = TriangleShaders::new(&device)?;
 
         let allocator = MemoryAllocator::new(device.handle(), physical_device.memory_properties);
-        let mut queues = Queues::new(&device)?;
+        let mut queues = Queues::new(&device, &physical_device)?;
         let heaps = match DescriptorHeaps::new(
             &device,
             &allocator,

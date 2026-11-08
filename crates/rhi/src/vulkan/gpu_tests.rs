@@ -199,7 +199,7 @@ fn sync_hazards_are_reported() {
     unsafe { device.end_command_buffer(command_buffer) }.unwrap();
 }
 
-/// The capabilities describe the selected device, and include what device
+/// The capabilities describe the selected device, and the device has what
 /// selection requires: timestamps on the graphics queue, and enough push
 /// data (design 0002, R2).
 #[test]
@@ -211,7 +211,8 @@ fn capabilities_describe_the_selected_device() {
         capabilities.device_name,
         backend.core.physical_device.name()
     );
-    assert!(capabilities.timestamps.contains(QueueKind::Graphics));
+    let period_ns = backend.queue(QueueKind::Graphics).timestamp_period_ns();
+    assert!(period_ns.is_some_and(|period_ns| period_ns > 0.0));
     let push_data_size = backend
         .core
         .physical_device
@@ -219,7 +220,26 @@ fn capabilities_describe_the_selected_device() {
         .descriptor_heap
         .max_push_data_size;
     assert!(push_data_size >= u64::from(MAX_PUSH_DATA_SIZE));
-    assert!(capabilities.limits.timestamp_period_ns > 0.0);
+}
+
+/// Each queue writes timestamps exactly when its family can, with the
+/// device's tick period (design 0002, "Timestamps").
+#[test]
+fn queues_report_their_family_timestamps() {
+    let session = TestSession::new();
+    let backend = VulkanTestBackend::headless(&session);
+    let physical_device = &backend.core.physical_device;
+    let families = backend.core.device.queue_families();
+    for kind in QueueKind::ALL {
+        let family = families.family(backend.queue(kind).kind());
+        let valid_bits = physical_device.queue_families[family as usize].timestamp_valid_bits;
+        let expected = (valid_bits > 0).then_some(physical_device.limits().timestamp_period);
+        assert_eq!(
+            backend.queue(kind).timestamp_period_ns(),
+            expected,
+            "{kind:?}"
+        );
+    }
 }
 
 /// Waiting for the device to be idle holds every queue's lock, so it doesn't
