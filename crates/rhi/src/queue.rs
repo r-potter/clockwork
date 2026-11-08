@@ -15,7 +15,7 @@ use std::fmt::{self, Debug};
 use std::sync::Arc;
 
 use crate::vulkan::VulkanCommandBuffer;
-use crate::{CommandList, QueueKind, RhiResult};
+use crate::{CommandList, QueueKind, RhiResult, SubmissionTimings};
 
 /// Which of the backend's queues something is on, as [`Queue::id`] returns.
 /// Kinds that share a queue share its ID.
@@ -164,6 +164,24 @@ pub trait Queue: Debug + Send + Sync {
     ///
     /// Panics if `timepoint` isn't one this queue returned.
     fn is_complete(&self, timepoint: GpuTimepoint) -> RhiResult<bool>;
+
+    /// The timings recorded in the submission that reaches `timepoint`, or
+    /// `None` until it's reached, without blocking (design 0002,
+    /// "Timestamps").
+    ///
+    /// Each submission's timings are returned once. A reached submission
+    /// whose timings were already taken, or discarded because more than 64
+    /// completed submissions with timings were left untaken, returns no
+    /// command buffers, as does one that recorded no timings.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the timeline or the results can't be read.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `timepoint` isn't one this queue returned.
+    fn take_timings(&self, timepoint: GpuTimepoint) -> RhiResult<Option<SubmissionTimings>>;
 }
 
 // Timepoints are plain data, and queues are shared between threads, as an

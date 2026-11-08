@@ -43,7 +43,8 @@ use super::physical_device::PhysicalDevice;
 use super::translate::VulkanCommandBuffer;
 use crate::timing::TimestampClock;
 use crate::{
-    CommandBuffer, CommandList, GpuTimepoint, Queue, QueueId, QueueKind, RhiResult, SubmitDesc,
+    CommandBuffer, CommandList, GpuTimepoint, Queue, QueueId, QueueKind, RhiResult,
+    SubmissionTimings, SubmitDesc,
 };
 
 /// What a queue is used for: one kind's work, or presenting.
@@ -683,6 +684,13 @@ impl Queue for VulkanQueue {
         self.core
             .queues
             .is_complete(self.core.device.handle(), self.id, timepoint)
+    }
+
+    /// No submission records timings until translation writes timestamps,
+    /// later in `rhi-timing`, so a reached submission has none.
+    fn take_timings(&self, timepoint: GpuTimepoint) -> RhiResult<Option<SubmissionTimings>> {
+        let complete = self.is_complete(timepoint)?;
+        Ok(complete.then(SubmissionTimings::default))
     }
 }
 

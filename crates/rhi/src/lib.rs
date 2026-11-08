@@ -76,6 +76,7 @@ pub use sampler::{AddressMode, Filter, Sampler, SamplerDesc};
 pub use texture::{
     Extent3d, Format, FormatInfo, Texture, TextureDesc, TextureDimension, TextureUsage,
 };
+pub use timing::{CommandBufferTimings, SubmissionTimings, Timing};
 use vulkan::VulkanRenderHardwareInterface;
 
 /// A window a backend can render to.

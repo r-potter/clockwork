@@ -14,7 +14,9 @@ use clockwork_diagnostics::capture::TestSession;
 
 use super::lock;
 use crate::vulkan::test_support::VulkanTestBackend;
-use crate::{GpuTimepoint, QueueId, QueueKind, RenderHardwareInterface, SubmitDesc};
+use crate::{
+    GpuTimepoint, QueueId, QueueKind, RenderHardwareInterface, SubmissionTimings, SubmitDesc,
+};
 
 /// A submission held back by a gate, a timeline semaphore only the host
 /// signals, so the timepoint it reaches isn't reached until the gate opens.
@@ -231,6 +233,38 @@ fn submissions_reach_their_timepoints_in_order() {
     graphics.wait(second).unwrap();
     assert!(graphics.is_complete(first).unwrap());
     assert!(graphics.is_complete(second).unwrap());
+}
+
+/// Taking a submission's timings returns nothing until it's reached, then
+/// returns them, here none, since the submission recorded no timings, and
+/// keeps returning none once they're taken (design 0002, "Timestamps").
+#[test]
+fn timings_are_taken_once_the_submission_is_reached() {
+    let session = TestSession::new();
+    let backend = VulkanTestBackend::headless(&session);
+    let graphics = backend.queue(QueueKind::Graphics);
+    let held = HeldSubmission::new(&backend, QueueKind::Graphics);
+    assert_eq!(graphics.take_timings(held.timepoint).unwrap(), None);
+    held.open();
+    graphics.wait(held.timepoint).unwrap();
+    for _ in 0..2 {
+        let timings = graphics.take_timings(held.timepoint).unwrap();
+        assert_eq!(timings, Some(SubmissionTimings::default()));
+    }
+}
+
+/// Taking timings for a timepoint the queue hasn't returned panics, as
+/// waiting for one does.
+#[test]
+#[should_panic(
+    expected = "the graphics queue never returned GpuTimepoint { queue: QueueId(0), value: 1 }: it \
+                has made 0 submissions"
+)]
+fn taking_timings_for_a_timepoint_never_returned_panics() {
+    let session = TestSession::new();
+    let backend = VulkanTestBackend::headless(&session);
+    let graphics = backend.queue(QueueKind::Graphics);
+    let _ = graphics.take_timings(GpuTimepoint::new(graphics.id(), 1));
 }
 
 /// Waiting on a queue for a timepoint on another queue's timeline panics,
