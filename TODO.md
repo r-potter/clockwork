@@ -91,6 +91,20 @@ Outstanding tasks and future work.
 
   The KHR extension promoted the EXT ones, and the pinned `ash` has bindings
   for both.
+- [ ] **Order the first barrier on an acquired image after the acquire, in
+      `rhi-present`.** Design 0002 has an acquired swapchain image start at
+      `Access::None`, which has no stages, so a barrier from it waits for
+      nothing. The acquire semaphore is waited for at a stage of the
+      submission, and only a barrier whose source stage includes that stage
+      is ordered after the wait. A barrier from `None` would move the image
+      to its next layout while the presentation engine may still be reading
+      it. The triangle's hand-written barrier gets this right, with
+      `COLOR_ATTACHMENT_OUTPUT` as its source stage, the stage the submit
+      waits at (`record_frame` in `crates/rhi/src/vulkan.rs`). When
+      `rhi-present` replaces it, the first barrier on an acquired image needs
+      the same source stage, for example from an access for acquired images
+      that maps to it, or from translation knowing which images are newly
+      acquired. Revise design 0002's "Synchronization" with the choice.
 - [ ] **Support Android.** Planned in ADR 0003, on Adreno GPUs only,
       using Mesa's Turnip driver bundled with the app. It's waiting for
       Turnip to support `VK_EXT_shader_object`, `VK_EXT_descriptor_heap` and
