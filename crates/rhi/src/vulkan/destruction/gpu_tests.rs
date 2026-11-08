@@ -126,6 +126,11 @@ fn destruction_during_translation_on_another_thread() {
 
 /// A buffer destroyed after a list naming it is translated, and before the
 /// list is submitted, is kept until that submission completes.
+///
+/// The submission collects once its work is submitted, which frees the
+/// buffer only if that work has already completed, as it can on a fast
+/// device such as lavapipe, so the test checks that rather than assuming the
+/// work is still running.
 #[test]
 fn lists_translated_before_a_destruction_keep_what_they_use() {
     let session = TestSession::new();
@@ -141,7 +146,14 @@ fn lists_translated_before_a_destruction_keep_what_they_use() {
     let done = graphics
         .submit(SubmitDesc::new(vec![command_buffer]))
         .unwrap();
-    assert_eq!(retired(&backend), 1);
+    // Read before asking whether the work completed, so that a buffer freed
+    // by then must have been freed after it completed.
+    if retired(&backend) == 0 {
+        assert!(
+            graphics.is_complete(done).unwrap(),
+            "the buffer was freed while the submission using it was pending"
+        );
+    }
     graphics.wait(done).unwrap();
     resources.collect_garbage();
     assert_eq!(retired(&backend), 0);
