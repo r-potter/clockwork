@@ -27,6 +27,7 @@ mod frames;
 mod gpu_tests;
 mod memory;
 mod physical_device;
+mod query_pools;
 mod queues;
 mod samplers;
 mod shaders;
@@ -63,6 +64,7 @@ use device_selection::{Candidate, Selection};
 use frames::Frames;
 use memory::MemoryAllocator;
 use physical_device::PhysicalDevice;
+use query_pools::QueryPools;
 use queues::{QueueRole, Queues, VulkanQueue};
 use samplers::SamplerEntry;
 use shaders::TriangleShaders;
@@ -152,6 +154,9 @@ pub(crate) struct VulkanDevice {
     /// The device's queues, with their locks and timelines. Their timelines
     /// are destroyed in `drop`, once the device is idle.
     queues: Queues,
+    /// The timestamp query chunks no command buffer has claimed, destroyed
+    /// in `drop`, once the device is idle.
+    query_pools: QueryPools,
     /// Allocates memory for resources on `device`.
     allocator: MemoryAllocator,
     /// The logical device, and its queues, created on `physical_device`.
@@ -278,6 +283,7 @@ impl VulkanRenderHardwareInterface {
             samplers: RwLock::new(HandleTable::new("sampler")),
             heaps,
             queues,
+            query_pools: QueryPools::new(),
             allocator,
             device,
             physical_device,
@@ -822,6 +828,9 @@ impl Drop for VulkanDevice {
         unsafe { self.heaps.destroy(self.device.handle(), &self.allocator) };
         // SAFETY: The timelines were created on this device, and it's idle.
         unsafe { self.queues.destroy(self.device.handle()) };
+        // SAFETY: The query pools were created on this device, it's idle, and
+        // no command buffer is left to hold one, since each holds the core.
+        unsafe { self.query_pools.destroy(self.device.handle()) };
     }
 }
 

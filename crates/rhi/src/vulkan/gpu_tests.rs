@@ -18,7 +18,7 @@ use clockwork_diagnostics::capture::TestSession;
 use tracing::Level;
 
 use super::queues::QueueRole;
-use super::test_support::{Capability, VulkanTestBackend};
+use super::test_support::{Capability, TestCommands, VulkanTestBackend};
 use crate::handle::LEAK_TARGET;
 use crate::{
     AddressMode, BufferDesc, BufferUsage, Extent3d, Filter, Format, MAX_PUSH_DATA_SIZE,
@@ -86,55 +86,6 @@ impl Drop for TestBuffer<'_> {
             self.device.destroy_buffer(self.buffer, None);
             self.device.free_memory(self.memory, None);
         }
-    }
-}
-
-/// A command pool with one primary command buffer, destroyed when dropped.
-struct TestCommands<'a> {
-    /// The device the pool was created on.
-    device: &'a ash::Device,
-    /// The pool, which frees `command_buffer` when destroyed.
-    pool: vk::CommandPool,
-    /// A command buffer allocated from `pool`.
-    command_buffer: vk::CommandBuffer,
-}
-
-impl<'a> TestCommands<'a> {
-    /// Creates a command pool for `backend`'s graphics queue family, and
-    /// allocates one primary command buffer from it.
-    ///
-    /// # Panics
-    ///
-    /// Panics if any Vulkan call fails.
-    fn new(backend: &'a VulkanTestBackend) -> Self {
-        let device = backend.core.device.handle();
-        let pool_create_info = vk::CommandPoolCreateInfo::default()
-            .queue_family_index(backend.core.device.queue_families().graphics);
-        // SAFETY: `device` is a valid logical device, and `pool_create_info`
-        // is valid for the call.
-        let pool = unsafe { device.create_command_pool(&pool_create_info, None) }.unwrap();
-        let mut commands = Self {
-            device,
-            pool,
-            command_buffer: vk::CommandBuffer::null(),
-        };
-        let allocate_info = vk::CommandBufferAllocateInfo::default()
-            .command_pool(pool)
-            .level(vk::CommandBufferLevel::PRIMARY)
-            .command_buffer_count(1);
-        // SAFETY: the pool was created on `device`, and `allocate_info` is
-        // valid for the call.
-        commands.command_buffer =
-            unsafe { device.allocate_command_buffers(&allocate_info) }.unwrap()[0];
-        commands
-    }
-}
-
-impl Drop for TestCommands<'_> {
-    fn drop(&mut self) {
-        // SAFETY: the pool was created on `device`, and its command buffer
-        // was never submitted. Destroying the pool frees the command buffer.
-        unsafe { self.device.destroy_command_pool(self.pool, None) };
     }
 }
 

@@ -1,5 +1,6 @@
 //! Fixtures for the Vulkan backend's T1 tests: [`VulkanTestBackend`], the
-//! test-only [`Capability`] list, and [`require_capabilities!`].
+//! test-only [`Capability`] list, [`require_capabilities!`], and
+//! [`TestCommands`], for recording raw Vulkan commands.
 //!
 //! [`Capability`] names the optional parts of the RHI's [`Capabilities`],
 //! [`PresentCapabilities`] and queues, so that tests can require them by name in
@@ -7,6 +8,7 @@
 //! the object that reports it, as the RHI's users read it (design 0002,
 //! "Capabilities").
 
+use ash::vk;
 use clockwork_diagnostics::capture::TestSession;
 
 use super::VulkanRenderHardwareInterface;
@@ -142,6 +144,57 @@ impl std::ops::Deref for VulkanTestBackend {
 
     fn deref(&self) -> &Self::Target {
         &self.rhi
+    }
+}
+
+/// A command pool with one primary command buffer, destroyed when dropped,
+/// for tests that record raw Vulkan commands.
+pub(crate) struct TestCommands<'a> {
+    /// The device the pool was created on.
+    device: &'a ash::Device,
+    /// The pool, which frees `command_buffer` when destroyed.
+    pub(crate) pool: vk::CommandPool,
+    /// A command buffer allocated from `pool`.
+    pub(crate) command_buffer: vk::CommandBuffer,
+}
+
+impl<'a> TestCommands<'a> {
+    /// Creates a command pool for `backend`'s graphics queue family, and
+    /// allocates one primary command buffer from it.
+    ///
+    /// # Panics
+    ///
+    /// Panics if any Vulkan call fails.
+    pub(crate) fn new(backend: &'a VulkanTestBackend) -> Self {
+        let device = backend.core.device.handle();
+        let pool_create_info = vk::CommandPoolCreateInfo::default()
+            .queue_family_index(backend.core.device.queue_families().graphics);
+        // SAFETY: `device` is a valid logical device, and `pool_create_info`
+        // is valid for the call.
+        let pool = unsafe { device.create_command_pool(&pool_create_info, None) }.unwrap();
+        let mut commands = Self {
+            device,
+            pool,
+            command_buffer: vk::CommandBuffer::null(),
+        };
+        let allocate_info = vk::CommandBufferAllocateInfo::default()
+            .command_pool(pool)
+            .level(vk::CommandBufferLevel::PRIMARY)
+            .command_buffer_count(1);
+        // SAFETY: the pool was created on `device`, and `allocate_info` is
+        // valid for the call.
+        commands.command_buffer =
+            unsafe { device.allocate_command_buffers(&allocate_info) }.unwrap()[0];
+        commands
+    }
+}
+
+impl Drop for TestCommands<'_> {
+    fn drop(&mut self) {
+        // SAFETY: the pool was created on `device`, and its command buffer
+        // is never left pending: it's submitted only by tests that wait for
+        // it. Destroying the pool frees the command buffer.
+        unsafe { self.device.destroy_command_pool(self.pool, None) };
     }
 }
 
