@@ -21,6 +21,8 @@ const HANDLE: &[u8] = include_bytes!("heap_prototype/heap_ext.spv");
 const INDEX: &[u8] = include_bytes!("heap_prototype/heap_index.spv");
 /// Ordinary bindings, mapped onto the heaps.
 const MAPPED: &[u8] = include_bytes!("heap_prototype/heap_mapped.spv");
+/// Typed `ResourceIndex<T>` and `SamplerIndex` wrappers around a `uint`.
+const WRAPPED: &[u8] = include_bytes!("heap_prototype/heap_wrapped.spv");
 
 /// The colour the texture is cleared to.
 const COLOUR: [f32; 4] = [1.0, 0.5, 0.25, 1.0];
@@ -30,6 +32,7 @@ enum Variant {
     Handle,
     Index,
     Mapped,
+    Wrapped,
 }
 
 fn words(spirv: &[u8]) -> Vec<u32> {
@@ -199,6 +202,7 @@ fn run(variant: Variant) {
         Variant::Handle => HANDLE,
         Variant::Index => INDEX,
         Variant::Mapped => MAPPED,
+        Variant::Wrapped => WRAPPED,
     });
     let code_bytes =
         unsafe { slice::from_raw_parts(code.as_ptr().cast::<u8>(), size_of_val(code.as_slice())) };
@@ -224,7 +228,7 @@ fn run(variant: Variant) {
             push.extend_from_slice(&[slot, 0].map(u32::to_le_bytes).concat());
             push.extend_from_slice(&[sampler_index, 0].map(u32::to_le_bytes).concat());
         }
-        Variant::Index | Variant::Mapped => {
+        Variant::Index | Variant::Mapped | Variant::Wrapped => {
             push.extend_from_slice(&slot.to_le_bytes());
             push.extend_from_slice(&sampler_index.to_le_bytes());
         }
@@ -360,4 +364,9 @@ fn index() {
 #[test]
 fn mapped() {
     run(Variant::Mapped);
+}
+
+#[test]
+fn wrapped() {
+    run(Variant::Wrapped);
 }
