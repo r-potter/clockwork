@@ -59,6 +59,20 @@ fn run(variant: Variant) {
         props.min_resource_heap_reserved_range,
         props.min_sampler_heap_reserved_range,
     );
+    assert_eq!(
+        props.image_descriptor_size % props.image_descriptor_alignment,
+        0,
+        "image descriptor size {} isn't a multiple of its alignment {}",
+        props.image_descriptor_size,
+        props.image_descriptor_alignment,
+    );
+    assert_eq!(
+        props.sampler_descriptor_size % props.sampler_descriptor_alignment,
+        0,
+        "sampler descriptor size {} isn't a multiple of its alignment {}",
+        props.sampler_descriptor_size,
+        props.sampler_descriptor_alignment,
+    );
     let untyped = core
         .physical_device
         .supports_extension(ash::khr::shader_untyped_pointers::NAME);
