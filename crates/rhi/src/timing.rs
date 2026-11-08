@@ -81,10 +81,6 @@ pub(crate) struct ScopeRecord {
 /// # Panics
 ///
 /// Panics if a scope's query is past the end of `timestamps`.
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "timings are read back later in `rhi-timing`")
-)]
 pub(crate) fn resolve(
     scopes: Vec<ScopeRecord>,
     clock: Option<TimestampClock>,
@@ -116,10 +112,6 @@ pub(crate) struct RetainedTimings<T> {
     submissions: BTreeMap<u64, T>,
 }
 
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "submissions keep timings later in `rhi-timing`")
-)]
 impl<T> RetainedTimings<T> {
     /// An empty store.
     pub(crate) fn new() -> Self {

@@ -65,13 +65,6 @@ impl Drop for QueryChunk {
     }
 }
 
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "translation writes timestamps later in `rhi-timing`"
-    )
-)]
 impl QueryChunk {
     /// The pool, whose queries are all reset when it's claimed.
     pub(super) fn pool(&self) -> vk::QueryPool {
@@ -100,13 +93,6 @@ impl QueryPools {
     /// # Errors
     ///
     /// Returns an error if a query pool can't be created.
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "translation writes timestamps later in `rhi-timing`"
-        )
-    )]
     pub(super) fn claim(&self, device: &ash::Device) -> RhiResult<QueryChunk> {
         let free = self
             .free
@@ -127,13 +113,6 @@ impl QueryPools {
     /// `chunk` must have been claimed from this free list on `device`, and
     /// no pending work may use its queries: its command buffer was never
     /// submitted, or its submission has completed.
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "translation writes timestamps later in `rhi-timing`"
-        )
-    )]
     pub(super) unsafe fn recycle(&self, device: &ash::Device, chunk: QueryChunk) {
         // SAFETY: Guaranteed by the caller, and the chunk is claimed, so no
         // other thread uses it.

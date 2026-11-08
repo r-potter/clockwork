@@ -40,8 +40,9 @@ use super::device::LogicalDevice;
 use super::device_selection::QueueFamilies;
 use super::error::error;
 use super::physical_device::PhysicalDevice;
+use super::timings::KeptTimings;
 use super::translate::VulkanCommandBuffer;
-use crate::timing::TimestampClock;
+use crate::timing::{RetainedTimings, TimestampClock};
 use crate::{
     CommandBuffer, CommandList, GpuTimepoint, Queue, QueueId, QueueKind, RhiResult,
     SubmissionTimings, SubmitDesc,
@@ -252,6 +253,9 @@ struct DeviceQueue {
     submitted: AtomicU64,
     /// The command pools for its family that aren't claimed.
     pools: CommandPools,
+    /// The timings of its submissions that haven't been taken. Never held
+    /// while recycling query chunks.
+    timings: Mutex<RetainedTimings<KeptTimings>>,
 }
 
 impl Queues {
@@ -313,6 +317,7 @@ impl Queues {
             timeline,
             submitted: AtomicU64::new(0),
             pools: CommandPools::new(family),
+            timings: Mutex::new(RetainedTimings::new()),
         });
         Ok(())
     }
@@ -538,6 +543,51 @@ impl Queues {
         queue
     }
 
+    /// Keeps `timings` for the submission to the queue `id` that reaches
+    /// `value`, on `device`. If the queue then keeps too many, discards the
+    /// oldest its timeline has reached, and returns them, with the values
+    /// they reach, for their chunks to be recycled. The timeline is read only
+    /// then, and if it can't be read, nothing is discarded until a later
+    /// submission.
+    pub(super) fn keep_timings(
+        &self,
+        device: &ash::Device,
+        id: QueueId,
+        value: u64,
+        timings: KeptTimings,
+    ) -> Vec<(u64, KeptTimings)> {
+        let mut kept = lock_timings(&self.queue(id).timings);
+        kept.insert(value, timings);
+        if !kept.needs_pruning() {
+            return Vec::new();
+        }
+        match self.reached(device, id) {
+            Ok(reached) => kept.prune(reached),
+            Err(_) => Vec::new(),
+        }
+    }
+
+    /// Takes the timings kept for the submission to the queue `id` that
+    /// reaches `value`, or `None` if none are kept.
+    pub(super) fn take_kept_timings(&self, id: QueueId, value: u64) -> Option<KeptTimings> {
+        lock_timings(&self.queue(id).timings).take(value)
+    }
+
+    /// Takes every queue's kept timings, for their chunks to be recycled
+    /// once the device is idle.
+    pub(super) fn drain_timings(&mut self) -> Vec<KeptTimings> {
+        self.queues
+            .iter_mut()
+            .flat_map(|queue| {
+                queue
+                    .timings
+                    .get_mut()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .drain()
+            })
+            .collect()
+    }
+
     /// The value the timeline of the queue `id` has reached.
     ///
     /// # Errors
@@ -629,6 +679,14 @@ fn lock(queue: &Mutex<vk::Queue>) -> MutexGuard<'_, vk::Queue> {
     queue.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
+/// Locks a queue's kept timings, recovering them if a thread panicked while
+/// holding them: each call leaves them consistent before it can panic.
+fn lock_timings(
+    timings: &Mutex<RetainedTimings<KeptTimings>>,
+) -> MutexGuard<'_, RetainedTimings<KeptTimings>> {
+    timings.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
 /// A [`Queue`] of the Vulkan backend: a view of one of the core's queues.
 pub(super) struct VulkanQueue {
     /// The core, whose queues this is a view of.
@@ -686,11 +744,8 @@ impl Queue for VulkanQueue {
             .is_complete(self.core.device.handle(), self.id, timepoint)
     }
 
-    /// No submission records timings until translation writes timestamps,
-    /// later in `rhi-timing`, so a reached submission has none.
     fn take_timings(&self, timepoint: GpuTimepoint) -> RhiResult<Option<SubmissionTimings>> {
-        let complete = self.is_complete(timepoint)?;
-        Ok(complete.then(SubmissionTimings::default))
+        self.core.take_timings(self.id, timepoint)
     }
 }
 
