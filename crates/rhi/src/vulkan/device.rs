@@ -45,8 +45,9 @@ impl LogicalDevice {
     /// distinct family in `queue_families`.
     ///
     /// Enables the extensions and features device selection requires:
-    /// - `VK_EXT_shader_object`, `VK_EXT_descriptor_heap` and
-    ///   `VK_KHR_device_address_commands`, each with its main feature
+    /// - `VK_EXT_shader_object`, `VK_EXT_descriptor_heap`,
+    ///   `VK_KHR_device_address_commands` and
+    ///   `VK_KHR_shader_untyped_pointers`, each with its main feature
     /// - Vulkan 1.1's `shader_draw_parameters`
     /// - Vulkan 1.2's `buffer_device_address`, `timeline_semaphore` and
     ///   `host_query_reset`
@@ -86,6 +87,7 @@ impl LogicalDevice {
             ext::shader_object::NAME.as_ptr(),
             ext::descriptor_heap::NAME.as_ptr(),
             khr::device_address_commands::NAME.as_ptr(),
+            khr::shader_untyped_pointers::NAME.as_ptr(),
         ];
         if queue_families.present.is_some() {
             extensions.push(khr::swapchain::NAME.as_ptr());
@@ -117,6 +119,11 @@ impl LogicalDevice {
         let mut device_address_commands_features =
             vk::PhysicalDeviceDeviceAddressCommandsFeaturesKHR::default()
                 .device_address_commands(true);
+        // Shaders read the descriptor heaps through `SPV_EXT_descriptor_heap`,
+        // whose SPIR-V uses untyped pointers (design 0002, "Binding model").
+        let mut shader_untyped_pointers_features =
+            vk::PhysicalDeviceShaderUntypedPointersFeaturesKHR::default()
+                .shader_untyped_pointers(true);
         let core_features = vk::PhysicalDeviceFeatures::default().texture_compression_bc(
             physical_device.features.core.texture_compression_bc == vk::TRUE,
         );
@@ -130,7 +137,8 @@ impl LogicalDevice {
             .push(&mut vulkan14_features)
             .push(&mut shader_object_features)
             .push(&mut descriptor_heap_features)
-            .push(&mut device_address_commands_features);
+            .push(&mut device_address_commands_features)
+            .push(&mut shader_untyped_pointers_features);
         // SAFETY: `physical_device` was enumerated from `instance`, and
         // `create_info` and the structures it points to are valid for the
         // duration of the call. Selection checked that the queue families and

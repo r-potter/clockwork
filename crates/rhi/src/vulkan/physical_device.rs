@@ -93,6 +93,10 @@ pub(super) struct Features {
     /// `VK_KHR_device_address_commands` features (ADR 0002). Zeroed on
     /// devices without the extension.
     pub device_address_commands: vk::PhysicalDeviceDeviceAddressCommandsFeaturesKHR<'static>,
+    /// `VK_KHR_shader_untyped_pointers` features, which shaders reading the
+    /// descriptor heaps need (design 0002, "Binding model"). Zeroed on
+    /// devices without the extension.
+    pub shader_untyped_pointers: vk::PhysicalDeviceShaderUntypedPointersFeaturesKHR<'static>,
     /// `VK_EXT_present_timing` features, optional in ADR 0002. Zeroed on
     /// devices without the extension.
     pub present_timing: vk::PhysicalDevicePresentTimingFeaturesEXT<'static>,
@@ -188,6 +192,9 @@ impl PhysicalDevice {
             }
             if supports(khr::device_address_commands::NAME) {
                 features2 = features2.push(&mut features.device_address_commands);
+            }
+            if supports(khr::shader_untyped_pointers::NAME) {
+                features2 = features2.push(&mut features.shader_untyped_pointers);
             }
             if supports(ext::present_timing::NAME) {
                 features2 = features2.push(&mut features.present_timing);
