@@ -39,7 +39,9 @@ use super::command_pools::{CommandPool, CommandPools};
 use super::device::LogicalDevice;
 use super::device_selection::QueueFamilies;
 use super::error::error;
+use super::physical_device::PhysicalDevice;
 use super::translate::VulkanCommandBuffer;
+use crate::timing::TimestampClock;
 use crate::{
     CommandBuffer, CommandList, GpuTimepoint, Queue, QueueId, QueueKind, RhiResult, SubmitDesc,
 };
@@ -239,6 +241,9 @@ struct DeviceQueue {
     role: QueueRole,
     /// Its family.
     family: u32,
+    /// Its family's timestamp counter, or `None` if the family can't write
+    /// timestamps.
+    clock: Option<TimestampClock>,
     /// A timeline semaphore, signalled with the number of each submission.
     timeline: vk::Semaphore,
     /// The number of the last submission, so the value its completion
@@ -251,20 +256,24 @@ struct DeviceQueue {
 impl Queues {
     /// Maps each role to the queue it uses among `device`'s queues, as the
     /// layout `device` created them from says, and creates a timeline for
-    /// each queue, named after the role that owns it.
+    /// each queue, named after the role that owns it. `physical_device`,
+    /// which `device` was created on, gives each queue's timestamp counter.
     ///
     /// # Errors
     ///
     /// Returns an error if a timeline semaphore can't be created.
-    pub(super) fn new(device: &LogicalDevice) -> Result<Self> {
+    pub(super) fn new(device: &LogicalDevice, physical_device: &PhysicalDevice) -> Result<Self> {
         let layout = device.queue_layout();
         let mut queues = Self {
             locks: device.queue_locks().clone(),
             roles: layout.roles,
             queues: Vec::with_capacity(layout.queues.len()),
         };
+        let period_ns = physical_device.limits().timestamp_period;
         for &(family, role) in &layout.queues {
-            if let Err(err) = queues.add(device, role, family) {
+            let valid_bits = physical_device.queue_families[family as usize].timestamp_valid_bits;
+            let clock = TimestampClock::new(valid_bits, period_ns);
+            if let Err(err) = queues.add(device, role, family, clock) {
                 // SAFETY: Nothing has been submitted to wait on or signal
                 // the timelines created so far.
                 unsafe { queues.destroy(device.handle()) };
@@ -275,12 +284,18 @@ impl Queues {
     }
 
     /// Adds the next queue, of `family`, which `role` owns, with a timeline
-    /// named after it.
+    /// named after it, and the family's timestamp counter, `clock`.
     ///
     /// # Errors
     ///
     /// Returns an error if the timeline semaphore can't be created.
-    fn add(&mut self, device: &LogicalDevice, role: QueueRole, family: u32) -> Result<()> {
+    fn add(
+        &mut self,
+        device: &LogicalDevice,
+        role: QueueRole,
+        family: u32,
+        clock: Option<TimestampClock>,
+    ) -> Result<()> {
         let mut type_create_info = vk::SemaphoreTypeCreateInfo::default()
             .semaphore_type(vk::SemaphoreType::TIMELINE)
             .initial_value(0);
@@ -293,6 +308,7 @@ impl Queues {
         self.queues.push(DeviceQueue {
             role,
             family,
+            clock,
             timeline,
             submitted: AtomicU64::new(0),
             pools: CommandPools::new(family),
@@ -321,6 +337,12 @@ impl Queues {
     /// The family of the queue `id`.
     pub(super) fn family(&self, id: QueueId) -> u32 {
         self.queue(id).family
+    }
+
+    /// The timestamp counter of the queue `id`, or `None` if it can't write
+    /// timestamps.
+    pub(super) fn clock(&self, id: QueueId) -> Option<TimestampClock> {
+        self.queue(id).clock
     }
 
     /// The queue `id`.
@@ -628,6 +650,13 @@ impl Queue for VulkanQueue {
 
     fn kind(&self) -> QueueKind {
         self.core.queues.kind(self.id)
+    }
+
+    fn timestamp_period_ns(&self) -> Option<f32> {
+        self.core
+            .queues
+            .clock(self.id)
+            .map(TimestampClock::period_ns)
     }
 
     fn translate(&self, commands: &CommandList) -> RhiResult<CommandBuffer> {

@@ -53,6 +53,7 @@ mod sampler;
 #[cfg(test)]
 mod test_support;
 mod texture;
+mod timing;
 mod vulkan;
 
 use std::fmt::{self, Debug};
@@ -65,9 +66,7 @@ use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
 
 pub use barrier::{Access, AccessSet, Barrier, Subresource};
 pub use buffer::{Buffer, BufferDesc, BufferUsage, GpuAddress};
-pub use capabilities::{
-    Capabilities, Limits, MAX_PUSH_DATA_SIZE, PresentCapabilities, QueueKind, QueueKindSet,
-};
+pub use capabilities::{Capabilities, Limits, MAX_PUSH_DATA_SIZE, PresentCapabilities, QueueKind};
 pub use command_list::CommandList;
 pub use copy::{TextureCopy, TextureDataLayout};
 pub use descriptor::{DescriptorIndex, HeapKind};

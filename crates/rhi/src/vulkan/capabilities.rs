@@ -3,33 +3,19 @@
 
 use ash::{ext, khr, vk};
 
-use super::device_selection::QueueFamilies;
 use super::physical_device::PhysicalDevice;
-use crate::{Capabilities, Limits, PresentCapabilities, QueueKind, QueueKindSet};
+use crate::{Capabilities, Limits, PresentCapabilities};
 
-/// The capabilities of `device`, when its queues are from
-/// `queue_families`. Pure, so it's tested with fake devices.
-///
-/// A queue kind can write timestamps if the family it uses can.
-pub(super) fn derive(device: &PhysicalDevice, queue_families: QueueFamilies) -> Capabilities {
-    let mut timestamps = QueueKindSet::EMPTY;
-    for kind in QueueKind::ALL {
-        let family = queue_families.family(kind);
-        if device.queue_families[family as usize].timestamp_valid_bits > 0 {
-            timestamps = timestamps.with(kind);
-        }
-    }
-
+/// The capabilities of `device`. Pure, so it's tested with fake devices.
+pub(super) fn derive(device: &PhysicalDevice) -> Capabilities {
     let features = &device.features;
     let limits = device.limits();
     Capabilities {
         device_name: device.name().into_owned(),
-        timestamps,
         bc_compression: features.core.texture_compression_bc == vk::TRUE,
         limits: Limits {
             max_texture_dimension_2d: limits.max_image_dimension2_d,
             max_compute_workgroup_size: limits.max_compute_work_group_size,
-            timestamp_period_ns: limits.timestamp_period,
         },
     }
 }
@@ -58,8 +44,8 @@ mod tests {
     use super::*;
     use crate::vulkan::physical_device::{Features, Properties};
 
-    /// A device named `device` with one graphics family that can write
-    /// timestamps, the extensions `extensions` and no features.
+    /// A device named `device` with the extensions `extensions`, no
+    /// features and no queue families.
     fn device(extensions: &[&CStr]) -> PhysicalDevice {
         let mut properties = Properties::default();
         for (dst, src) in properties.core.device_name.iter_mut().zip(b"device") {
@@ -80,76 +66,6 @@ mod tests {
                 })
                 .collect(),
         }
-        .with_family(vk::QueueFlags::GRAPHICS | vk::QueueFlags::COMPUTE, 64)
-    }
-
-    impl PhysicalDevice {
-        /// Adds a queue family with `flags` and `timestamp_valid_bits`.
-        fn with_family(mut self, flags: vk::QueueFlags, timestamp_valid_bits: u32) -> Self {
-            self.queue_families.push(vk::QueueFamilyProperties {
-                queue_flags: flags | vk::QueueFlags::TRANSFER,
-                queue_count: 1,
-                timestamp_valid_bits,
-                ..Default::default()
-            });
-            self
-        }
-    }
-
-    /// The families when every kind uses family 0, headless.
-    const FAMILY_0: QueueFamilies = QueueFamilies {
-        graphics: 0,
-        compute: 0,
-        transfer: 0,
-        present: None,
-    };
-
-    /// Every kind sharing the graphics family shares its timestamps.
-    #[test]
-    fn a_shared_family_shares_its_timestamps() {
-        let capabilities = derive(&device(&[]), FAMILY_0);
-        assert_eq!(
-            capabilities.timestamps,
-            QueueKindSet::EMPTY
-                .with(QueueKind::Graphics)
-                .with(QueueKind::Compute)
-                .with(QueueKind::Transfer),
-        );
-    }
-
-    /// Each kind on a family of its own has that family's timestamps, so
-    /// one on a family without them can't write them.
-    #[test]
-    fn dedicated_families_have_their_own_timestamps() {
-        let device = device(&[])
-            .with_family(vk::QueueFlags::COMPUTE, 64)
-            .with_family(vk::QueueFlags::empty(), 0);
-        let families = QueueFamilies {
-            compute: 1,
-            transfer: 2,
-            ..FAMILY_0
-        };
-        assert_eq!(
-            derive(&device, families).timestamps,
-            QueueKindSet::EMPTY
-                .with(QueueKind::Graphics)
-                .with(QueueKind::Compute),
-        );
-    }
-
-    /// Transfers sharing the compute family share its timestamps.
-    #[test]
-    fn transfers_share_the_compute_family_timestamps() {
-        let device = device(&[]).with_family(vk::QueueFlags::COMPUTE, 0);
-        let families = QueueFamilies {
-            compute: 1,
-            transfer: 1,
-            ..FAMILY_0
-        };
-        assert_eq!(
-            derive(&device, families).timestamps,
-            QueueKindSet::EMPTY.with(QueueKind::Graphics)
-        );
     }
 
     /// An optional extension's capability needs both the extension and its
@@ -191,20 +107,14 @@ mod tests {
         let limits = &mut device.properties.core.limits;
         limits.max_image_dimension2_d = 32_768;
         limits.max_compute_work_group_size = [1_024, 1_024, 64];
-        limits.timestamp_period = 1.5;
         assert_eq!(
-            derive(&device, FAMILY_0),
+            derive(&device),
             Capabilities {
                 device_name: "device".to_owned(),
-                timestamps: QueueKindSet::EMPTY
-                    .with(QueueKind::Graphics)
-                    .with(QueueKind::Compute)
-                    .with(QueueKind::Transfer),
                 bc_compression: true,
                 limits: Limits {
                     max_texture_dimension_2d: 32_768,
                     max_compute_workgroup_size: [1_024, 1_024, 64],
-                    timestamp_period_ns: 1.5,
                 },
             },
         );

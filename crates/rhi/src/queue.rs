@@ -111,6 +111,11 @@ pub trait Queue: Debug + Send + Sync {
     /// transfers have a queue of their own.
     fn kind(&self) -> QueueKind;
 
+    /// How long one timestamp tick lasts on this queue, in nanoseconds, or
+    /// `None` if it can't write timestamps (design 0002, "Timestamps").
+    /// Device selection requires the graphics queue to write them.
+    fn timestamp_period_ns(&self) -> Option<f32>;
+
     /// Translates `commands` into a command buffer for this queue. May be
     /// called on any thread, any number at once.
     ///
@@ -120,8 +125,8 @@ pub trait Queue: Debug + Send + Sync {
     ///
     /// # Panics
     ///
-    /// Panics if `commands` names a stale handle, or has a debug region still
-    /// open.
+    /// Panics if `commands` names a stale handle, or has a debug region or
+    /// timing scope still open.
     fn translate(&self, commands: &CommandList) -> RhiResult<CommandBuffer>;
 
     /// Submits command buffers, which run once every timepoint in

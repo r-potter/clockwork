@@ -11,7 +11,7 @@ use clockwork_diagnostics::capture::TestSession;
 
 use super::VulkanRenderHardwareInterface;
 use crate::test_support::{self, RequiredCapabilities};
-use crate::{Capabilities, PresentCapabilities, QueueKind, QueueKindSet, RenderHardwareInterface};
+use crate::{Capabilities, PresentCapabilities, QueueKind, RenderHardwareInterface};
 
 /// An optional capability some T1 tests need, which some devices lack.
 ///
@@ -65,13 +65,13 @@ impl Capability {
         self,
         capabilities: &Capabilities,
         present: &PresentCapabilities,
-        dedicated: QueueKindSet,
+        dedicated: &[QueueKind],
     ) -> bool {
         match self {
             Self::PresentTiming => present.present_timing,
             Self::SwapchainMaintenance => present.swapchain_maintenance,
-            Self::DedicatedComputeQueue => dedicated.contains(QueueKind::Compute),
-            Self::DedicatedTransferQueue => dedicated.contains(QueueKind::Transfer),
+            Self::DedicatedComputeQueue => dedicated.contains(&QueueKind::Compute),
+            Self::DedicatedTransferQueue => dedicated.contains(&QueueKind::Transfer),
             Self::BcCompression => capabilities.bc_compression,
         }
     }
@@ -121,11 +121,11 @@ impl VulkanTestBackend {
     /// Panics if the device lacks `capability` and it's required.
     pub(crate) fn has(&self, capability: Capability) -> bool {
         let capabilities = self.rhi.resources().capabilities();
-        let dedicated = QueueKind::ALL
+        let dedicated: Vec<_> = QueueKind::ALL
             .into_iter()
             .filter(|&kind| self.rhi.queue(kind).kind() == kind)
-            .fold(QueueKindSet::EMPTY, QueueKindSet::with);
-        let supported = capability.is_in(capabilities, self.rhi.present_capabilities(), dedicated);
+            .collect();
+        let supported = capability.is_in(capabilities, self.rhi.present_capabilities(), &dedicated);
         if !supported {
             test_support::missing_capability(
                 capability.name(),
@@ -190,15 +190,13 @@ mod tests {
 
     /// Capabilities, present capabilities and dedicated queue kinds, with
     /// every optional one set to `has`.
-    fn capabilities(has: bool) -> (Capabilities, PresentCapabilities, QueueKindSet) {
+    fn capabilities(has: bool) -> (Capabilities, PresentCapabilities, Vec<QueueKind>) {
         let capabilities = Capabilities {
             device_name: "device".to_owned(),
-            timestamps: QueueKindSet::EMPTY.with(QueueKind::Graphics),
             bc_compression: has,
             limits: Limits {
                 max_texture_dimension_2d: 16_384,
                 max_compute_workgroup_size: [1_024, 1_024, 64],
-                timestamp_period_ns: 1.0,
             },
         };
         let present = PresentCapabilities {
@@ -206,11 +204,9 @@ mod tests {
             swapchain_maintenance: has,
         };
         let dedicated = if has {
-            QueueKindSet::EMPTY
-                .with(QueueKind::Compute)
-                .with(QueueKind::Transfer)
+            vec![QueueKind::Compute, QueueKind::Transfer]
         } else {
-            QueueKindSet::EMPTY
+            Vec::new()
         };
         (capabilities, present, dedicated)
     }
@@ -222,12 +218,12 @@ mod tests {
         for capability in Capability::ALL {
             let (with, with_present, with_dedicated) = capabilities(true);
             assert!(
-                capability.is_in(&with, &with_present, with_dedicated),
+                capability.is_in(&with, &with_present, &with_dedicated),
                 "{capability:?}"
             );
             let (without, without_present, without_dedicated) = capabilities(false);
             assert!(
-                !capability.is_in(&without, &without_present, without_dedicated),
+                !capability.is_in(&without, &without_present, &without_dedicated),
                 "{capability:?}"
             );
             for other in Capability::ALL
@@ -240,16 +236,12 @@ mod tests {
                 match other {
                     Capability::PresentTiming => present.present_timing = false,
                     Capability::SwapchainMaintenance => present.swapchain_maintenance = false,
-                    Capability::DedicatedComputeQueue => {
-                        dedicated = QueueKindSet::EMPTY.with(QueueKind::Transfer);
-                    }
-                    Capability::DedicatedTransferQueue => {
-                        dedicated = QueueKindSet::EMPTY.with(QueueKind::Compute);
-                    }
+                    Capability::DedicatedComputeQueue => dedicated = vec![QueueKind::Transfer],
+                    Capability::DedicatedTransferQueue => dedicated = vec![QueueKind::Compute],
                     Capability::BcCompression => capabilities.bc_compression = false,
                 }
                 assert!(
-                    capability.is_in(&capabilities, &present, dedicated),
+                    capability.is_in(&capabilities, &present, &dedicated),
                     "{capability:?}, {other:?}"
                 );
             }

@@ -232,7 +232,7 @@ pub(super) fn select(candidates: Vec<Candidate>, device_filter: Option<&str>) ->
         bail!("no Vulkan device meets the minimum requirements; see the log for details");
     };
     let queue_families = queue_families(&selected);
-    let capabilities = capabilities::derive(&selected.device, queue_families);
+    let capabilities = capabilities::derive(&selected.device);
     let present_capabilities = capabilities::derive_present(&selected.device);
     info!(
         "selected {} ({}), with queue families {queue_families:?}",
