@@ -104,13 +104,6 @@ pub(crate) enum Command {
     /// Opens a timing scope, whose label is `text` in the list's arena.
     BeginTiming {
         /// The scope's label, as a range of the arena.
-        #[cfg_attr(
-            not(test),
-            expect(
-                dead_code,
-                reason = "translation reports timings later in `rhi-timing`"
-            )
-        )]
         text: Range<usize>,
     },
     /// Closes the innermost open timing scope.

@@ -36,6 +36,7 @@ mod swapchain;
 #[cfg(test)]
 pub(crate) mod test_support;
 mod textures;
+mod timings;
 mod translate;
 mod validation;
 
@@ -826,10 +827,19 @@ impl Drop for VulkanDevice {
         // SAFETY: The heaps were created on this device, with memory from
         // this allocator, and the device is idle.
         unsafe { self.heaps.destroy(self.device.handle(), &self.allocator) };
+        // Timings nobody took still hold their chunks.
+        for kept in self.queues.drain_timings() {
+            for (_, timings) in kept {
+                // SAFETY: The device is idle, so no work uses their queries.
+                unsafe { self.recycle_timings(timings) };
+            }
+        }
         // SAFETY: The timelines were created on this device, and it's idle.
         unsafe { self.queues.destroy(self.device.handle()) };
         // SAFETY: The query pools were created on this device, it's idle, and
-        // no command buffer is left to hold one, since each holds the core.
+        // every chunk is on the free list: no command buffer is left to hold
+        // one, since each holds the core, and the queues' timings were
+        // recycled above.
         unsafe { self.query_pools.destroy(self.device.handle()) };
     }
 }

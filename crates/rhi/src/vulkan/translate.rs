@@ -10,7 +10,9 @@
 //!
 //! Lock order: the tables' read locks are taken while a command pool is
 //! claimed, never the other way around, and the queue's lock is never
-//! taken. The buffer table's read lock is always taken before the texture
+//! taken. Query chunks are claimed while the tables' read locks are held,
+//! and the query pools' lock is held only to take a chunk, so it's last in
+//! any order. The buffer table's read lock is always taken before the texture
 //! table's, and translation is the only code that holds both. A fixed order
 //! is what keeps them from deadlocking: the standard `RwLock` makes a new
 //! reader wait behind a waiting writer, so two threads taking the read
@@ -20,8 +22,8 @@
 #[cfg(test)]
 mod gpu_tests;
 
-use std::fmt;
 use std::sync::Arc;
+use std::{fmt, mem};
 
 use ash::vk;
 
@@ -30,6 +32,7 @@ use super::access::{Side, scope};
 use super::command_pools::CommandPool;
 use super::error::error;
 use super::queues::Queues;
+use super::timings::RecordedTimings;
 use crate::barrier::BarrierTarget;
 use crate::command_list::Command;
 use crate::copy::check_texture_copy;
@@ -50,6 +53,9 @@ pub(crate) struct VulkanCommandBuffer {
     /// Its translation's epoch, given back to the core's deferred queue
     /// when it's submitted or dropped, or `None` once it has been.
     translation: Option<Translation>,
+    /// Its timing scopes and their query chunks, which move to the queue
+    /// when it's submitted, or are recycled when it's dropped unsubmitted.
+    timings: RecordedTimings,
     /// The command list's label.
     label: Box<str>,
 }
@@ -80,22 +86,33 @@ impl VulkanCommandBuffer {
     }
 
     /// Recycles the pools of `command_buffers`, all in the submission that
-    /// reaches `timepoint`, reusable once the timeline reaches it, and gives
+    /// reaches `timepoint`, reusable once the timeline reaches it, gives
     /// their translations back to the deferred queue, which keeps what they
-    /// may use until then, taking its lock once for them all.
+    /// may use until then, taking its lock once for them all, and gives
+    /// their timings to the queue, until they're taken.
     pub(super) fn all_submitted(command_buffers: Vec<CommandBuffer>, timepoint: GpuTimepoint) {
         let Some(CommandBuffer(first)) = command_buffers.first() else {
             return;
         };
         let core = first.core.clone();
+        let queue = first.queue;
         let mut command_buffers = command_buffers;
-        // The translations are given back before any pool is recycled, so a
-        // panic while recycling can't drop one that's been taken.
+        // The translations and timings are given back before any pool is
+        // recycled, so a panic while recycling can't drop one that's been
+        // taken.
         let translations: Vec<_> = command_buffers
             .iter_mut()
             .filter_map(|CommandBuffer(command_buffer)| command_buffer.translation.take())
             .collect();
         core.end_submitted_translations(translations, timepoint);
+        let timings = command_buffers
+            .iter_mut()
+            .map(|CommandBuffer(command_buffer)| {
+                let timings = mem::take(&mut command_buffer.timings);
+                (command_buffer.label.clone(), timings)
+            })
+            .collect();
+        core.keep_submitted_timings(queue, timepoint, timings);
         for CommandBuffer(mut command_buffer) in command_buffers {
             if let Some(commands) = command_buffer.commands.take() {
                 core.queues
@@ -107,12 +124,15 @@ impl VulkanCommandBuffer {
 
 impl Drop for VulkanCommandBuffer {
     /// Recycles an unsubmitted command buffer's pool to its queue, for reuse
-    /// straight away, and gives its translation back to the deferred queue,
-    /// since no submission uses either.
+    /// straight away, and its query chunks, and gives its translation back
+    /// to the deferred queue, since no submission uses any of them.
     fn drop(&mut self) {
         if let Some(commands) = self.commands.take() {
             self.core.queues.recycle_pool(self.queue, commands, 0);
         }
+        // SAFETY: A submitted command buffer's timings were taken when it
+        // was submitted, so these, if any, were never submitted.
+        unsafe { self.core.recycle_timings(mem::take(&mut self.timings)) };
         if let Some(translation) = self.translation.take() {
             self.core.end_dropped_translation(translation);
         }
@@ -134,8 +154,8 @@ impl VulkanDevice {
     ///
     /// # Errors
     ///
-    /// Returns an error if a command pool can't be claimed, or the
-    /// command buffer can't be begun or ended.
+    /// Returns an error if a command pool or query chunk can't be claimed,
+    /// or the command buffer can't be begun or ended.
     ///
     /// # Panics
     ///
@@ -150,15 +170,17 @@ impl VulkanDevice {
         let device = self.device.handle();
         let commands = self.queues.claim_pool(device, id)?;
         let buffer = commands.buffer();
-        // From here, returning early or panicking recycles the pool and gives
-        // the translation back. The translation starts before any handle is
-        // looked up, so an object destroyed after its lookup is retired in
-        // this epoch or later, and kept while this is outstanding.
-        let command_buffer = VulkanCommandBuffer {
+        // From here, returning early or panicking recycles the pool and the
+        // query chunks, and gives the translation back. The translation
+        // starts before any handle is looked up, so an object destroyed after
+        // its lookup is retired in this epoch or later, and kept while this
+        // is outstanding.
+        let mut command_buffer = VulkanCommandBuffer {
             core: self.clone(),
             queue: id,
             commands: Some(commands),
             translation: Some(self.begin_translation()),
+            timings: RecordedTimings::default(),
             label: list.label().into(),
         };
         let begin_info = vk::CommandBufferBeginInfo::default()
@@ -169,7 +191,7 @@ impl VulkanDevice {
         unsafe { device.begin_command_buffer(buffer, &begin_info) }
             .map_err(|result| error(result, "begin the command buffer for", list.label()))?;
         // SAFETY: The command buffer is recording, for this queue's family.
-        unsafe { self.record(buffer, id, list) };
+        unsafe { self.record(buffer, id, list, &mut command_buffer.timings) }?;
         // SAFETY: The command buffer is recording.
         unsafe { device.end_command_buffer(buffer) }
             .map_err(|result| error(result, "record the command buffer for", list.label()))?;
@@ -177,7 +199,16 @@ impl VulkanDevice {
         Ok(CommandBuffer(command_buffer))
     }
 
-    /// Records `list`'s commands into `buffer`, for the queue `id`.
+    /// Records `list`'s commands into `buffer`, for the queue `id`, and its
+    /// timing scopes into `timings`.
+    ///
+    /// A timing scope's timestamps are written at `ALL_COMMANDS`, so its end
+    /// is written once every command before it has completed. On a queue
+    /// that can't write timestamps, scopes are recorded with no queries.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if a query chunk can't be claimed.
     ///
     /// # Safety
     ///
@@ -188,8 +219,15 @@ impl VulkanDevice {
     ///
     /// Panics if `list` names a stale handle, or has a queue transfer
     /// neither from nor to that queue.
-    unsafe fn record(&self, buffer: vk::CommandBuffer, id: QueueId, list: &CommandList) {
+    unsafe fn record(
+        &self,
+        buffer: vk::CommandBuffer,
+        id: QueueId,
+        list: &CommandList,
+        timings: &mut RecordedTimings,
+    ) -> RhiResult<()> {
         let device = self.device.handle();
+        let writes_timestamps = self.queues.clock(id).is_some();
         let buffers = self.lock_buffers_for_reading();
         // After the buffer table's, as the lock order above requires.
         let textures = self.lock_textures_for_reading();
@@ -454,11 +492,60 @@ impl VulkanDevice {
                         unsafe { debug_utils.cmd_insert_debug_utils_label(buffer, &label) };
                     }
                 }
-                // Timestamps aren't written until query pools arrive, later in
-                // rhi-timing, so a scope times nothing yet.
-                Command::BeginTiming { .. } | Command::EndTiming => {}
+                Command::BeginTiming { text } => {
+                    // SAFETY: Guaranteed by the caller, and `writes_timestamps`
+                    // is whether this queue has a clock, so whether its family
+                    // can write timestamps.
+                    let query =
+                        unsafe { self.write_timestamp(buffer, writes_timestamps, timings) }?;
+                    timings.begin(list.text(text), query);
+                }
+                Command::EndTiming => {
+                    // SAFETY: As above.
+                    let query =
+                        unsafe { self.write_timestamp(buffer, writes_timestamps, timings) }?;
+                    timings.end(query);
+                }
             }
         }
+        Ok(())
+    }
+
+    /// Writes a timestamp into `buffer` at `ALL_COMMANDS`, to the next of
+    /// `timings`' queries, and returns that query's number, if
+    /// `writes_timestamps`. Otherwise writes nothing, and returns `None`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if a query chunk can't be claimed.
+    ///
+    /// # Safety
+    ///
+    /// `buffer` must be recording, on this device, and no other thread may
+    /// use it. If `writes_timestamps`, it must be for a family that can
+    /// write timestamps.
+    unsafe fn write_timestamp(
+        &self,
+        buffer: vk::CommandBuffer,
+        writes_timestamps: bool,
+        timings: &mut RecordedTimings,
+    ) -> RhiResult<Option<u32>> {
+        if !writes_timestamps {
+            return Ok(None);
+        }
+        let (query, pool, index) = timings.next_query(self)?;
+        // SAFETY: Guaranteed by the caller, and the query is in a chunk this
+        // command buffer claimed, so it's reset and no other command buffer
+        // writes it.
+        unsafe {
+            self.device.handle().cmd_write_timestamp2(
+                buffer,
+                vk::PipelineStageFlags2::ALL_COMMANDS,
+                pool,
+                index,
+            );
+        }
+        Ok(Some(query))
     }
 }
 
