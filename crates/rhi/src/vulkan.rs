@@ -25,6 +25,15 @@ mod error;
 mod frames;
 #[cfg(test)]
 mod gpu_tests;
+#[cfg(test)]
+#[allow(
+    missing_docs,
+    clippy::all,
+    clippy::pedantic,
+    unsafe_code,
+    clippy::undocumented_unsafe_blocks
+)]
+mod heap_prototype;
 mod memory;
 mod physical_device;
 mod query_pools;

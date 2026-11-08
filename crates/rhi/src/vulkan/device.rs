@@ -87,6 +87,10 @@ impl LogicalDevice {
             ext::descriptor_heap::NAME.as_ptr(),
             khr::device_address_commands::NAME.as_ptr(),
         ];
+        let untyped = physical_device.supports_extension(khr::shader_untyped_pointers::NAME);
+        if untyped {
+            extensions.push(khr::shader_untyped_pointers::NAME.as_ptr());
+        }
         if queue_families.present.is_some() {
             extensions.push(khr::swapchain::NAME.as_ptr());
         }
@@ -101,7 +105,10 @@ impl LogicalDevice {
         let mut vulkan12_features = vk::PhysicalDeviceVulkan12Features::default()
             .buffer_device_address(true)
             .timeline_semaphore(true)
-            .host_query_reset(true);
+            .host_query_reset(true)
+            .runtime_descriptor_array(true);
+        let mut untyped_features = vk::PhysicalDeviceShaderUntypedPointersFeaturesKHR::default()
+            .shader_untyped_pointers(untyped);
         let mut vulkan13_features = vk::PhysicalDeviceVulkan13Features::default()
             .dynamic_rendering(true)
             .synchronization2(true);
@@ -130,7 +137,8 @@ impl LogicalDevice {
             .push(&mut vulkan14_features)
             .push(&mut shader_object_features)
             .push(&mut descriptor_heap_features)
-            .push(&mut device_address_commands_features);
+            .push(&mut device_address_commands_features)
+            .push(&mut untyped_features);
         // SAFETY: `physical_device` was enumerated from `instance`, and
         // `create_info` and the structures it points to are valid for the
         // duration of the call. Selection checked that the queue families and
