@@ -35,8 +35,8 @@ pub struct CommandList {
     label: String,
     /// The commands, in recording order.
     commands: Vec<Command>,
-    /// The text of every debug region and label, which commands refer to by
-    /// range.
+    /// The text of every debug region and label, and every timing scope's
+    /// label, which commands refer to by range.
     text: String,
     /// Every barrier, which commands refer to by range.
     barriers: Vec<Barrier>,
@@ -45,6 +45,8 @@ pub struct CommandList {
     texture_copies: Vec<BufferTextureCopy>,
     /// How many debug regions are open.
     open_regions: u32,
+    /// How many timing scopes are open.
+    open_timings: u32,
 }
 
 /// A recorded command. Variable-length data is in the list's arena.
@@ -99,6 +101,20 @@ pub(crate) enum Command {
         /// The label's text, as a range of the arena.
         text: Range<usize>,
     },
+    /// Opens a timing scope, whose label is `text` in the list's arena.
+    BeginTiming {
+        /// The scope's label, as a range of the arena.
+        #[cfg_attr(
+            not(test),
+            expect(
+                dead_code,
+                reason = "translation reports timings later in `rhi-timing`"
+            )
+        )]
+        text: Range<usize>,
+    },
+    /// Closes the innermost open timing scope.
+    EndTiming,
 }
 
 impl CommandList {
@@ -111,6 +127,7 @@ impl CommandList {
             barriers: Vec::new(),
             texture_copies: Vec::new(),
             open_regions: 0,
+            open_timings: 0,
         }
     }
 
@@ -139,18 +156,24 @@ impl CommandList {
         &self.texture_copies[index]
     }
 
-    /// Checks that the list can be translated: that every debug region it
-    /// opened is closed.
+    /// Checks that the list can be translated: that every debug region and
+    /// timing scope it opened is closed.
     ///
     /// # Panics
     ///
-    /// Panics, naming the list, if a region is still open.
+    /// Panics, naming the list, if a region or scope is still open.
     pub(crate) fn check_complete(&self) {
         assert!(
             self.open_regions == 0,
-            "command list \"{}\" is translated with {} debug regions still open",
+            "command list \"{}\" is translated with {} still open",
             self.label,
-            self.open_regions,
+            count(self.open_regions, "debug region"),
+        );
+        assert!(
+            self.open_timings == 0,
+            "command list \"{}\" is translated with {} still open",
+            self.label,
+            count(self.open_timings, "timing scope"),
         );
     }
 
@@ -304,6 +327,31 @@ impl CommandList {
         self.commands.push(Command::InsertDebugLabel { text });
     }
 
+    /// Opens a timing scope called `label`, which times, on the GPU, the
+    /// commands recorded until the matching [`end_timing`](Self::end_timing)
+    /// (design 0002, "Timestamps"). Scopes nest, independently of debug
+    /// regions.
+    pub fn begin_timing(&mut self, label: &str) {
+        let text = self.push_text(label);
+        self.commands.push(Command::BeginTiming { text });
+        self.open_timings += 1;
+    }
+
+    /// Closes the innermost open timing scope.
+    ///
+    /// # Panics
+    ///
+    /// Panics if no scope is open.
+    pub fn end_timing(&mut self) {
+        assert!(
+            self.open_timings > 0,
+            "command list \"{}\" ends a timing scope, but none is open",
+            self.label,
+        );
+        self.open_timings -= 1;
+        self.commands.push(Command::EndTiming);
+    }
+
     /// Appends `text` to the arena, returning its range.
     fn push_text(&mut self, text: &str) -> Range<usize> {
         let start = self.text.len();
@@ -331,6 +379,15 @@ impl CommandList {
             self.label,
             address.0,
         );
+    }
+}
+
+/// `n` of `noun`, for a message: "1 debug region" or "2 debug regions".
+fn count(n: u32, noun: &str) -> String {
+    if n == 1 {
+        format!("1 {noun}")
+    } else {
+        format!("{n} {noun}s")
     }
 }
 
@@ -379,6 +436,10 @@ pub(crate) enum RecordedCommand<'a> {
     EndDebugRegion,
     /// See [`CommandList::insert_debug_label`].
     InsertDebugLabel(&'a str),
+    /// See [`CommandList::begin_timing`].
+    BeginTiming(&'a str),
+    /// See [`CommandList::end_timing`].
+    EndTiming,
 }
 
 #[cfg(test)]
@@ -422,6 +483,10 @@ impl CommandList {
                 Command::InsertDebugLabel { ref text } => {
                     RecordedCommand::InsertDebugLabel(&self.text[text.clone()])
                 }
+                Command::BeginTiming { ref text } => {
+                    RecordedCommand::BeginTiming(&self.text[text.clone()])
+                }
+                Command::EndTiming => RecordedCommand::EndTiming,
             })
             .collect()
     }
@@ -440,7 +505,8 @@ const _: () = {
 
 #[cfg(test)]
 mod tests {
-    //! T0 tests of recording commands and its checks (design 0002, R7).
+    //! T0 tests of recording commands and its checks (design 0002, R7 and
+    //! R22).
 
     use super::*;
     use crate::handle::HandleTable;
@@ -484,13 +550,86 @@ mod tests {
     /// Translating a list with a debug region still open panics, naming the
     /// list.
     #[test]
-    #[should_panic(
-        expected = "command list \"open\" is translated with 1 debug regions still open"
-    )]
+    #[should_panic(expected = "command list \"open\" is translated with 1 debug region still open")]
     fn open_regions_are_incomplete() {
         let mut list = CommandList::new("open");
         list.begin_debug_region("outer");
         list.check_complete();
+    }
+
+    /// Timing scopes are recorded in order with their labels, nest, and
+    /// interleave with debug regions, and a list whose scopes are closed
+    /// can be translated.
+    #[test]
+    fn timing_scopes_are_recorded() {
+        let mut list = CommandList::new("frame");
+        list.begin_timing("frame");
+        list.begin_debug_region("shadows");
+        list.begin_timing("shadows");
+        list.end_debug_region();
+        list.end_timing();
+        list.begin_timing("lighting");
+        list.end_timing();
+        list.end_timing();
+        list.check_complete();
+        assert_eq!(
+            list.recorded(),
+            [
+                RecordedCommand::BeginTiming("frame"),
+                RecordedCommand::BeginDebugRegion("shadows"),
+                RecordedCommand::BeginTiming("shadows"),
+                RecordedCommand::EndDebugRegion,
+                RecordedCommand::EndTiming,
+                RecordedCommand::BeginTiming("lighting"),
+                RecordedCommand::EndTiming,
+                RecordedCommand::EndTiming,
+            ],
+        );
+    }
+
+    /// Translating a list with a timing scope still open panics, naming
+    /// the list and how many are open.
+    #[test]
+    #[should_panic(
+        expected = "command list \"open\" is translated with 2 timing scopes still open"
+    )]
+    fn open_timing_scopes_are_incomplete() {
+        let mut list = CommandList::new("open");
+        list.begin_timing("outer");
+        list.begin_timing("inner");
+        list.begin_timing("closed");
+        list.end_timing();
+        list.check_complete();
+    }
+
+    /// Ending a timing scope with none open panics, naming the list.
+    #[test]
+    #[should_panic(expected = "command list \"unbalanced\" ends a timing scope, but none is open")]
+    fn ending_an_unopened_timing_scope_panics() {
+        let mut list = CommandList::new("unbalanced");
+        list.begin_timing("one");
+        list.end_timing();
+        list.end_timing();
+    }
+
+    /// A debug region isn't a timing scope, so ending a scope can't close
+    /// one.
+    #[test]
+    #[should_panic(expected = "command list \"region\" ends a timing scope, but none is open")]
+    fn regions_open_no_timing_scope() {
+        let mut list = CommandList::new("region");
+        list.begin_debug_region("pass");
+        list.end_timing();
+    }
+
+    /// A timing scope isn't a debug region, so ending a region can't close
+    /// one.
+    #[test]
+    #[should_panic(expected = "command list \"scope\" ends a debug region, but none is open")]
+    fn timing_scopes_open_no_region() {
+        let mut list = CommandList::new("scope");
+        list.begin_timing("pass");
+        list.end_debug_region();
     }
 
     /// Copies between buffers and textures are recorded in order, each with

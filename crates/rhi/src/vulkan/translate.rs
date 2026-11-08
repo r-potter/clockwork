@@ -139,7 +139,8 @@ impl VulkanDevice {
     ///
     /// # Panics
     ///
-    /// Panics if `list` has a debug region open, or names a stale handle.
+    /// Panics if `list` has a debug region or timing scope open, or names a
+    /// stale handle.
     pub(super) fn translate(
         self: &Arc<Self>,
         id: QueueId,
@@ -453,6 +454,9 @@ impl VulkanDevice {
                         unsafe { debug_utils.cmd_insert_debug_utils_label(buffer, &label) };
                     }
                 }
+                // Timestamps aren't written until query pools arrive, later in
+                // rhi-timing, so a scope times nothing yet.
+                Command::BeginTiming { .. } | Command::EndTiming => {}
             }
         }
     }
