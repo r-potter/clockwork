@@ -178,23 +178,6 @@ const REQUIREMENTS: &[Requirement] = &[
         },
     },
     Requirement {
-        // `slangc` steps through a heap by one descriptor's size, while
-        // `HeapLayout` places slots at that size rounded up to its alignment,
-        // so the two agree only when no rounding is needed (design 0002,
-        // "Binding model").
-        description: "has descriptor sizes that are multiples of their alignments",
-        is_met: |candidate| {
-            let properties = &candidate.device.properties.descriptor_heap;
-            is_multiple(
-                properties.image_descriptor_size,
-                properties.image_descriptor_alignment,
-            ) && is_multiple(
-                properties.sampler_descriptor_size,
-                properties.sampler_descriptor_alignment,
-            )
-        },
-    },
-    Requirement {
         // Both rendering and its timings need it (design 0002,
         // "Timestamps").
         description: "has a queue family that supports graphics and timestamps",
@@ -312,12 +295,6 @@ fn filter(candidates: Vec<Candidate>, device_filter: Option<&str>) -> Result<Vec
         info!("ignored {name}: its name doesn't contain \"{device_filter}\"");
     }
     Ok(matching)
-}
-
-/// Whether `size` is a multiple of `alignment`. Every size is a multiple of
-/// an alignment of 0, which means none, as [`HeapLayout`] treats it.
-fn is_multiple(size: vk::DeviceSize, alignment: vk::DeviceSize) -> bool {
-    size.is_multiple_of(alignment.max(1))
 }
 
 /// Returns the descriptions of the requirements that `candidate` does not
@@ -798,28 +775,6 @@ mod tests {
                 u64::from(SAMPLER_HEAP_CAPACITY) * heap.sampler_descriptor_size;
             heap.min_sampler_heap_reserved_range = 1;
         });
-    }
-
-    /// Image and sampler descriptor sizes must each be a multiple of their
-    /// alignment, which is where `slangc` looks for slots. An alignment of 0
-    /// is no alignment.
-    #[test]
-    fn requires_descriptor_sizes_that_are_multiples_of_their_alignments() {
-        assert_rejected(|device| {
-            let heap = &mut device.properties.descriptor_heap;
-            heap.image_descriptor_size = 48;
-        });
-        assert_rejected(|device| {
-            let heap = &mut device.properties.descriptor_heap;
-            heap.sampler_descriptor_size = 16;
-            heap.sampler_descriptor_alignment = 32;
-        });
-        let mut device = device("device", vk::PhysicalDeviceType::DISCRETE_GPU, 8 * GIB);
-        let heap = &mut device.properties.descriptor_heap;
-        heap.image_descriptor_size = 64;
-        heap.sampler_descriptor_size = 24;
-        heap.sampler_descriptor_alignment = 0;
-        assert!(select(headless(vec![device]), None).is_ok());
     }
 
     /// Rendering's timings need timestamps on the graphics queue (design
