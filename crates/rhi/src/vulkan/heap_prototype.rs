@@ -64,8 +64,7 @@ fn run(variant: Variant) {
         .supports_extension(ash::khr::shader_untyped_pointers::NAME);
     eprintln!("{variant:?}: VK_KHR_shader_untyped_pointers supported: {untyped}");
     if !untyped && !matches!(variant, Variant::Mapped) {
-        eprintln!("{variant:?}: SKIPPED, no VK_KHR_shader_untyped_pointers");
-        return;
+        panic!("{variant:?}: no VK_KHR_shader_untyped_pointers");
     }
     let resources = backend.resources();
 
