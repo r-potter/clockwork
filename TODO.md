@@ -237,6 +237,16 @@ Outstanding tasks and future work.
       (`crates/rhi/src/vulkan/translate/gpu_tests.rs`), so a later driver
       runs them, and uploads to textures, from `rhi-streaming` on, won't
       work there unless design 0002's fallback lands ("Risks").
+- [ ] **Make `CLOCKWORK_VALIDATION=gpu` usable.** With GPU-assisted
+      validation, every T1 test fails on the layer's own warnings at
+      start-up: `VALIDATION-SETTINGS`, for running GPU-AV alongside core
+      validation, and `WARNING-Setting-Limit-Adjusted`, as GPU-AV reserves
+      some of the device's limits. Neither is a problem in the engine, so
+      either suppress them when GPU-AV is requested, or have
+      `test_support` turn core validation off with it. Design 0002 relies
+      on GPU-AV for binding tests ("Risks"), and `rhi-shaders` is where
+      they start. Found while prototyping heap access, where GPU-AV
+      reported nothing else.
 - [ ] **Move CI off actions that run on Node.js 20.** GitHub warns that
       `actions/cache@v4` targets Node.js 20, which is deprecated, and runs
       it on Node.js 24 instead. Move to a version that targets Node.js 24
