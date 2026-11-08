@@ -20,6 +20,7 @@ use tracing::Level;
 use super::queues::QueueRole;
 use super::test_support::{Capability, TestCommands, VulkanTestBackend};
 use crate::handle::LEAK_TARGET;
+use crate::test_shaders;
 use crate::{
     AddressMode, BufferDesc, BufferUsage, Extent3d, Filter, Format, MAX_PUSH_DATA_SIZE,
     MemoryLocation, QueueKind, RenderHardwareInterface, SamplerDesc, TextureDesc, TextureDimension,
@@ -267,6 +268,7 @@ fn leaked_objects_are_reported() {
          \"vertices\", \"staging\"",
         "1 texture was never destroyed, and was freed with the device: \"albedo\"",
         "1 sampler was never destroyed, and was freed with the device: \"linear\"",
+        "1 program was never destroyed, and was freed with the device: \"write value\"",
     ] {
         session.expect(Level::WARN, LEAK_TARGET, move |event| {
             event.message == report
@@ -304,6 +306,9 @@ fn leaked_objects_are_reported() {
             mip_filter: Filter::Linear,
             address_modes: [AddressMode::Repeat; 3],
         })
+        .unwrap();
+    resources
+        .create_program(&test_shaders::write_value().desc())
         .unwrap();
     drop(backend);
 }

@@ -13,8 +13,9 @@ use std::path::PathBuf;
 use std::process::Command;
 
 /// The shaders to compile, as file names in `shaders/` without the `.slang`
-/// extension.
-const SHADERS: &[&str] = &["triangle"];
+/// extension. `write_value` is used only by tests (see
+/// `src/test_shaders.rs`).
+const SHADERS: &[&str] = &["triangle", "write_value"];
 
 /// Finds `slangc`, then compiles each shader in [`SHADERS`].
 ///

@@ -1,8 +1,8 @@
 //! Deferred destruction in the Vulkan backend (design 0002, "Deferred
 //! destruction", R10).
 //!
-//! Destroying a buffer, texture or sampler takes it out of its table, so
-//! its handle is stale at once, and retires it into the core's
+//! Destroying a buffer, texture, sampler or program takes it out of its
+//! table, so its handle is stale at once, and retires it into the core's
 //! [`DeferredQueue`]. It's freed once no command buffer translated before
 //! the destruction is outstanding: after a submission, once its work is
 //! submitted, if anything is retired or enough submissions are pending to
@@ -23,6 +23,7 @@ use tracing::debug;
 
 use super::VulkanDevice;
 use super::buffers::BufferEntry;
+use super::programs::ProgramEntry;
 use super::samplers::SamplerEntry;
 use super::textures::TextureEntry;
 use crate::GpuTimepoint;
@@ -37,6 +38,8 @@ pub(super) enum Retired {
     Texture(TextureEntry),
     /// A sampler's slot in the sampler heap.
     Sampler(SamplerEntry),
+    /// A program's shader objects.
+    Program(ProgramEntry),
 }
 
 impl VulkanDevice {
@@ -140,6 +143,8 @@ impl VulkanDevice {
             // SAFETY: Guaranteed by the caller.
             Retired::Texture(entry) => unsafe { self.free_texture(entry) },
             Retired::Sampler(entry) => self.free_sampler(entry),
+            // SAFETY: Guaranteed by the caller.
+            Retired::Program(entry) => unsafe { self.free_program(entry) },
         }
     }
 
