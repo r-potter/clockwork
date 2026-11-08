@@ -33,7 +33,8 @@ mod gpu_tests;
     unsafe_code,
     clippy::undocumented_unsafe_blocks
 )]
-mod heap_prototype;
+#[path = "vulkan/heap_prototype.rs"]
+mod heap_prototype_gpu_tests;
 mod memory;
 mod physical_device;
 mod query_pools;
