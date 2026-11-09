@@ -57,6 +57,7 @@ mod test_shaders;
 mod test_support;
 mod texture;
 mod timing;
+mod view;
 mod vulkan;
 
 use std::fmt::{self, Debug};
@@ -81,6 +82,7 @@ pub use texture::{
     Extent3d, Format, FormatInfo, Texture, TextureDesc, TextureDimension, TextureUsage,
 };
 pub use timing::{CommandBufferTimings, SubmissionTimings, Timing};
+pub use view::TextureView;
 use vulkan::VulkanRenderHardwareInterface;
 
 /// A window a backend can render to.
@@ -415,6 +417,24 @@ pub trait GpuResources: Debug + Send + Sync {
     ///
     /// Panics if the handle is stale.
     fn destroy_texture(&self, texture: Texture);
+
+    /// The slot in the resource heap of `view` of the texture, for shaders
+    /// to index (design 0002, "Subresources and views"). Its descriptor is
+    /// written the first time the view is asked for, and the same slot is
+    /// returned afterwards, however the view names the same part. The slot
+    /// is freed with the texture.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RhiError::DescriptorHeapFull`] if the resource heap has no
+    /// free slot, or [`RhiError::Other`] if the descriptor can't be written.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the handle is stale, the subresource is out of range, a
+    /// storage view covers more than one mip, or the texture's usage
+    /// doesn't allow the view.
+    fn texture_index(&self, texture: Texture, view: TextureView) -> RhiResult<DescriptorIndex>;
 
     /// Creates a sampler, as a slot in the sampler heap.
     ///

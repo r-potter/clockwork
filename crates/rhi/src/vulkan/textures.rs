@@ -4,17 +4,28 @@
 //! Each texture is a `VkImage` with optimal tiling and exclusive sharing,
 //! bound to GPU-only memory from the
 //! [`MemoryAllocator`](super::memory::MemoryAllocator), in image blocks.
-//! The [`VulkanDevice`]'s texture table holds them. Views, and their slots
-//! in the descriptor heaps, are created when first asked for, by later
-//! parts of design 0002.
+//! The [`VulkanDevice`]'s texture table holds them.
+//!
+//! A view's descriptor is written into a slot in the resource heap the
+//! first time [`texture_index`](crate::GpuResources::texture_index) asks
+//! for it, and its slot cached in the texture's entry, behind a `Mutex` of
+//! its own, so writing one never takes the table's write lock (design
+//! 0002, "Subresources and views"). `VK_EXT_descriptor_heap` writes an
+//! image descriptor from a `VkImageViewCreateInfo`, so no `VkImageView` is
+//! created. The slots are freed with the texture.
 //!
 //! Lock order: as for buffers, the texture table is never held while
-//! allocating or freeing memory.
+//! allocating or freeing memory. Writing a view takes the table's read
+//! lock, then the entry's view lock, then the resource heap's slot
+//! allocator. Freeing a texture's slots takes only the allocator, since
+//! the entry is out of the table by then.
 
 #[cfg(test)]
 mod gpu_tests;
 
-use std::sync::{PoisonError, RwLockReadGuard, RwLockWriteGuard};
+use std::collections::HashMap;
+use std::slice;
+use std::sync::{Mutex, PoisonError, RwLockReadGuard, RwLockWriteGuard};
 
 use ash::vk;
 
@@ -24,9 +35,10 @@ use super::error::{error, error_from_chain};
 use super::memory::{MemoryAllocation, MemoryRequest, Resource, image_memory_requirements};
 use crate::copy::CopiedTexture;
 use crate::handle::HandleTable;
+use crate::view::{ViewType, ViewedTexture};
 use crate::{
-    Extent3d, Format, FormatInfo, MemoryLocation, RhiResult, Subresource, Texture, TextureDesc,
-    TextureDimension, TextureUsage,
+    Access, DescriptorIndex, Extent3d, Format, FormatInfo, HeapKind, MemoryLocation, RhiError,
+    RhiResult, Subresource, Texture, TextureDesc, TextureDimension, TextureUsage, TextureView,
 };
 
 /// A texture in the texture table.
@@ -36,14 +48,21 @@ pub(super) struct TextureEntry {
     image: vk::Image,
     /// The memory it's bound to.
     allocation: MemoryAllocation,
-    /// Its format's block layout.
-    format: FormatInfo,
+    /// Its format.
+    format: Format,
+    /// Its shape.
+    dimension: TextureDimension,
+    /// How it's used.
+    usage: TextureUsage,
     /// The size of its largest mip.
     extent: Extent3d,
     /// How many mips it has.
     mip_count: u32,
     /// How many array layers it has.
     layer_count: u32,
+    /// The slot in the resource heap of each view asked for, by the view
+    /// with its ranges resolved.
+    views: Mutex<HashMap<TextureView, u32>>,
 }
 
 impl TextureEntry {
@@ -54,22 +73,33 @@ impl TextureEntry {
 
     /// The aspects its format has, for the commands that name them.
     pub(super) fn aspect(&self) -> vk::ImageAspectFlags {
-        aspect(self.format)
+        aspect(self.format())
     }
 
     /// Its format's block layout.
     pub(super) fn format(&self) -> FormatInfo {
-        self.format
+        self.format.info()
     }
 
     /// What copy checks need to know about the texture labelled `label`.
     pub(super) fn copied<'a>(&self, label: &'a str) -> CopiedTexture<'a> {
         CopiedTexture {
             label,
-            format: self.format,
+            format: self.format(),
             extent: self.extent,
             mip_count: self.mip_count,
             layer_count: self.layer_count,
+        }
+    }
+
+    /// What view checks need to know about the texture labelled `label`.
+    fn viewed<'a>(&self, label: &'a str) -> ViewedTexture<'a> {
+        ViewedTexture {
+            label,
+            dimension: self.dimension,
+            mip_count: self.mip_count,
+            layer_count: self.layer_count,
+            usage: self.usage,
         }
     }
 
@@ -120,6 +150,35 @@ impl From<Format> for vk::Format {
             Format::Depth32Float => Self::D32_SFLOAT,
         }
     }
+}
+
+impl From<ViewType> for vk::ImageViewType {
+    /// The Vulkan image view type for a view of `view_type`.
+    fn from(view_type: ViewType) -> Self {
+        match view_type {
+            ViewType::D2 => Self::TYPE_2D,
+            ViewType::D2Array => Self::TYPE_2D_ARRAY,
+            ViewType::D3 => Self::TYPE_3D,
+            ViewType::Cube => Self::CUBE,
+        }
+    }
+}
+
+/// The image layout and descriptor type of `view`: the layout of the
+/// accesses shaders make through it.
+fn view_layout_and_type(view: &TextureView) -> (vk::ImageLayout, vk::DescriptorType) {
+    let (access, descriptor_type) = match view {
+        TextureView::Sampled(_) => (
+            Access::ComputeShaderSampledRead,
+            vk::DescriptorType::SAMPLED_IMAGE,
+        ),
+        TextureView::Storage(_) => (
+            Access::ComputeShaderWrite,
+            vk::DescriptorType::STORAGE_IMAGE,
+        ),
+    };
+    let layout = access.layout().expect("shader accesses apply to textures");
+    (vk::ImageLayout::from(layout), descriptor_type)
 }
 
 /// Each usage, with the Vulkan image usage and the optimal-tiling format
@@ -192,9 +251,9 @@ impl VulkanDevice {
     ///
     /// # Errors
     ///
-    /// Returns [`RhiError::OutOfDeviceMemory`](crate::RhiError::OutOfDeviceMemory)
-    /// if device memory runs out, or [`RhiError::Other`](crate::RhiError::Other)
-    /// if creating, allocating or binding fails otherwise.
+    /// Returns [`RhiError::OutOfDeviceMemory`] if device memory runs out, or
+    /// [`RhiError::Other`] if creating, allocating or binding fails
+    /// otherwise.
     ///
     /// # Panics
     ///
@@ -278,10 +337,13 @@ impl VulkanDevice {
         let entry = TextureEntry {
             image,
             allocation,
-            format: desc.format.info(),
+            format: desc.format,
+            dimension: desc.dimension,
+            usage: desc.usage,
             extent: desc.extent,
             mip_count: desc.mip_levels,
             layer_count: desc.array_layers,
+            views: Mutex::new(HashMap::new()),
         };
         Ok(Texture::from_handle(
             self.lock_textures_for_writing().insert(desc.label, entry),
@@ -299,17 +361,97 @@ impl VulkanDevice {
         self.retire(Retired::Texture(entry));
     }
 
-    /// Destroys a texture taken out of the table, and frees its memory.
+    /// Destroys a texture taken out of the table, frees its memory, and
+    /// frees its views' slots.
     ///
     /// # Safety
     ///
-    /// No submitted work may still use the texture.
+    /// No submitted work may still use the texture or its views.
     pub(super) unsafe fn free_texture(&self, entry: TextureEntry) {
         // SAFETY: The image was created on this device, and the caller
         // guarantees that nothing uses it. It's destroyed before its memory
         // is freed.
         unsafe { self.device.handle().destroy_image(entry.image, None) };
         self.allocator.free(entry.allocation);
+        let views = entry
+            .views
+            .into_inner()
+            .unwrap_or_else(PoisonError::into_inner);
+        for slot in views.into_values() {
+            self.heaps.resource.free_slot(slot);
+        }
+    }
+
+    /// The slot in the resource heap of `view` of `texture`, writing its
+    /// descriptor into a free slot the first time it's asked for.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RhiError::DescriptorHeapFull`] if the resource heap has no
+    /// free slot, or [`RhiError::Other`] if the descriptor can't be
+    /// written.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the handle is stale, or the view is invalid (see
+    /// [`TextureView::resolve`]).
+    pub(super) fn texture_entry_index(
+        &self,
+        texture: Texture,
+        view: &TextureView,
+    ) -> RhiResult<DescriptorIndex> {
+        let textures = self.lock_textures_for_reading();
+        let (label, entry) = textures
+            .lookup(texture.handle())
+            .unwrap_or_else(|err| panic!("{err}"));
+        let (view, view_type) = view.resolve(&entry.viewed(label));
+        // Held while the descriptor is written, so two threads asking for a
+        // new view at once write it once.
+        let mut views = entry.views.lock().unwrap_or_else(PoisonError::into_inner);
+        if let Some(&slot) = views.get(&view) {
+            return Ok(DescriptorIndex(slot));
+        }
+        let heap = &self.heaps.resource;
+        let slot = heap
+            .allocate_slot()
+            .ok_or_else(|| RhiError::DescriptorHeapFull {
+                heap: HeapKind::Resource,
+                label: label.to_owned(),
+            })?;
+        let image_view_create_info = vk::ImageViewCreateInfo::default()
+            .image(entry.image)
+            .view_type(vk::ImageViewType::from(view_type))
+            .format(vk::Format::from(entry.format))
+            .subresource_range(entry.subresource_range(label, view.subresource()));
+        let (layout, descriptor_type) = view_layout_and_type(&view);
+        let image_descriptor_info = vk::ImageDescriptorInfoEXT::default()
+            .view(&image_view_create_info)
+            .layout(layout);
+        let resource_descriptor_info = vk::ResourceDescriptorInfoEXT::default()
+            .ty(descriptor_type)
+            .data(vk::ResourceDescriptorDataEXT {
+                p_image: &raw const image_descriptor_info,
+            });
+        let slot_range = heap.slot_address_range(slot);
+        // SAFETY: The infos are valid for the call, and name a live image,
+        // since the table is locked, with a subresource inside it, a view
+        // type its dimension allows, and a usage it has. `slot_range` is the
+        // slot's range in the heap's mapped memory, a stride long, which
+        // holds an image descriptor. The slot was just handed to this
+        // thread, so nothing else writes to the range, and no submitted work
+        // reads it, since a slot is only freed once nothing can.
+        let written = unsafe {
+            self.device.descriptor_heap().write_resource_descriptors(
+                slice::from_ref(&resource_descriptor_info),
+                slice::from_ref(&slot_range),
+            )
+        };
+        if let Err(result) = written {
+            heap.free_slot(slot);
+            return Err(error(result, "write a view descriptor for texture", label));
+        }
+        views.insert(view, slot);
+        Ok(DescriptorIndex(slot))
     }
 
     /// Locks the texture table for reading, recovering it if a panic
@@ -379,6 +521,37 @@ mod tests {
             };
             assert_eq!(aspect(format.info()), expected, "{format:?}");
         }
+    }
+
+    /// Each view type has a Vulkan view type of its own.
+    #[test]
+    fn view_types_map_to_vulkan_view_types() {
+        for (view_type, expected) in [
+            (ViewType::D2, vk::ImageViewType::TYPE_2D),
+            (ViewType::D2Array, vk::ImageViewType::TYPE_2D_ARRAY),
+            (ViewType::D3, vk::ImageViewType::TYPE_3D),
+            (ViewType::Cube, vk::ImageViewType::CUBE),
+        ] {
+            assert_eq!(vk::ImageViewType::from(view_type), expected);
+        }
+    }
+
+    /// Sampled views are sampled image descriptors in the read-only layout,
+    /// and storage views storage image descriptors in the general layout:
+    /// the layouts of the accesses shaders make through them.
+    #[test]
+    fn views_have_their_layouts_and_descriptor_types() {
+        assert_eq!(
+            view_layout_and_type(&TextureView::sampled()),
+            (
+                vk::ImageLayout::READ_ONLY_OPTIMAL,
+                vk::DescriptorType::SAMPLED_IMAGE
+            ),
+        );
+        assert_eq!(
+            view_layout_and_type(&TextureView::Storage(Subresource::mip(0))),
+            (vk::ImageLayout::GENERAL, vk::DescriptorType::STORAGE_IMAGE),
+        );
     }
 
     /// Cube maps are cube-compatible 2D images, and 3D textures 3D images.
