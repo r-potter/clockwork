@@ -15,9 +15,10 @@ use crate::test_shaders;
 use crate::test_support::skip_for_driver_bug;
 use crate::vulkan::test_support::{Capability, VulkanTestBackend, require_capabilities};
 use crate::{
-    Access, Barrier, Buffer, BufferDesc, BufferUsage, CommandList, Extent3d, Format, GpuResources,
-    MemoryLocation, QueueId, QueueKind, RenderHardwareInterface, SubmitDesc, Subresource, Texture,
-    TextureCopy, TextureDataLayout, TextureDesc, TextureDimension, TextureUsage,
+    Access, AddressMode, Barrier, Buffer, BufferDesc, BufferUsage, CommandList, DescriptorIndex,
+    Extent3d, Filter, Format, GpuResources, MemoryLocation, QueueId, QueueKind,
+    RenderHardwareInterface, SamplerDesc, SubmitDesc, Subresource, Texture, TextureCopy,
+    TextureDataLayout, TextureDesc, TextureDimension, TextureUsage, TextureView,
 };
 
 /// A buffer of `size` bytes in `location`, for copies.
@@ -100,6 +101,139 @@ fn compute_writes_through_device_address() {
         resources.destroy_buffer(output);
     }
     resources.destroy_program(program);
+}
+
+/// The push data for heap slots `indices`, as the test shaders declare it:
+/// each a 4-byte `ResourceIndex` or `SamplerIndex`, in order.
+fn index_push_data(indices: &[DescriptorIndex]) -> Vec<u8> {
+    indices
+        .iter()
+        .flat_map(|index| index.0.to_le_bytes())
+        .collect()
+}
+
+/// A compute program writes a storage view through its heap slot, and
+/// another samples it through a sampled view and a sampler, and writes
+/// what it read to a storage view of mip 1 of a second texture, which is
+/// copied out and read back (part of R6 and R21).
+#[test]
+fn compute_reads_and_writes_heap_textures() {
+    let session = TestSession::new();
+    let backend = VulkanTestBackend::headless(&session);
+    let resources = backend.resources();
+    let source = resources
+        .create_texture(&TextureDesc {
+            label: "source",
+            dimension: TextureDimension::D2,
+            format: Format::Rgba32Float,
+            extent: Extent3d::new_2d(4, 4),
+            mip_levels: 1,
+            array_layers: 1,
+            usage: TextureUsage::SAMPLED | TextureUsage::STORAGE,
+        })
+        .unwrap();
+    let destination = resources
+        .create_texture(&TextureDesc {
+            label: "destination",
+            dimension: TextureDimension::D2,
+            format: Format::Rgba32Float,
+            extent: Extent3d::new_2d(8, 8),
+            mip_levels: 2,
+            array_layers: 1,
+            usage: TextureUsage::STORAGE | TextureUsage::COPY_SOURCE,
+        })
+        .unwrap();
+    let sampler = resources
+        .create_sampler(&SamplerDesc {
+            label: "nearest",
+            mag_filter: Filter::Nearest,
+            min_filter: Filter::Nearest,
+            mip_filter: Filter::Nearest,
+            address_modes: [AddressMode::ClampToEdge; 3],
+        })
+        .unwrap();
+    let extent = Extent3d::new_2d(4, 4);
+    let layout = TextureDataLayout::tightly_packed(Format::Rgba32Float, extent);
+    let size = u64::from(layout.bytes_per_row * 4);
+    let readback = create(&**resources, "readback", size, MemoryLocation::Readback);
+    let fill = resources
+        .create_program(&test_shaders::fill_texels().desc())
+        .unwrap();
+    let copy = resources
+        .create_program(&test_shaders::copy_texels().desc())
+        .unwrap();
+    let index = |texture, view| resources.texture_index(texture, view).unwrap();
+    let source_storage = index(source, TextureView::Storage(Subresource::mip(0)));
+    let source_sampled = index(source, TextureView::sampled());
+    let mip_1 = index(destination, TextureView::Storage(Subresource::mip(1)));
+
+    let mut list = CommandList::new("heap textures");
+    list.barrier(&[
+        Barrier::texture(source, Access::None, Access::ComputeShaderWrite),
+        Barrier::subresource(
+            destination,
+            Subresource::mip(1),
+            Access::None,
+            Access::ComputeShaderWrite,
+        ),
+    ]);
+    list.bind_program(fill);
+    list.push_data(0, &index_push_data(&[source_storage]));
+    list.dispatch([1, 1, 1]);
+    list.barrier(&[Barrier::texture(
+        source,
+        Access::ComputeShaderWrite,
+        Access::ComputeShaderSampledRead,
+    )]);
+    list.bind_program(copy);
+    list.push_data(
+        0,
+        &index_push_data(&[source_sampled, resources.sampler_index(sampler), mip_1]),
+    );
+    list.dispatch([1, 1, 1]);
+    list.barrier(&[Barrier::subresource(
+        destination,
+        Subresource::mip(1),
+        Access::ComputeShaderWrite,
+        Access::CopyRead,
+    )]);
+    list.copy_texture_to_buffer(
+        TextureCopy {
+            texture: destination,
+            mip: 1,
+            layers: 0..1,
+            origin: [0; 3],
+            extent,
+        },
+        resources.buffer_address(readback),
+        layout,
+    );
+    list.barrier(&[Barrier::buffer(
+        readback,
+        Access::CopyWrite,
+        Access::HostRead,
+    )]);
+    run(&backend, QueueKind::Graphics, &list);
+
+    let mut bytes = vec![0; size as usize];
+    resources.read_buffer(readback, 0, &mut bytes).unwrap();
+    let (chunks, rest) = bytes.as_chunks::<4>();
+    assert!(rest.is_empty());
+    let texels: Vec<f32> = chunks
+        .iter()
+        .map(|&chunk| f32::from_le_bytes(chunk))
+        .collect();
+    let expected: Vec<f32> = (0..4)
+        .flat_map(|y| (0..4).flat_map(move |x| [x as f32, y as f32, (x + y) as f32, 1.0]))
+        .collect();
+    assert_eq!(texels, expected);
+
+    resources.destroy_program(fill);
+    resources.destroy_program(copy);
+    resources.destroy_sampler(sampler);
+    resources.destroy_buffer(readback);
+    resources.destroy_texture(source);
+    resources.destroy_texture(destination);
 }
 
 /// Dispatching with a vertex and fragment program panics when translated,
