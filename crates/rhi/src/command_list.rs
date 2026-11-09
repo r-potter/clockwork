@@ -3,8 +3,8 @@
 //!
 //! A [`CommandList`] holds its commands as a `Vec` of the private
 //! [`Command`] enum, with larger or variable-length data, such as debug
-//! text, barriers and texture copies, in arenas beside it, so that each
-//! command stays small. Recording checks the rules it can see on its own,
+//! text, barriers, texture copies and push data, in arenas beside it, so
+//! that each command stays small. Recording checks the rules it can see on its own,
 //! and panics on misuse, which is a bug in the caller. Rules that need the
 //! backend's state, such as a texture copy's checks, are checked when the
 //! list is translated.
@@ -16,11 +16,15 @@
 
 use std::ops::Range;
 
-use crate::{Barrier, GpuAddress, TextureCopy, TextureDataLayout};
+use crate::{Barrier, GpuAddress, MAX_PUSH_DATA_SIZE, Program, TextureCopy, TextureDataLayout};
 
 /// The alignment, in bytes, of a fill's address and size, as Vulkan
 /// requires of fills.
 const FILL_ALIGNMENT: u64 = 4;
+
+/// The alignment, in bytes, of a push data block's offset and size, as
+/// Vulkan requires of push data.
+const PUSH_DATA_ALIGNMENT: u32 = 4;
 
 /// A list of GPU commands, recorded on any thread with no device, then
 /// translated by a queue.
@@ -43,6 +47,11 @@ pub struct CommandList {
     /// Every copy between a buffer and a texture, which commands refer to
     /// by index.
     texture_copies: Vec<BufferTextureCopy>,
+    /// Every push data block, which commands refer to by range. Each
+    /// block's size is a multiple of 4, so each starts at a multiple of 4.
+    push_data: Vec<u8>,
+    /// Whether a program has been bound, so that dispatches can run.
+    program_bound: bool,
     /// How many debug regions are open.
     open_regions: u32,
     /// How many timing scopes are open.
@@ -88,6 +97,25 @@ pub(crate) enum Command {
         /// The copy's index in the arena.
         copy: usize,
     },
+    /// Binds `program`, for later dispatches to run.
+    BindProgram {
+        /// The program.
+        program: Program,
+    },
+    /// Writes `data` in the list's arena to the push data later dispatches
+    /// read, at `offset`.
+    PushData {
+        /// Where the block goes in the push data, in bytes.
+        offset: u32,
+        /// The block, as a range of the arena.
+        data: Range<usize>,
+    },
+    /// Runs the compute program that's bound, on `groups` workgroups in
+    /// each dimension.
+    Dispatch {
+        /// The number of workgroups in x, y and z.
+        groups: [u32; 3],
+    },
     /// Opens a debug region, whose name is `text` in the list's arena.
     BeginDebugRegion {
         /// The region's name, as a range of the arena.
@@ -119,6 +147,8 @@ impl CommandList {
             text: String::new(),
             barriers: Vec::new(),
             texture_copies: Vec::new(),
+            push_data: Vec::new(),
+            program_bound: false,
             open_regions: 0,
             open_timings: 0,
         }
@@ -147,6 +177,11 @@ impl CommandList {
     /// The texture copy at `index` in the arena, for translation.
     pub(crate) fn texture_copy(&self, index: usize) -> &BufferTextureCopy {
         &self.texture_copies[index]
+    }
+
+    /// The push data block at `range` of the arena, for translation.
+    pub(crate) fn push_data_block(&self, range: &Range<usize>) -> &[u8] {
+        &self.push_data[range.clone()]
     }
 
     /// Checks that the list can be translated: that every debug region and
@@ -289,6 +324,76 @@ impl CommandList {
         self.texture_copies.len() - 1
     }
 
+    /// Binds `program`, for later dispatches to run, until another is
+    /// bound (design 0002, "Programs").
+    ///
+    /// Translation panics if the program is stale, or if the queue can't
+    /// run it: the transfer queue runs no programs, and only the graphics
+    /// queue runs a vertex and fragment program.
+    pub fn bind_program(&mut self, program: Program) {
+        self.commands.push(Command::BindProgram { program });
+        self.program_bound = true;
+    }
+
+    /// Writes `data` to the push data later dispatches read, at `offset`
+    /// bytes into it (design 0002, "Binding model"). The rest of the push
+    /// data keeps what was last written there, so a list can change one
+    /// field of a block, such as an index, between dispatches. Push data
+    /// typically holds a single address of a structure, or a few addresses
+    /// and indices. Nothing is recorded for an empty block.
+    ///
+    /// Translation panics if the queue runs no programs, as the transfer
+    /// queue doesn't.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `offset` or the size of `data` isn't a multiple of 4, or
+    /// if the block passes the end of the push data, which holds
+    /// [`MAX_PUSH_DATA_SIZE`] bytes.
+    pub fn push_data(&mut self, offset: u32, data: &[u8]) {
+        if data.is_empty() {
+            return;
+        }
+        let size = data.len();
+        assert!(
+            offset.is_multiple_of(PUSH_DATA_ALIGNMENT)
+                && size.is_multiple_of(PUSH_DATA_ALIGNMENT as usize),
+            "command list \"{}\" pushes {size} bytes of data at offset {offset}, but a block's \
+             offset and size must be multiples of {PUSH_DATA_ALIGNMENT}",
+            self.label,
+        );
+        assert!(
+            u64::from(offset) + size as u64 <= u64::from(MAX_PUSH_DATA_SIZE),
+            "command list \"{}\" pushes {size} bytes of data at offset {offset}, past the end of \
+             the {MAX_PUSH_DATA_SIZE} bytes of push data",
+            self.label,
+        );
+        let start = self.push_data.len();
+        self.push_data.extend_from_slice(data);
+        self.commands.push(Command::PushData {
+            offset,
+            data: start..self.push_data.len(),
+        });
+    }
+
+    /// Runs the compute program that's bound, on `groups` workgroups in x,
+    /// y and z. A dimension of 0 runs nothing.
+    ///
+    /// Translation panics if the program that's bound isn't a compute
+    /// program.
+    ///
+    /// # Panics
+    ///
+    /// Panics if no program has been bound.
+    pub fn dispatch(&mut self, groups: [u32; 3]) {
+        assert!(
+            self.program_bound,
+            "command list \"{}\" dispatches with no program bound",
+            self.label,
+        );
+        self.commands.push(Command::Dispatch { groups });
+    }
+
     /// Opens a debug region called `name`, which capture tools show around
     /// the commands recorded until the matching
     /// [`end_debug_region`](Self::end_debug_region). Regions nest.
@@ -423,6 +528,17 @@ pub(crate) enum RecordedCommand<'a> {
         /// How many bytes to copy.
         size: u64,
     },
+    /// See [`CommandList::bind_program`].
+    BindProgram(Program),
+    /// See [`CommandList::push_data`].
+    PushData {
+        /// Where the block goes in the push data, in bytes.
+        offset: u32,
+        /// The block.
+        data: &'a [u8],
+    },
+    /// See [`CommandList::dispatch`].
+    Dispatch([u32; 3]),
     /// See [`CommandList::begin_debug_region`].
     BeginDebugRegion(&'a str),
     /// See [`CommandList::end_debug_region`].
@@ -469,6 +585,12 @@ impl CommandList {
                 Command::CopyTextureToBuffer { copy } => {
                     RecordedCommand::CopyTextureToBuffer(&self.texture_copies[copy])
                 }
+                Command::BindProgram { program } => RecordedCommand::BindProgram(program),
+                Command::PushData { offset, ref data } => RecordedCommand::PushData {
+                    offset,
+                    data: &self.push_data[data.clone()],
+                },
+                Command::Dispatch { groups } => RecordedCommand::Dispatch(groups),
                 Command::BeginDebugRegion { ref text } => {
                     RecordedCommand::BeginDebugRegion(&self.text[text.clone()])
                 }
@@ -504,6 +626,99 @@ mod tests {
     use super::*;
     use crate::handle::HandleTable;
     use crate::{Access, Buffer, Extent3d, Format, Texture};
+
+    /// A program, for recording, which nothing looks up without a backend.
+    fn program() -> Program {
+        Program::from_handle(HandleTable::new("program").insert("write value", ()))
+    }
+
+    /// Programs, push data and dispatches are recorded in order, with their
+    /// values, push data keeps each block's offset and bytes, and an empty
+    /// block records nothing.
+    #[test]
+    fn dispatches_are_recorded() {
+        let program = program();
+        let mut list = CommandList::new("compute");
+        list.bind_program(program);
+        list.push_data(0, &0x1000_u64.to_le_bytes());
+        list.push_data(8, &[1, 0, 0, 0]);
+        list.dispatch([4, 2, 1]);
+        list.push_data(8, &[]);
+        list.push_data(8, &[2, 0, 0, 0]);
+        list.dispatch([1, 1, 1]);
+        list.push_data(0, &[7; MAX_PUSH_DATA_SIZE as usize]);
+        assert_eq!(
+            list.recorded(),
+            [
+                RecordedCommand::BindProgram(program),
+                RecordedCommand::PushData {
+                    offset: 0,
+                    data: &0x1000_u64.to_le_bytes(),
+                },
+                RecordedCommand::PushData {
+                    offset: 8,
+                    data: &[1, 0, 0, 0],
+                },
+                RecordedCommand::Dispatch([4, 2, 1]),
+                RecordedCommand::PushData {
+                    offset: 8,
+                    data: &[2, 0, 0, 0],
+                },
+                RecordedCommand::Dispatch([1, 1, 1]),
+                RecordedCommand::PushData {
+                    offset: 0,
+                    data: &[7; MAX_PUSH_DATA_SIZE as usize],
+                },
+            ],
+        );
+    }
+
+    /// A dispatch with no program bound panics, naming the list.
+    #[test]
+    #[should_panic(expected = "command list \"compute\" dispatches with no program bound")]
+    fn dispatches_need_a_program() {
+        let mut list = CommandList::new("compute");
+        list.push_data(0, &[0; 8]);
+        list.dispatch([1, 1, 1]);
+    }
+
+    /// A push data block that passes the end of the push data panics,
+    /// naming the list and the limit, whether from its size or its offset.
+    #[test]
+    fn push_data_past_the_end_panics() {
+        for (offset, size) in [(0, MAX_PUSH_DATA_SIZE as usize + 4), (124, 8)] {
+            let panic = std::panic::catch_unwind(|| {
+                CommandList::new("compute").push_data(offset, &vec![0; size]);
+            })
+            .expect_err("the block should panic");
+            assert_eq!(
+                panic.downcast_ref::<String>().unwrap(),
+                &format!(
+                    "command list \"compute\" pushes {size} bytes of data at offset {offset}, past \
+                     the end of the 128 bytes of push data"
+                ),
+            );
+        }
+    }
+
+    /// A push data block whose offset or size isn't a multiple of 4
+    /// panics.
+    #[test]
+    fn unaligned_push_data_panics() {
+        for (offset, size) in [(0, 6), (2, 4)] {
+            let panic = std::panic::catch_unwind(|| {
+                CommandList::new("compute").push_data(offset, &vec![0; size]);
+            })
+            .expect_err("the block should panic");
+            assert_eq!(
+                panic.downcast_ref::<String>().unwrap(),
+                &format!(
+                    "command list \"compute\" pushes {size} bytes of data at offset {offset}, but \
+                     a block's offset and size must be multiples of 4"
+                ),
+            );
+        }
+    }
 
     /// Barriers are recorded together, in order, and an empty slice records
     /// nothing.

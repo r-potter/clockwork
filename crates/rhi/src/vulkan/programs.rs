@@ -11,7 +11,7 @@
 mod gpu_tests;
 
 use std::slice;
-use std::sync::{PoisonError, RwLockWriteGuard};
+use std::sync::{PoisonError, RwLockReadGuard, RwLockWriteGuard};
 
 use ash::vk;
 
@@ -19,17 +19,46 @@ use super::VulkanDevice;
 use super::destruction::Retired;
 use super::error::error;
 use crate::handle::HandleTable;
-use crate::{Program, ProgramDesc, RhiResult, ShaderStage};
+use crate::{Program, ProgramDesc, QueueKind, RhiResult, ShaderStage};
 
 /// A program in the program table: its shader objects, each with its
 /// stage, in the order they're bound.
 #[derive(Debug)]
 pub(super) struct ProgramEntry {
     /// The stage of each of `shaders`.
-    #[expect(dead_code, reason = "translation binds programs in the next PR")]
     stages: Vec<vk::ShaderStageFlags>,
     /// The shader objects, created together, and linked if there are two.
     shaders: Vec<vk::ShaderEXT>,
+}
+
+impl ProgramEntry {
+    /// The stage of each of [`shaders`](Self::shaders), for binding them.
+    pub(super) fn stages(&self) -> &[vk::ShaderStageFlags] {
+        &self.stages
+    }
+
+    /// The shader objects, for binding them.
+    pub(super) fn shaders(&self) -> &[vk::ShaderEXT] {
+        &self.shaders
+    }
+
+    /// Whether it's a compute program, rather than a vertex and fragment
+    /// program.
+    pub(super) fn is_compute(&self) -> bool {
+        self.stages == [vk::ShaderStageFlags::COMPUTE]
+    }
+
+    /// Whether a queue of `kind` can run it: the transfer queue runs no
+    /// programs, and only the graphics queue runs a vertex and fragment
+    /// program, since the compute queue may be on a family with no
+    /// graphics.
+    pub(super) fn runs_on(&self, kind: QueueKind) -> bool {
+        match kind {
+            QueueKind::Graphics => true,
+            QueueKind::Compute => self.is_compute(),
+            QueueKind::Transfer => false,
+        }
+    }
 }
 
 impl From<ShaderStage> for vk::ShaderStageFlags {
@@ -155,9 +184,17 @@ impl VulkanDevice {
         }
     }
 
-    /// Locks the program table for writing, recovering it if a panic
+    /// Locks the program table for reading, recovering it if a panic
     /// poisoned it: no table operation panics halfway through, so it's
     /// consistent.
+    pub(super) fn lock_programs_for_reading(
+        &self,
+    ) -> RwLockReadGuard<'_, HandleTable<ProgramEntry>> {
+        self.programs.read().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Locks the program table for writing, recovering it as
+    /// [`lock_programs_for_reading`](Self::lock_programs_for_reading) does.
     fn lock_programs_for_writing(&self) -> RwLockWriteGuard<'_, HandleTable<ProgramEntry>> {
         self.programs
             .write()
@@ -240,6 +277,33 @@ mod tests {
                     .contains(vk::ShaderCreateFlagsEXT::DESCRIPTOR_HEAP)
             );
             assert_eq!(create_info.code_type, vk::ShaderCodeTypeEXT::SPIRV);
+        }
+    }
+
+    /// A program with `stages`, and null shader objects, which nothing
+    /// binds.
+    fn entry(stages: &[vk::ShaderStageFlags]) -> ProgramEntry {
+        ProgramEntry {
+            stages: stages.to_vec(),
+            shaders: vec![vk::ShaderEXT::null(); stages.len()],
+        }
+    }
+
+    /// The graphics queue runs every program, the compute queue only
+    /// compute programs, and the transfer queue none.
+    #[test]
+    fn queues_run_the_programs_their_kind_can() {
+        let compute = entry(&[vk::ShaderStageFlags::COMPUTE]);
+        let graphics = entry(&[vk::ShaderStageFlags::VERTEX, vk::ShaderStageFlags::FRAGMENT]);
+        assert!(compute.is_compute());
+        assert!(!graphics.is_compute());
+        for (kind, runs_compute, runs_graphics) in [
+            (QueueKind::Graphics, true, true),
+            (QueueKind::Compute, true, false),
+            (QueueKind::Transfer, false, false),
+        ] {
+            assert_eq!(compute.runs_on(kind), runs_compute, "{kind:?}");
+            assert_eq!(graphics.runs_on(kind), runs_graphics, "{kind:?}");
         }
     }
 
