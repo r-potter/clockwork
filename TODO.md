@@ -70,6 +70,17 @@ Outstanding tasks and future work.
       itself, the way `create_program` now does; make the triangle a
       `Program` once draws arrive, and remove `TriangleShaders` and its
       second copy of `triangle.spv`.
+- [ ] **Let a program's stages come from separate SPIR-V modules.**
+      `ProgramDesc` has one `spirv` field, and every stage is created from
+      that module, choosing its entry point by name. That suits `slangc`,
+      which puts every entry point of a file in one module, but not stages
+      compiled separately or loaded from a cache. When something needs it,
+      move the SPIR-V into each stage (for example `stages: &[StageDesc {
+      stage, spirv, entry_point }]`), have `shader_create_infos` in
+      `crates/rhi/src/vulkan/programs.rs` point each create info at its
+      stage's code (`VK_EXT_shader_object` links create infos, not modules),
+      and check each stage's SPIR-V isn't empty. Revise design 0002's
+      "Programs" with the change.
 - [x] **Compile shaders for other backends.** Not needed: ADR 0003 keeps
       Vulkan as the only graphics API on every planned platform, so SPIR-V
       stays the only shader target.
