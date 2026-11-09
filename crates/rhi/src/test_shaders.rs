@@ -61,6 +61,33 @@ pub(crate) fn write_value() -> TestProgram {
     )
 }
 
+/// A compute program that writes each texel's coordinates, `(x, y, x + y,
+/// 1)`, into a 2D storage view, through its slot in the resource heap
+/// (`shaders/fill_texels.slang`). Its push data is the view's
+/// [`DescriptorIndex`](crate::DescriptorIndex), and it runs in 8×8
+/// workgroups.
+pub(crate) fn fill_texels() -> TestProgram {
+    TestProgram::new(
+        "fill texels",
+        include_bytes!(concat!(env!("OUT_DIR"), "/fill_texels.spv")),
+        &[(ShaderStage::Compute, c"main")],
+    )
+}
+
+/// A compute program that samples a 2D sampled view at each texel's
+/// centre, and writes the result into a 2D storage view of the same size
+/// (`shaders/copy_texels.slang`). Its push data is the sampled view's,
+/// the sampler's and the storage view's
+/// [`DescriptorIndex`](crate::DescriptorIndex), in that order, and it runs
+/// in 8×8 workgroups.
+pub(crate) fn copy_texels() -> TestProgram {
+    TestProgram::new(
+        "copy texels",
+        include_bytes!(concat!(env!("OUT_DIR"), "/copy_texels.spv")),
+        &[(ShaderStage::Compute, c"main")],
+    )
+}
+
 /// The triangle's vertex and fragment program (`shaders/triangle.slang`).
 pub(crate) fn triangle() -> TestProgram {
     TestProgram::new(

@@ -13,9 +13,14 @@ use std::path::PathBuf;
 use std::process::Command;
 
 /// The shaders to compile, as file names in `shaders/` without the `.slang`
-/// extension. `write_value` is used only by tests (see
+/// extension. All but `triangle` are used only by tests (see
 /// `src/test_shaders.rs`).
-const SHADERS: &[&str] = &["triangle", "write_value"];
+const SHADERS: &[&str] = &["triangle", "write_value", "fill_texels", "copy_texels"];
+
+/// The Slang modules shaders import, as file names in `shaders/` without
+/// the `.slang` extension. They're compiled as part of each shader that
+/// imports them, so they only need to rebuild the shaders when they change.
+const MODULES: &[&str] = &["heap"];
 
 /// Finds `slangc`, then compiles each shader in [`SHADERS`].
 ///
@@ -38,6 +43,10 @@ fn main() {
     .path;
     let out_dir = PathBuf::from(env::var_os("OUT_DIR").expect("cargo sets OUT_DIR"));
 
+    for name in MODULES {
+        let source = PathBuf::from_iter(["shaders", &format!("{name}.slang")]);
+        println!("cargo::rerun-if-changed={}", source.display());
+    }
     for name in SHADERS {
         let source = PathBuf::from_iter(["shaders", &format!("{name}.slang")]);
         println!("cargo::rerun-if-changed={}", source.display());
