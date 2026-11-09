@@ -54,8 +54,8 @@ use tracing::{info, warn};
 use super::{
     BackendOptions, Buffer, BufferDesc, Capabilities, DescriptorIndex, GpuAddress, GpuResources,
     GraphicsApi, PresentCapabilities, Program, ProgramDesc, Queue, QueueKind,
-    RenderHardwareInterface, RhiResult, Sampler, SamplerDesc, Texture, TextureDesc, WindowSize,
-    WindowTarget,
+    RenderHardwareInterface, RhiResult, Sampler, SamplerDesc, Texture, TextureDesc, TextureView,
+    WindowSize, WindowTarget,
 };
 use crate::deferred::DeferredQueue;
 use crate::handle::HandleTable;
@@ -891,6 +891,10 @@ impl GpuResources for VulkanDevice {
 
     fn destroy_texture(&self, texture: Texture) {
         self.destroy_texture_entry(texture);
+    }
+
+    fn texture_index(&self, texture: Texture, view: TextureView) -> RhiResult<DescriptorIndex> {
+        self.texture_entry_index(texture, &view)
     }
 
     fn create_sampler(&self, desc: &SamplerDesc<'_>) -> RhiResult<Sampler> {
