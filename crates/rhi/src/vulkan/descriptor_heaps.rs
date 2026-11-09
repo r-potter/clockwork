@@ -203,12 +203,22 @@ impl DescriptorHeap {
     }
 
     /// The heap's device address, which command buffers bind it at.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "command buffers bind the heaps in `rhi-commands`")
-    )]
+    #[cfg(test)]
     pub(super) fn address(&self) -> vk::DeviceAddress {
         self.address
+    }
+
+    /// How a command buffer binds the heap: the whole of its buffer, with
+    /// the driver's reserved range after the last slot.
+    pub(super) fn bind_info(&self) -> vk::BindHeapInfoEXT<'static> {
+        vk::BindHeapInfoEXT::default()
+            .heap_range(
+                vk::DeviceAddressRangeEXT::default()
+                    .address(self.address)
+                    .size(self.layout.size()),
+            )
+            .reserved_range_offset(self.layout.reserved_offset())
+            .reserved_range_size(self.layout.reserved())
     }
 
     /// The heap's memory.
@@ -391,10 +401,6 @@ impl HeapLayout {
     }
 
     /// The size of the driver's reserved range.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "the heaps are created on the core in the next PR")
-    )]
     pub(super) fn reserved(&self) -> vk::DeviceSize {
         self.reserved
     }

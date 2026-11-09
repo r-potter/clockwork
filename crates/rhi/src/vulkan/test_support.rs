@@ -216,10 +216,6 @@ macro_rules! require_capabilities {
         }
     };
 }
-#[expect(
-    unused_imports,
-    reason = "no GPU test needs an optional capability until design 0002's rhi-commands"
-)]
 pub(crate) use require_capabilities;
 
 #[cfg(test)]

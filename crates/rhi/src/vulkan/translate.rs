@@ -5,17 +5,24 @@
 //! Vulkan commands it stands for, in order, with no merging, reordering or
 //! removal (design 0002, "Keeping the recording model reversible"). It
 //! looks up every handle the list names, holding each table's read lock
-//! once for the whole list, and panics on a stale one, and on a subresource
-//! outside its texture.
+//! once for the whole list, and panics on a stale one, on a subresource
+//! outside its texture, and on a program the queue can't run.
+//!
+//! Every command buffer for a queue that runs programs, the graphics or
+//! compute queue, starts by binding both descriptor heaps, so each
+//! translates independently (design 0002, "Command lists and
+//! translation"). The transfer queue's don't, since its family may not
+//! support them, and it runs no programs.
 //!
 //! Lock order: the tables' read locks are taken while a command pool is
 //! claimed, never the other way around, and the queue's lock is never
 //! taken. Query chunks are claimed while the tables' read locks are held,
 //! and the query pools' lock is held only to take a chunk, so it's last in
-//! any order. The buffer table's read lock is always taken before the texture
-//! table's, and translation is the only code that holds both. A fixed order
-//! is what keeps them from deadlocking: the standard `RwLock` makes a new
-//! reader wait behind a waiting writer, so two threads taking the read
+//! any order. The buffer table's read lock is always taken before the
+//! texture table's, and the texture table's before the program table's,
+//! and translation is the only code that holds more than one. A fixed
+//! order is what keeps them from deadlocking: the standard `RwLock` makes a
+//! new reader wait behind a waiting writer, so two threads taking the read
 //! locks in opposite orders could each wait on the other, with a writer
 //! queued on each table.
 
@@ -38,7 +45,9 @@ use crate::command_list::Command;
 use crate::copy::check_texture_copy;
 use crate::deferred::Translation;
 use crate::ffi::truncate_to_cstring;
-use crate::{Access, AccessSet, CommandBuffer, CommandList, GpuTimepoint, QueueId, RhiResult};
+use crate::{
+    Access, AccessSet, CommandBuffer, CommandList, GpuTimepoint, QueueId, QueueKind, RhiResult,
+};
 
 /// A command list translated for one queue, holding the command pool its
 /// command buffer was recorded from, and holding back the destruction of
@@ -159,8 +168,9 @@ impl VulkanDevice {
     ///
     /// # Panics
     ///
-    /// Panics if `list` has a debug region or timing scope open, or names a
-    /// stale handle.
+    /// Panics if `list` has a debug region or timing scope open, names a
+    /// stale handle, or binds a program the queue can't run, or if a
+    /// dispatch's program isn't a compute program.
     pub(super) fn translate(
         self: &Arc<Self>,
         id: QueueId,
@@ -217,8 +227,10 @@ impl VulkanDevice {
     ///
     /// # Panics
     ///
-    /// Panics if `list` names a stale handle, or has a queue transfer
-    /// neither from nor to that queue.
+    /// Panics if `list` names a stale handle, has a queue transfer neither
+    /// from nor to that queue, binds a program or pushes data the queue
+    /// can't use, or dispatches with a program that isn't a compute
+    /// program.
     unsafe fn record(
         &self,
         buffer: vk::CommandBuffer,
@@ -228,9 +240,26 @@ impl VulkanDevice {
     ) -> RhiResult<()> {
         let device = self.device.handle();
         let writes_timestamps = self.queues.clock(id).is_some();
+        let kind = self.queues.kind(id);
+        let runs_programs = kind != QueueKind::Transfer;
+        if runs_programs {
+            let descriptor_heap = self.device.descriptor_heap();
+            // SAFETY: Guaranteed by the caller, the queue's family supports
+            // graphics or compute, and the heaps live as long as the core,
+            // which outlives every command buffer.
+            unsafe {
+                descriptor_heap.cmd_bind_resource_heap(buffer, &self.heaps.resource.bind_info());
+                descriptor_heap.cmd_bind_sampler_heap(buffer, &self.heaps.sampler.bind_info());
+            }
+        }
         let buffers = self.lock_buffers_for_reading();
-        // After the buffer table's, as the lock order above requires.
+        // After the buffer table's, and the program table's after it, as the
+        // lock order above requires.
         let textures = self.lock_textures_for_reading();
+        let programs = self.lock_programs_for_reading();
+        // The program last bound, by label, and whether it's a compute
+        // program.
+        let mut program_bound = None;
         // Reused for each barrier command, so recording them doesn't allocate
         // once they've grown.
         let mut memory_barriers = Vec::new();
@@ -466,6 +495,63 @@ impl VulkanDevice {
                             device_address_commands.cmd_copy_image_to_memory(buffer, &copy_info);
                         }
                     }
+                }
+                Command::BindProgram { program } => {
+                    let (label, entry) = programs
+                        .lookup(program.handle())
+                        .unwrap_or_else(|err| panic!("{err}"));
+                    assert!(
+                        entry.runs_on(kind),
+                        "command list \"{}\" binds program \"{label}\", which the {} queue can't \
+                         run",
+                        list.label(),
+                        self.queues.name(id),
+                    );
+                    // SAFETY: Guaranteed by the caller, the shader objects
+                    // are live, since the table is locked, and the queue can
+                    // run them.
+                    unsafe {
+                        self.device.shader_object().cmd_bind_shaders(
+                            buffer,
+                            entry.stages(),
+                            entry.shaders(),
+                        );
+                    }
+                    program_bound = Some((label, entry.is_compute()));
+                }
+                &Command::PushData { offset, ref data } => {
+                    assert!(
+                        runs_programs,
+                        "command list \"{}\" pushes data, but the {} queue runs no programs",
+                        list.label(),
+                        self.queues.name(id),
+                    );
+                    let push_data_info = vk::PushDataInfoEXT::default().offset(offset).data(
+                        vk::HostAddressRangeConstEXT::default().address(list.push_data_block(data)),
+                    );
+                    // SAFETY: Guaranteed by the caller, the queue's family
+                    // supports graphics or compute, recording checked the
+                    // block's alignment, and that it ends within the limit
+                    // device selection requires, and `push_data_info` is
+                    // valid for the call.
+                    unsafe {
+                        self.device
+                            .descriptor_heap()
+                            .cmd_push_data(buffer, &push_data_info);
+                    }
+                }
+                &Command::Dispatch { groups: [x, y, z] } => {
+                    let (label, is_compute) =
+                        program_bound.expect("recording checked that a program is bound");
+                    assert!(
+                        is_compute,
+                        "command list \"{}\" dispatches with program \"{label}\", which isn't a \
+                         compute program",
+                        list.label(),
+                    );
+                    // SAFETY: Guaranteed by the caller, and a compute
+                    // program the queue can run is bound, with the heaps.
+                    unsafe { device.cmd_dispatch(buffer, x, y, z) };
                 }
                 Command::BeginDebugRegion { text } => {
                     if let Some(debug_utils) = self.device.debug_utils() {

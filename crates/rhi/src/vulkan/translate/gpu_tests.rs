@@ -7,10 +7,13 @@
 //! `missing_barrier_is_reported` waits for draws and dispatches in
 //! `rhi-shaders`.
 
+use std::panic::{self, AssertUnwindSafe};
+
 use clockwork_diagnostics::capture::TestSession;
 
+use crate::test_shaders;
 use crate::test_support::skip_for_driver_bug;
-use crate::vulkan::test_support::VulkanTestBackend;
+use crate::vulkan::test_support::{Capability, VulkanTestBackend, require_capabilities};
 use crate::{
     Access, Barrier, Buffer, BufferDesc, BufferUsage, CommandList, Extent3d, Format, GpuResources,
     MemoryLocation, QueueId, QueueKind, RenderHardwareInterface, SubmitDesc, Subresource, Texture,
@@ -34,14 +37,136 @@ fn create(
         .unwrap()
 }
 
-/// Translates `list` for the graphics queue, submits it, and waits for it.
-fn run(backend: &VulkanTestBackend, list: &CommandList) {
-    let graphics = backend.queue(QueueKind::Graphics);
-    let command_buffer = graphics.translate(list).unwrap();
-    let done = graphics
-        .submit(SubmitDesc::new(vec![command_buffer]))
+/// Translates `list` for the queue `kind`'s work goes to, submits it, and
+/// waits for it.
+fn run(backend: &VulkanTestBackend, kind: QueueKind, list: &CommandList) {
+    let queue = backend.queue(kind);
+    let command_buffer = queue.translate(list).unwrap();
+    let done = queue.submit(SubmitDesc::new(vec![command_buffer])).unwrap();
+    queue.wait(done).unwrap();
+}
+
+/// The message `translate` panics with, translating `list` for the queue
+/// `kind`'s work goes to.
+fn translation_panic(backend: &VulkanTestBackend, kind: QueueKind, list: &CommandList) -> String {
+    let queue = backend.queue(kind);
+    let panic = panic::catch_unwind(AssertUnwindSafe(|| queue.translate(list)))
+        .expect_err("translation should panic");
+    panic
+        .downcast_ref::<String>()
+        .expect("the panic has a formatted message")
+        .clone()
+}
+
+/// A compute program writes through the address in its push data, written
+/// in two blocks at their offsets, on the graphics queue and on the compute
+/// queue, with the heaps bound, and the value is read back (R5's
+/// `compute_writes_through_device_address`).
+#[test]
+fn compute_writes_through_device_address() {
+    let session = TestSession::new();
+    let backend = VulkanTestBackend::headless(&session);
+    let resources = backend.resources();
+    let program = resources
+        .create_program(&test_shaders::write_value().desc())
         .unwrap();
-    graphics.wait(done).unwrap();
+    for kind in [QueueKind::Graphics, QueueKind::Compute] {
+        let output = resources
+            .create_buffer(&BufferDesc {
+                label: "output",
+                size: 4,
+                usage: BufferUsage::STORAGE,
+                location: MemoryLocation::Readback,
+            })
+            .unwrap();
+        let mut list = CommandList::new("write value");
+        list.bind_program(program);
+        // In two halves, the high one first, so the shader finds the
+        // address only if each lands at its offset, and the first is kept
+        // when the second is written.
+        let address = resources.buffer_address(output).0.to_le_bytes();
+        list.push_data(4, &address[4..]);
+        list.push_data(0, &address[..4]);
+        list.dispatch([1, 1, 1]);
+        list.barrier(&[Barrier::buffer(
+            output,
+            Access::ComputeShaderWrite,
+            Access::HostRead,
+        )]);
+        run(&backend, kind, &list);
+        let mut value = [0; 4];
+        resources.read_buffer(output, 0, &mut value).unwrap();
+        assert_eq!(u32::from_le_bytes(value), 0xC10C_C0DE, "{kind:?}");
+        resources.destroy_buffer(output);
+    }
+    resources.destroy_program(program);
+}
+
+/// Dispatching with a vertex and fragment program panics when translated,
+/// naming the list and the program.
+#[test]
+fn dispatches_need_a_compute_program() {
+    let session = TestSession::new();
+    let backend = VulkanTestBackend::headless(&session);
+    let resources = backend.resources();
+    let program = resources
+        .create_program(&test_shaders::triangle().desc())
+        .unwrap();
+    let mut list = CommandList::new("draw");
+    list.bind_program(program);
+    list.dispatch([1, 1, 1]);
+    assert_eq!(
+        translation_panic(&backend, QueueKind::Graphics, &list),
+        "command list \"draw\" dispatches with program \"triangle\", which isn't a compute program",
+    );
+    resources.destroy_program(program);
+}
+
+/// A transfer queue of its own runs no programs, so binding one, or
+/// pushing data, panics when translated for it.
+#[test]
+fn the_transfer_queue_runs_no_programs() {
+    let session = TestSession::new();
+    let backend = VulkanTestBackend::headless(&session);
+    require_capabilities!(backend, Capability::DedicatedTransferQueue);
+    let resources = backend.resources();
+    let program = resources
+        .create_program(&test_shaders::write_value().desc())
+        .unwrap();
+    let mut list = CommandList::new("upload");
+    list.bind_program(program);
+    assert_eq!(
+        translation_panic(&backend, QueueKind::Transfer, &list),
+        "command list \"upload\" binds program \"write value\", which the transfer queue can't \
+         run",
+    );
+    let mut list = CommandList::new("upload");
+    list.push_data(0, &[0; 8]);
+    assert_eq!(
+        translation_panic(&backend, QueueKind::Transfer, &list),
+        "command list \"upload\" pushes data, but the transfer queue runs no programs",
+    );
+    resources.destroy_program(program);
+}
+
+/// A compute queue of its own may be on a family with no graphics, so
+/// binding a vertex and fragment program panics when translated for it.
+#[test]
+fn the_compute_queue_runs_only_compute_programs() {
+    let session = TestSession::new();
+    let backend = VulkanTestBackend::headless(&session);
+    require_capabilities!(backend, Capability::DedicatedComputeQueue);
+    let resources = backend.resources();
+    let program = resources
+        .create_program(&test_shaders::triangle().desc())
+        .unwrap();
+    let mut list = CommandList::new("draw");
+    list.bind_program(program);
+    assert_eq!(
+        translation_panic(&backend, QueueKind::Compute, &list),
+        "command list \"draw\" binds program \"triangle\", which the compute queue can't run",
+    );
+    resources.destroy_program(program);
 }
 
 /// Bytes written to an upload buffer, copied on the GPU to a GPU-only
@@ -71,7 +196,7 @@ fn buffer_round_trip() {
         Access::CopyWrite,
         Access::HostRead,
     )]);
-    run(&backend, &list);
+    run(&backend, QueueKind::Graphics, &list);
 
     let mut out = vec![0; bytes.len()];
     resources.read_buffer(readback, 0, &mut out).unwrap();
@@ -220,7 +345,7 @@ fn fills_write_their_range() {
     list.barrier(&[Barrier::global(Access::CopyWrite, Access::CopyWrite)]);
     list.fill_buffer(crate::GpuAddress(address + 4), 8, 0x0403_0201);
     list.barrier(&[Barrier::global(Access::CopyWrite, Access::HostRead)]);
-    run(&backend, &list);
+    run(&backend, QueueKind::Graphics, &list);
 
     let mut out = [0xFF; 16];
     resources.read_buffer(readback, 0, &mut out).unwrap();
@@ -312,7 +437,7 @@ fn texture_barriers_move_subresources_between_layouts() {
             Access::DepthAttachmentRead | Access::FragmentShaderSampledRead,
         ),
     ]);
-    run(&backend, &list);
+    run(&backend, QueueKind::Graphics, &list);
     resources.destroy_texture(colour);
     resources.destroy_texture(depth);
 }
@@ -467,7 +592,7 @@ fn padded_rows_round_trip() {
         Access::CopyWrite,
         Access::HostRead,
     )]);
-    run(&backend, &list);
+    run(&backend, QueueKind::Graphics, &list);
 
     let mut out = vec![0; tight_size as usize];
     resources.read_buffer(readback, 0, &mut out).unwrap();
@@ -544,7 +669,7 @@ fn subresources_round_trip() {
         Access::CopyWrite,
         Access::HostRead,
     )]);
-    run(&backend, &list);
+    run(&backend, QueueKind::Graphics, &list);
 
     let mut out = [0; 8];
     resources.read_buffer(readback, 0, &mut out).unwrap();
@@ -613,7 +738,7 @@ fn copies_from_textures_name_their_subresources() {
             ..TextureDataLayout::tightly_packed(Format::Depth32Float, extent)
         },
     );
-    run(&backend, &list);
+    run(&backend, QueueKind::Graphics, &list);
     resources.destroy_buffer(readback);
     resources.destroy_texture(colour);
     resources.destroy_texture(depth);
