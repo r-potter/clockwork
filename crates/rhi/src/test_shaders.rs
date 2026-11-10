@@ -61,6 +61,17 @@ pub(crate) fn write_value() -> TestProgram {
     )
 }
 
+/// A compute program that adds one, atomically, to the `u32` counter at the
+/// address in its push data for each workgroup it runs
+/// (`shaders/count_groups.slang`).
+pub(crate) fn count_groups() -> TestProgram {
+    TestProgram::new(
+        "count groups",
+        include_bytes!(concat!(env!("OUT_DIR"), "/count_groups.spv")),
+        &[(ShaderStage::Compute, c"main")],
+    )
+}
+
 /// A compute program that writes each texel's coordinates, `(x, y, x + y,
 /// 1)`, into a 2D storage view, through its slot in the resource heap
 /// (`shaders/fill_texels.slang`). Its push data is the view's

@@ -15,7 +15,13 @@ use std::process::Command;
 /// The shaders to compile, as file names in `shaders/` without the `.slang`
 /// extension. All but `triangle` are used only by tests (see
 /// `src/test_shaders.rs`).
-const SHADERS: &[&str] = &["triangle", "write_value", "fill_texels", "copy_texels"];
+const SHADERS: &[&str] = &[
+    "triangle",
+    "write_value",
+    "count_groups",
+    "fill_texels",
+    "copy_texels",
+];
 
 /// The Slang modules shaders import, as file names in `shaders/` without
 /// the `.slang` extension. They're compiled as part of each shader that

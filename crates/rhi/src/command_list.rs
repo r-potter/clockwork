@@ -26,6 +26,14 @@ const FILL_ALIGNMENT: u64 = 4;
 /// Vulkan requires of push data.
 const PUSH_DATA_ALIGNMENT: u32 = 4;
 
+/// The size, in bytes, of an indirect dispatch's arguments: three `u32`
+/// workgroup counts, as Vulkan's `VkDispatchIndirectCommand` lays them out.
+pub(crate) const DISPATCH_ARGUMENTS_SIZE: u64 = 12;
+
+/// The alignment, in bytes, of indirect arguments' address, as Vulkan
+/// requires of indirect commands.
+const INDIRECT_ALIGNMENT: u64 = 4;
+
 /// A list of GPU commands, recorded on any thread with no device, then
 /// translated by a queue.
 ///
@@ -115,6 +123,12 @@ pub(crate) enum Command {
     Dispatch {
         /// The number of workgroups in x, y and z.
         groups: [u32; 3],
+    },
+    /// Runs the compute program that's bound, on the workgroup counts the
+    /// GPU reads at `arguments` when the dispatch runs.
+    DispatchIndirect {
+        /// The address of the arguments.
+        arguments: GpuAddress,
     },
     /// Opens a debug region, whose name is `text` in the list's arena.
     BeginDebugRegion {
@@ -394,6 +408,46 @@ impl CommandList {
         self.commands.push(Command::Dispatch { groups });
     }
 
+    /// Runs the compute program that's bound, on workgroup counts the GPU
+    /// reads from `arguments` when the dispatch runs: three `u32`s, the
+    /// counts in x, y and z, so that a dispatch's size can be decided on
+    /// the GPU. A count of 0 runs nothing.
+    ///
+    /// The arguments must be in a buffer with [`BufferUsage::INDIRECT`],
+    /// and be read with [`Access::IndirectRead`], so a barrier is needed
+    /// after the GPU writes them.
+    ///
+    /// Translation panics if the program that's bound isn't a compute
+    /// program.
+    ///
+    /// # Panics
+    ///
+    /// Panics if no program has been bound, if `arguments` isn't a multiple
+    /// of 4, or if the arguments pass the end of the address space.
+    ///
+    /// [`BufferUsage::INDIRECT`]: crate::BufferUsage::INDIRECT
+    /// [`Access::IndirectRead`]: crate::Access::IndirectRead
+    pub fn dispatch_indirect(&mut self, arguments: GpuAddress) {
+        assert!(
+            self.program_bound,
+            "command list \"{}\" dispatches with no program bound",
+            self.label,
+        );
+        self.check_range(
+            "dispatches with arguments",
+            arguments,
+            DISPATCH_ARGUMENTS_SIZE,
+        );
+        assert!(
+            arguments.0.is_multiple_of(INDIRECT_ALIGNMENT),
+            "command list \"{}\" dispatches with arguments at {:#x}, but indirect arguments' \
+             address must be a multiple of {INDIRECT_ALIGNMENT}",
+            self.label,
+            arguments.0,
+        );
+        self.commands.push(Command::DispatchIndirect { arguments });
+    }
+
     /// Opens a debug region called `name`, which capture tools show around
     /// the commands recorded until the matching
     /// [`end_debug_region`](Self::end_debug_region). Regions nest.
@@ -539,6 +593,8 @@ pub(crate) enum RecordedCommand<'a> {
     },
     /// See [`CommandList::dispatch`].
     Dispatch([u32; 3]),
+    /// See [`CommandList::dispatch_indirect`].
+    DispatchIndirect(GpuAddress),
     /// See [`CommandList::begin_debug_region`].
     BeginDebugRegion(&'a str),
     /// See [`CommandList::end_debug_region`].
@@ -591,6 +647,9 @@ impl CommandList {
                     data: &self.push_data[data.clone()],
                 },
                 Command::Dispatch { groups } => RecordedCommand::Dispatch(groups),
+                Command::DispatchIndirect { arguments } => {
+                    RecordedCommand::DispatchIndirect(arguments)
+                }
                 Command::BeginDebugRegion { ref text } => {
                     RecordedCommand::BeginDebugRegion(&self.text[text.clone()])
                 }
@@ -646,6 +705,7 @@ mod tests {
         list.push_data(8, &[]);
         list.push_data(8, &[2, 0, 0, 0]);
         list.dispatch([1, 1, 1]);
+        list.dispatch_indirect(GpuAddress(0x2004));
         list.push_data(0, &[7; MAX_PUSH_DATA_SIZE as usize]);
         assert_eq!(
             list.recorded(),
@@ -665,6 +725,7 @@ mod tests {
                     data: &[2, 0, 0, 0],
                 },
                 RecordedCommand::Dispatch([1, 1, 1]),
+                RecordedCommand::DispatchIndirect(GpuAddress(0x2004)),
                 RecordedCommand::PushData {
                     offset: 0,
                     data: &[7; MAX_PUSH_DATA_SIZE as usize],
@@ -680,6 +741,38 @@ mod tests {
         let mut list = CommandList::new("compute");
         list.push_data(0, &[0; 8]);
         list.dispatch([1, 1, 1]);
+    }
+
+    /// An indirect dispatch with no program bound panics, as a direct one
+    /// does.
+    #[test]
+    #[should_panic(expected = "command list \"compute\" dispatches with no program bound")]
+    fn indirect_dispatches_need_a_program() {
+        CommandList::new("compute").dispatch_indirect(GpuAddress(0x1000));
+    }
+
+    /// Indirect arguments at an address that isn't a multiple of 4 panic.
+    #[test]
+    #[should_panic(
+        expected = "command list \"compute\" dispatches with arguments at 0x1002, but indirect \
+                    arguments' address must be a multiple of 4"
+    )]
+    fn unaligned_dispatch_arguments_panic() {
+        let mut list = CommandList::new("compute");
+        list.bind_program(program());
+        list.dispatch_indirect(GpuAddress(0x1002));
+    }
+
+    /// Indirect arguments that pass the end of the address space panic.
+    #[test]
+    #[should_panic(
+        expected = "command list \"compute\" dispatches with arguments 12 bytes at \
+                    0xfffffffffffffff8, past the end of the address space"
+    )]
+    fn dispatch_arguments_past_the_end_of_the_address_space_panic() {
+        let mut list = CommandList::new("compute");
+        list.bind_program(program());
+        list.dispatch_indirect(GpuAddress(u64::MAX - 7));
     }
 
     /// A push data block that passes the end of the push data panics,

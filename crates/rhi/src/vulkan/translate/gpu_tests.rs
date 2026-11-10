@@ -15,7 +15,7 @@ use crate::test_shaders;
 use crate::vulkan::test_support::{Capability, VulkanTestBackend, require_capabilities};
 use crate::{
     Access, AddressMode, Barrier, Buffer, BufferDesc, BufferUsage, CommandList, DescriptorIndex,
-    Extent3d, Filter, Format, GpuResources, MemoryLocation, QueueId, QueueKind,
+    Extent3d, Filter, Format, GpuAddress, GpuResources, MemoryLocation, QueueId, QueueKind,
     RenderHardwareInterface, SamplerDesc, SubmitDesc, Subresource, Texture, TextureCopy,
     TextureDataLayout, TextureDesc, TextureDimension, TextureUsage, TextureView,
 };
@@ -99,6 +99,96 @@ fn compute_writes_through_device_address() {
         assert_eq!(u32::from_le_bytes(value), 0xC10C_C0DE, "{kind:?}");
         resources.destroy_buffer(output);
     }
+    resources.destroy_program(program);
+}
+
+/// A compute program runs on workgroup counts the GPU wrote, read from
+/// their address, on the graphics queue and on the compute queue, and the
+/// number of workgroups it ran is read back. The arguments are in an
+/// indirect buffer, and in one that's a storage buffer too, as one a
+/// compute shader writes would be.
+#[test]
+fn compute_dispatches_indirectly() {
+    let session = TestSession::new();
+    let backend = VulkanTestBackend::headless(&session);
+    let resources = backend.resources();
+    let program = resources
+        .create_program(&test_shaders::count_groups().desc())
+        .unwrap();
+    let usages = [
+        BufferUsage::INDIRECT,
+        BufferUsage::INDIRECT | BufferUsage::STORAGE,
+    ];
+    for (kind, usage) in [QueueKind::Graphics, QueueKind::Compute]
+        .into_iter()
+        .flat_map(|kind| usages.map(|usage| (kind, usage)))
+    {
+        let arguments = resources
+            .create_buffer(&BufferDesc {
+                label: "arguments",
+                size: 16,
+                usage,
+                location: MemoryLocation::Device,
+            })
+            .unwrap();
+        let counter = resources
+            .create_buffer(&BufferDesc {
+                label: "counter",
+                size: 4,
+                usage: BufferUsage::STORAGE,
+                location: MemoryLocation::Readback,
+            })
+            .unwrap();
+        let arguments_address = resources.buffer_address(arguments);
+        let counter_address = resources.buffer_address(counter);
+        let mut list = CommandList::new("count groups");
+        // Two workgroups in each dimension, from 4 bytes in, so the count
+        // is 8 only if all three are read, from there.
+        list.fill_buffer(arguments_address, 4, 0);
+        list.fill_buffer(GpuAddress(arguments_address.0 + 4), 12, 2);
+        list.fill_buffer(counter_address, 4, 0);
+        list.barrier(&[
+            Barrier::buffer(arguments, Access::CopyWrite, Access::IndirectRead),
+            Barrier::buffer(
+                counter,
+                Access::CopyWrite,
+                Access::ComputeShaderRead | Access::ComputeShaderWrite,
+            ),
+        ]);
+        list.bind_program(program);
+        list.push_data(0, &counter_address.0.to_le_bytes());
+        list.dispatch_indirect(GpuAddress(arguments_address.0 + 4));
+        list.barrier(&[Barrier::buffer(
+            counter,
+            Access::ComputeShaderWrite,
+            Access::HostRead,
+        )]);
+        run(&backend, kind, &list);
+        let mut count = [0; 4];
+        resources.read_buffer(counter, 0, &mut count).unwrap();
+        assert_eq!(u32::from_le_bytes(count), 8, "{kind:?}, {usage:?}");
+        resources.destroy_buffer(arguments);
+        resources.destroy_buffer(counter);
+    }
+    resources.destroy_program(program);
+}
+
+/// An indirect dispatch's program must be a compute program too.
+#[test]
+fn indirect_dispatches_need_a_compute_program() {
+    let session = TestSession::new();
+    let backend = VulkanTestBackend::headless(&session);
+    let resources = backend.resources();
+    let program = resources
+        .create_program(&test_shaders::triangle().desc())
+        .unwrap();
+    let mut list = CommandList::new("draw");
+    list.bind_program(program);
+    list.dispatch_indirect(GpuAddress(0x1000));
+    assert_eq!(
+        translation_panic(&backend, QueueKind::Graphics, &list),
+        "command list \"draw\" dispatches with program \"triangle\", which isn't a compute program",
+    );
     resources.destroy_program(program);
 }
 
