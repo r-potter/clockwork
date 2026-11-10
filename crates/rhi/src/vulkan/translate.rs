@@ -41,7 +41,7 @@ use super::error::error;
 use super::queues::Queues;
 use super::timings::RecordedTimings;
 use crate::barrier::BarrierTarget;
-use crate::command_list::Command;
+use crate::command_list::{Command, DISPATCH_ARGUMENTS_SIZE};
 use crate::copy::check_texture_copy;
 use crate::deferred::Translation;
 use crate::ffi::truncate_to_cstring;
@@ -555,17 +555,29 @@ impl VulkanDevice {
                     }
                 }
                 &Command::Dispatch { groups: [x, y, z] } => {
-                    let (label, is_compute) =
-                        program_bound.expect("recording checked that a program is bound");
-                    assert!(
-                        is_compute,
-                        "command list \"{}\" dispatches with program \"{label}\", which isn't a \
-                         compute program",
-                        list.label(),
-                    );
+                    check_dispatch(list, program_bound);
                     // SAFETY: Guaranteed by the caller, and a compute
                     // program the queue can run is bound, with the heaps.
                     unsafe { device.cmd_dispatch(buffer, x, y, z) };
+                }
+                &Command::DispatchIndirect { arguments } => {
+                    check_dispatch(list, program_bound);
+                    let dispatch_info = vk::DispatchIndirect2InfoKHR::default()
+                        .address_range(
+                            vk::DeviceAddressRangeKHR::default()
+                                .address(arguments.0)
+                                .size(DISPATCH_ARGUMENTS_SIZE),
+                        )
+                        .address_flags(ADDRESS_FLAGS);
+                    // SAFETY: Guaranteed by the caller, a compute program
+                    // the queue can run is bound, with the heaps, recording
+                    // checked the arguments' alignment, and
+                    // `dispatch_info` is valid for the call.
+                    unsafe {
+                        self.device
+                            .device_address_commands()
+                            .cmd_dispatch_indirect2(buffer, &dispatch_info);
+                    }
                 }
                 Command::BeginDebugRegion { text } => {
                     if let Some(debug_utils) = self.device.debug_utils() {
@@ -688,6 +700,21 @@ impl QueueLookup for Queues {
     fn name(&self, id: QueueId) -> &'static str {
         Queues::name(self, id)
     }
+}
+
+/// Checks that a dispatch in `list` can run `program_bound`, the label of
+/// the program last bound and whether it's a compute program.
+///
+/// # Panics
+///
+/// Panics, naming the list and the program, if it isn't a compute program.
+fn check_dispatch(list: &CommandList, program_bound: Option<(&str, bool)>) {
+    let (label, is_compute) = program_bound.expect("recording checked that a program is bound");
+    assert!(
+        is_compute,
+        "command list \"{}\" dispatches with program \"{label}\", which isn't a compute program",
+        list.label(),
+    );
 }
 
 /// How `transfer`, a barrier's queue transfer, is recorded in the command
