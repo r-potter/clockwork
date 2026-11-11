@@ -6,7 +6,8 @@
 //! removal (design 0002, "Keeping the recording model reversible"). It
 //! looks up every handle the list names, holding each table's read lock
 //! once for the whole list, and panics on a stale one, on a subresource
-//! outside its texture, and on a program the queue can't run.
+//! outside its texture, on a program the queue can't run, and on render
+//! state for a queue that doesn't draw.
 //!
 //! Every command buffer for a queue that runs programs, the graphics or
 //! compute queue, starts by binding both descriptor heaps, so each
@@ -39,6 +40,7 @@ use super::access::{Side, scope};
 use super::command_pools::CommandPool;
 use super::error::error;
 use super::queues::Queues;
+use super::render_state::colour_attachments;
 use super::timings::RecordedTimings;
 use crate::barrier::BarrierTarget;
 use crate::command_list::{Command, DISPATCH_ARGUMENTS_SIZE};
@@ -180,8 +182,9 @@ impl VulkanDevice {
     /// # Panics
     ///
     /// Panics if `list` has a debug region or timing scope open, names a
-    /// stale handle, or binds a program the queue can't run, or if a
-    /// dispatch's program isn't a compute program.
+    /// stale handle, binds a program the queue can't run, or sets render
+    /// state on a queue that doesn't draw, or if a dispatch's program isn't
+    /// a compute program.
     pub(super) fn translate(
         self: &Arc<Self>,
         id: QueueId,
@@ -240,8 +243,8 @@ impl VulkanDevice {
     ///
     /// Panics if `list` names a stale handle, has a queue transfer neither
     /// from nor to that queue, binds a program or pushes data the queue
-    /// can't use, or dispatches with a program that isn't a compute
-    /// program.
+    /// can't use, sets render state on a queue that doesn't draw, or
+    /// dispatches with a program that isn't a compute program.
     unsafe fn record(
         &self,
         buffer: vk::CommandBuffer,
@@ -253,6 +256,8 @@ impl VulkanDevice {
         let writes_timestamps = self.queues.clock(id).is_some();
         let kind = self.queues.kind(id);
         let runs_programs = kind != QueueKind::Transfer;
+        let colour_attachments =
+            colour_attachments(self.physical_device.limits().max_color_attachments);
         if runs_programs {
             let descriptor_heap = self.device.descriptor_heap();
             // SAFETY: Guaranteed by the caller, the queue's family supports
@@ -533,6 +538,19 @@ impl VulkanDevice {
                     }
                     program_bound = Some((label, entry.is_compute()));
                 }
+                &Command::SetRenderState { state } => {
+                    check_draws(list, kind, "sets render state");
+                    // SAFETY: Guaranteed by the caller, the queue's family
+                    // supports graphics, and `colour_attachments` is at most
+                    // the device's limit.
+                    unsafe {
+                        self.device.set_render_state(
+                            buffer,
+                            list.render_state(state),
+                            colour_attachments,
+                        );
+                    }
+                }
                 &Command::PushData { offset, ref data } => {
                     assert!(
                         runs_programs,
@@ -700,6 +718,23 @@ impl QueueLookup for Queues {
     fn name(&self, id: QueueId) -> &'static str {
         Queues::name(self, id)
     }
+}
+
+/// Checks that `list`, translated for a queue of `kind`, can record a
+/// command that sets state for draws, which `does` describes for the
+/// message.
+///
+/// # Panics
+///
+/// Panics, naming the list, if the queue isn't the graphics queue, the only
+/// one that draws.
+fn check_draws(list: &CommandList, kind: QueueKind, does: &str) {
+    assert!(
+        kind == QueueKind::Graphics,
+        "command list \"{}\" {does}, but only the graphics queue draws, not the {} queue",
+        list.label(),
+        kind.name(),
+    );
 }
 
 /// Checks that a dispatch in `list` can run `program_bound`, the label of

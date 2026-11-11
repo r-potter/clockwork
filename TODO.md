@@ -70,6 +70,15 @@ Outstanding tasks and future work.
       itself, the way `create_program` now does; make the triangle a
       `Program` once draws arrive, and remove `TriangleShaders` and its
       second copy of `triangle.spv`.
+- [ ] **Profile command list recording and translation.** Recording
+      appends each command's data to the list's arenas without removing
+      duplicates, so a list that sets the same `RenderState` before every
+      draw stores a copy each time, and translation sets every piece of
+      dynamic state for each one (design 0002, "Performance"). Once
+      something draws real scenes, profile recording and translating a
+      large list. If it's worth it, store each distinct render state once,
+      for example with a map from state to its index in the arena, or skip
+      state that hasn't changed since the last one set.
 - [ ] **Let a program's stages come from separate SPIR-V modules.**
       `ProgramDesc` has one `spirv` field, and every stage is created from
       that module, choosing its entry point by name. That suits `slangc`,
