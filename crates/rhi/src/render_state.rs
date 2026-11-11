@@ -13,7 +13,7 @@ pub const MAX_COLOUR_ATTACHMENTS: usize = 8;
 /// [`Default`] gives the project's conventions: triangle lists,
 /// counter-clockwise front faces, back faces culled, a reverse-Z depth test
 /// ([`CompareOp::Greater`]) that writes depth, and every colour attachment
-/// written in full. Change it with the methods, which
+/// written in full, without blending. Change it with the methods, which
 /// chain:
 ///
 /// ```
@@ -177,14 +177,18 @@ pub enum CompareOp {
 /// How a colour attachment is written.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct ColourWrite {
+    /// How the fragment's colour is blended with the attachment's, or
+    /// `None` to replace it.
+    pub blend: Option<Blend>,
     /// Which channels are written.
     pub mask: ColourMask,
 }
 
 impl Default for ColourWrite {
-    /// Every channel written.
+    /// Every channel written, without blending.
     fn default() -> Self {
         Self {
+            blend: None,
             mask: ColourMask::ALL,
         }
     }
@@ -220,6 +224,105 @@ impl ColourMask {
     };
 }
 
+/// How a fragment's colour, the source, is blended with the attachment's,
+/// the destination, with a component for the colour channels and one for
+/// alpha.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct Blend {
+    /// How red, green and blue are blended.
+    pub colour: BlendComponent,
+    /// How alpha is blended.
+    pub alpha: BlendComponent,
+}
+
+impl Blend {
+    /// Blending with straight (not premultiplied) alpha: the source over the
+    /// destination, weighted by the source's alpha.
+    ///
+    /// Only colour is weighted by the source's alpha. Alpha is coverage,
+    /// which is the same whether colour is premultiplied or not, so it
+    /// blends as in [`Blend::PREMULTIPLIED_ALPHA`]: weighting it too would
+    /// write the square of a translucent source's coverage. The colour
+    /// written is straight only over an opaque destination.
+    pub const ALPHA: Self = Self {
+        colour: BlendComponent {
+            source: BlendFactor::SourceAlpha,
+            destination: BlendFactor::OneMinusSourceAlpha,
+            operation: BlendOp::Add,
+        },
+        alpha: BlendComponent {
+            source: BlendFactor::One,
+            destination: BlendFactor::OneMinusSourceAlpha,
+            operation: BlendOp::Add,
+        },
+    };
+    /// Blending with premultiplied alpha: the source over the destination.
+    pub const PREMULTIPLIED_ALPHA: Self = Self {
+        colour: BlendComponent {
+            source: BlendFactor::One,
+            destination: BlendFactor::OneMinusSourceAlpha,
+            operation: BlendOp::Add,
+        },
+        alpha: BlendComponent {
+            source: BlendFactor::One,
+            destination: BlendFactor::OneMinusSourceAlpha,
+            operation: BlendOp::Add,
+        },
+    };
+}
+
+/// How one component of a [`Blend`] is computed: `source * source factor`
+/// combined with `destination * destination factor` by `operation`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct BlendComponent {
+    /// What the source is multiplied by.
+    pub source: BlendFactor,
+    /// What the destination is multiplied by.
+    pub destination: BlendFactor,
+    /// How the two are combined.
+    pub operation: BlendOp,
+}
+
+/// What a blend multiplies the source or destination by.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum BlendFactor {
+    /// 0.
+    Zero,
+    /// 1.
+    One,
+    /// The source's colour, or alpha for the alpha component.
+    SourceColour,
+    /// 1 minus the source's colour.
+    OneMinusSourceColour,
+    /// The destination's colour, or alpha for the alpha component.
+    DestinationColour,
+    /// 1 minus the destination's colour.
+    OneMinusDestinationColour,
+    /// The source's alpha.
+    SourceAlpha,
+    /// 1 minus the source's alpha.
+    OneMinusSourceAlpha,
+    /// The destination's alpha.
+    DestinationAlpha,
+    /// 1 minus the destination's alpha.
+    OneMinusDestinationAlpha,
+}
+
+/// How a blend combines the weighted source and destination.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum BlendOp {
+    /// Source plus destination.
+    Add,
+    /// Source minus destination.
+    Subtract,
+    /// Destination minus source.
+    ReverseSubtract,
+    /// The lesser of the two, unweighted: the factors are ignored.
+    Min,
+    /// The greater of the two, unweighted: the factors are ignored.
+    Max,
+}
+
 // Render state is plain data, recorded on any thread (design 0002,
 // "Threading", R15).
 const _: () = {
@@ -251,6 +354,7 @@ mod tests {
             }),
         );
         for write in state.colour {
+            assert_eq!(write.blend, None);
             assert_eq!(write.mask, ColourMask::ALL);
         }
     }
@@ -259,7 +363,8 @@ mod tests {
     #[test]
     fn methods_change_only_their_state() {
         let default = RenderState::default();
-        let masked = ColourWrite {
+        let blended = ColourWrite {
+            blend: Some(Blend::ALPHA),
             mask: ColourMask::NONE,
         };
         let state = default
@@ -267,13 +372,13 @@ mod tests {
             .cull(CullMode::None)
             .front_face(FrontFace::Clockwise)
             .depth(None)
-            .colour(3, masked);
+            .colour(3, blended);
         assert_eq!(state.topology, Topology::LineStrip);
         assert_eq!(state.cull, CullMode::None);
         assert_eq!(state.front_face, FrontFace::Clockwise);
         assert_eq!(state.depth, None);
         let mut colour = default.colour;
-        colour[3] = masked;
+        colour[3] = blended;
         assert_eq!(state.colour, colour);
     }
 

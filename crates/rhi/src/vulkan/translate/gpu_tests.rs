@@ -14,7 +14,7 @@ use clockwork_diagnostics::capture::TestSession;
 use crate::test_shaders;
 use crate::vulkan::test_support::{Capability, VulkanTestBackend, require_capabilities};
 use crate::{
-    Access, AddressMode, Barrier, Buffer, BufferDesc, BufferUsage, ColourMask, ColourWrite,
+    Access, AddressMode, Barrier, Blend, Buffer, BufferDesc, BufferUsage, ColourMask, ColourWrite,
     CommandList, CompareOp, CullMode, DepthTest, DescriptorIndex, Extent3d, Filter, Format,
     FrontFace, GpuAddress, GpuResources, MemoryLocation, QueueId, QueueKind,
     RenderHardwareInterface, RenderState, SamplerDesc, SubmitDesc, Subresource, Texture,
@@ -570,7 +570,8 @@ fn render_state_is_set_on_the_graphics_queue() {
     let program = resources
         .create_program(&test_shaders::triangle().desc())
         .unwrap();
-    let masked = ColourWrite {
+    let blended = ColourWrite {
+        blend: Some(Blend::PREMULTIPLIED_ALPHA),
         mask: ColourMask {
             alpha: false,
             ..ColourMask::ALL
@@ -584,7 +585,7 @@ fn render_state_is_set_on_the_graphics_queue() {
             compare: CompareOp::GreaterOrEqual,
             write: false,
         }))
-        .colour(0, masked)
+        .colour(0, blended)
         .colour(1, ColourWrite::default());
     let mut list = CommandList::new("draw");
     list.bind_program(program);
