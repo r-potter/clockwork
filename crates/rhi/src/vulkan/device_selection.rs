@@ -390,10 +390,13 @@ fn queue_families(candidate: &Candidate) -> QueueFamilies {
 ///
 /// - `vkCmdCopyMemoryKHR` writes nothing when a range is flagged
 ///   `UNKNOWN_STORAGE_BUFFER_USAGE`, which Vulkan allows for any range.
-/// - `vkCmdCopyImageToMemoryKHR` isn't synchronized with the work around it.
+/// - `vkCmdCopyImageToMemoryKHR` isn't ordered after a copy into the same
+///   image. That happens on other families too, but there translation's
+///   flags hide it, and on the transfer-only family they make the copy
+///   into the image fail instead.
 ///
-/// Both work on the compute family. `TODO.md` tracks limiting this to the
-/// drivers before the fix once it ships.
+/// `TODO.md` tracks limiting this to the drivers before the fix once it
+/// ships.
 pub(super) fn copies_break_on_transfer_families(device: &PhysicalDevice) -> bool {
     device.properties.vulkan12.driver_id == vk::DriverId::NVIDIA_PROPRIETARY
 }

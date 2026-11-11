@@ -238,33 +238,34 @@ Outstanding tasks and future work.
       barrier between copies isn't reported (see "Validation is required"
       in `docs/testing.md`). When a validation layer release tracks them,
       add a copy case to `missing_barrier_is_reported`.
-- [ ] **Debug buffer-to-texture copies on NVIDIA in Nsight.** On the RTX
-      4090 with driver 617.42, `vkCmdCopyMemoryToImageKHR` writes nothing
-      to the image, and validation reports nothing. The same data copied
-      with `vkCmdCopyBufferToImage` arrives, `vkCmdCopyImageToMemoryKHR`
-      works, and `padded_rows_round_trip` passes on lavapipe, so it looks
-      like the driver's. Changing the row layout, or setting
-      `FULLY_BOUND`, made no difference. Capture the copy in Nsight
-      Graphics to see what the driver records, then report it to NVIDIA
-      with a minimal reproduction, or fix our side if it's ours. Until
-      then `padded_rows_round_trip` and `subresources_round_trip` skip on
-      NVIDIA drivers up to 617.42
-      (`crates/rhi/src/vulkan/translate/gpu_tests.rs`), so a later driver
-      runs them, and uploads to textures, from `rhi-streaming` on, won't
-      work there unless design 0002's fallback lands ("Risks").
-- [ ] **Use NVIDIA's transfer-only queue family again once it's fixed.**
-      NVIDIA's proprietary driver, up to 617.42 at least, breaks two copies
-      by address on its transfer-only family: `vkCmdCopyMemoryKHR` writes
-      nothing when a range is flagged `UNKNOWN_STORAGE_BUFFER_USAGE`, and
-      `vkCmdCopyImageToMemoryKHR` isn't synchronized. NVIDIA has
-      acknowledged both, with fixes due in a later driver. Until then
+- [ ] **Remove the workarounds for NVIDIA's broken copies once they're
+      fixed.** NVIDIA's proprietary driver, up to 617.42 at least, breaks
+      copies by address, with no validation message:
+      - On its transfer-only family, `vkCmdCopyMemoryKHR` writes nothing
+        when a range is flagged `UNKNOWN_STORAGE_BUFFER_USAGE`, as
+        translation flags every range.
+      - `vkCmdCopyImageToMemoryKHR` isn't ordered after a copy into the
+        same image, despite the barrier between them, so it reads stale
+        data. On the graphics queue, `padded_rows_round_trip` reads zeros
+        with no flags, and passes when split into two submissions, so the
+        copy in does write. Flagging the copy in
+        `UNKNOWN_STORAGE_BUFFER_USAGE`, as translation does, hides it
+        there, which is why the round trips pass.
+      - On the transfer-only family, a submission that copies into an
+        image with `UNKNOWN_STORAGE_BUFFER_USAGE` fails. With no flag the
+        round trip read the wrong data, likely the ordering bug.
+
+      NVIDIA has acknowledged the first two, with fixes due in a later
+      driver. Report the third if the fix doesn't cover it. Until then
       device selection doesn't use transfer-only families on that driver
       (`copies_break_on_transfer_families` in
       `crates/rhi/src/vulkan/device_selection.rs`), so transfers share the
       compute family, and tests that need a dedicated transfer queue skip
       there. When the fix ships, limit the check to earlier driver
-      versions, and check `cross_queue_wait` passes on the transfer-only
-      family.
+      versions, and check `cross_queue_wait`,
+      `storage_buffers_are_filled_and_copied` and the texture round trips
+      pass on the transfer-only family, and that the round trips pass on
+      the graphics queue with no flag on the copy in.
 - [ ] **Make `CLOCKWORK_VALIDATION=gpu` usable.** With GPU-assisted
       validation, every T1 test fails on the layer's own warnings at
       start-up: `VALIDATION-SETTINGS`, for running GPU-AV alongside core
