@@ -12,7 +12,6 @@ use std::panic::{self, AssertUnwindSafe};
 use clockwork_diagnostics::capture::TestSession;
 
 use crate::test_shaders;
-use crate::test_support::skip_for_driver_bug;
 use crate::vulkan::test_support::{Capability, VulkanTestBackend, require_capabilities};
 use crate::{
     Access, AddressMode, Barrier, Buffer, BufferDesc, BufferUsage, CommandList, DescriptorIndex,
@@ -487,6 +486,55 @@ fn fills_write_their_range() {
     resources.destroy_buffer(readback);
 }
 
+/// Storage buffers and other buffers are filled and copied on every queue,
+/// with no validation error, with their ranges flagged as possibly in a
+/// storage buffer, as translation flags every range. NVIDIA's driver 617.42
+/// writes nothing for such copies on its transfer-only family, which device
+/// selection doesn't use there, so this checks the data too.
+#[test]
+fn storage_buffers_are_filled_and_copied() {
+    let session = TestSession::new();
+    let backend = VulkanTestBackend::headless(&session);
+    let resources = backend.resources();
+    for kind in [QueueKind::Graphics, QueueKind::Compute, QueueKind::Transfer] {
+        for usage in [BufferUsage::STORAGE, BufferUsage::COPIES] {
+            let create = |label, location| {
+                resources
+                    .create_buffer(&BufferDesc {
+                        label,
+                        size: 8,
+                        usage,
+                        location,
+                    })
+                    .unwrap()
+            };
+            let source = create("source", MemoryLocation::Device);
+            let readback = create("readback", MemoryLocation::Readback);
+
+            let mut list = CommandList::new("storage");
+            list.fill_buffer(resources.buffer_address(source), 8, 0x0403_0201);
+            list.barrier(&[Barrier::buffer(source, Access::CopyWrite, Access::CopyRead)]);
+            list.copy_buffer(
+                resources.buffer_address(source),
+                resources.buffer_address(readback),
+                8,
+            );
+            list.barrier(&[Barrier::buffer(
+                readback,
+                Access::CopyWrite,
+                Access::HostRead,
+            )]);
+            run(&backend, kind, &list);
+
+            let mut out = [0; 8];
+            resources.read_buffer(readback, 0, &mut out).unwrap();
+            assert_eq!(out, [1, 2, 3, 4, 1, 2, 3, 4], "{kind:?}, {usage:?}");
+            resources.destroy_buffer(source);
+            resources.destroy_buffer(readback);
+        }
+    }
+}
+
 /// A 4×4 texture of `format`, with three mips and two layers, for
 /// `usage`.
 fn create_texture(
@@ -611,43 +659,18 @@ fn whole(texture: Texture, extent: Extent3d) -> TextureCopy {
     }
 }
 
-/// The PCI vendor ID of NVIDIA's GPUs.
-const NVIDIA: u32 = 0x10DE;
-
-/// The last NVIDIA driver known to drop `vkCmdCopyMemoryToImageKHR`'s
-/// writes, as its major and minor version: the one it was found on.
-const LAST_DROPPING_NVIDIA_DRIVER: (u32, u32) = (617, 42);
-
-/// Whether `backend`'s driver drops `vkCmdCopyMemoryToImageKHR`'s writes,
-/// in which case a test that copies into a texture skips, saying why.
-/// Later drivers run the test, so a fix, or the bug persisting, shows.
-fn copies_into_textures_are_dropped(backend: &VulkanTestBackend) -> bool {
-    let device = &backend.core.physical_device;
-    let properties = &device.properties.core;
-    // NVIDIA packs its driver version as 10 bits of major and 8 of minor.
-    let version = (
-        properties.driver_version >> 22,
-        (properties.driver_version >> 14) & 0xFF,
-    );
-    let dropped = properties.vendor_id == NVIDIA && version <= LAST_DROPPING_NVIDIA_DRIVER;
-    if dropped {
-        skip_for_driver_bug(
-            &device.name(),
-            "vkCmdCopyMemoryToImageKHR writes nothing to the image",
-        );
-    }
-    dropped
-}
-
 /// Data with padded rows, after an offset, copied into a texture and back
 /// out tightly packed, matches the texels it held (R25's
 /// `padded_rows_round_trip`).
 ///
-/// Skipped on NVIDIA's drivers up to 617.42, where
-/// `vkCmdCopyMemoryToImageKHR` writes nothing to the image, with no
-/// validation message. It passes on lavapipe, and the handle-based copy
-/// works on NVIDIA, so it's the driver's. `TODO.md` tracks debugging it in
-/// Nsight.
+/// On NVIDIA's driver 617.42, the copy out of the texture doesn't wait for
+/// the copy into it, despite the barrier between them, and reads zeros,
+/// unless the copy into it is flagged as possibly in a storage buffer,
+/// which translation does to every range. Split into two submissions, the
+/// round trip passes with no flags, so the copy in writes its data, and the
+/// fault is in ordering the two, as the synchronization bug NVIDIA has
+/// acknowledged in `vkCmdCopyImageToMemoryKHR` would be. `TODO.md` tracks
+/// it.
 #[test]
 fn padded_rows_round_trip() {
     const WIDTH: u32 = 4;
@@ -656,9 +679,6 @@ fn padded_rows_round_trip() {
     const OFFSET: u64 = 64;
     let session = TestSession::new();
     let backend = VulkanTestBackend::headless(&session);
-    if copies_into_textures_are_dropped(&backend) {
-        return;
-    }
     let resources = backend.resources();
     let extent = Extent3d::new_2d(WIDTH, HEIGHT);
     let texture = create_texture(
@@ -739,15 +759,11 @@ fn padded_rows_round_trip() {
 /// A copy into one layer of a mip other than 0, read back from an offset
 /// region of it, gives the texels at that offset, so the mip, layer and
 /// origin each reach Vulkan where they belong, rather than mistakes in both
-/// directions cancelling out. Skipped where copies into textures are
-/// dropped, as `padded_rows_round_trip` is.
+/// directions cancelling out.
 #[test]
 fn subresources_round_trip() {
     let session = TestSession::new();
     let backend = VulkanTestBackend::headless(&session);
-    if copies_into_textures_are_dropped(&backend) {
-        return;
-    }
     let resources = backend.resources();
     let texture = create_texture(
         &**resources,

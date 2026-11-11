@@ -49,6 +49,17 @@ use crate::{
     Access, AccessSet, CommandBuffer, CommandList, GpuTimepoint, QueueId, QueueKind, RhiResult,
 };
 
+/// The flags every address command passes for its ranges: possibly in a
+/// storage buffer, which Vulkan allows for any range (design 0002, "Binding
+/// model").
+///
+/// Commands name buffers only by address, so the exact flag, whether a
+/// storage buffer holds the range, would need a lookup of each range in a
+/// table of the storage buffers' ranges. The flag is a hint, and nothing
+/// has shown the exact one to be faster.
+const ADDRESS_FLAGS: vk::AddressCommandFlagsKHR =
+    vk::AddressCommandFlagsKHR::UNKNOWN_STORAGE_BUFFER_USAGE;
+
 /// A command list translated for one queue, holding the command pool its
 /// command buffer was recorded from, and holding back the destruction of
 /// what it may use, until it's submitted or dropped.
@@ -368,7 +379,7 @@ impl VulkanDevice {
                         self.device.device_address_commands().cmd_fill_memory(
                             buffer,
                             &range,
-                            vk::AddressCommandFlagsKHR::empty(),
+                            ADDRESS_FLAGS,
                             value,
                         );
                     }
@@ -384,11 +395,13 @@ impl VulkanDevice {
                                 .address(source.0)
                                 .size(size),
                         )
+                        .src_flags(ADDRESS_FLAGS)
                         .dst_range(
                             vk::DeviceAddressRangeKHR::default()
                                 .address(destination.0)
                                 .size(size),
-                        );
+                        )
+                        .dst_flags(ADDRESS_FLAGS);
                     let copy_info = vk::CopyDeviceMemoryInfoKHR::default()
                         .regions(std::slice::from_ref(&region));
                     // SAFETY: Guaranteed by the caller, and `copy_info` is
@@ -461,6 +474,7 @@ impl VulkanDevice {
                                 .address(start)
                                 .size(end - copy.layout.offset),
                         )
+                        .address_flags(ADDRESS_FLAGS)
                         .address_row_length(row_length)
                         .address_image_height(image_height)
                         .image_subresource(vk::ImageSubresourceLayers {
