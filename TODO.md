@@ -252,6 +252,19 @@ Outstanding tasks and future work.
       (`crates/rhi/src/vulkan/translate/gpu_tests.rs`), so a later driver
       runs them, and uploads to textures, from `rhi-streaming` on, won't
       work there unless design 0002's fallback lands ("Risks").
+- [ ] **Use NVIDIA's transfer-only queue family again once it's fixed.**
+      NVIDIA's proprietary driver, up to 617.42 at least, breaks two copies
+      by address on its transfer-only family: `vkCmdCopyMemoryKHR` writes
+      nothing when a range is flagged `UNKNOWN_STORAGE_BUFFER_USAGE`, and
+      `vkCmdCopyImageToMemoryKHR` isn't synchronized. NVIDIA has
+      acknowledged both, with fixes due in a later driver. Until then
+      device selection doesn't use transfer-only families on that driver
+      (`copies_break_on_transfer_families` in
+      `crates/rhi/src/vulkan/device_selection.rs`), so transfers share the
+      compute family, and tests that need a dedicated transfer queue skip
+      there. When the fix ships, limit the check to earlier driver
+      versions, and check `cross_queue_wait` passes on the transfer-only
+      family.
 - [ ] **Make `CLOCKWORK_VALIDATION=gpu` usable.** With GPU-assisted
       validation, every T1 test fails on the layer's own warnings at
       start-up: `VALIDATION-SETTINGS`, for running GPU-AV alongside core

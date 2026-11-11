@@ -12,6 +12,7 @@ use ash::vk;
 use clockwork_diagnostics::capture::TestSession;
 
 use super::VulkanRenderHardwareInterface;
+use super::device_selection::copies_break_on_transfer_families;
 use crate::test_support::{self, RequiredCapabilities};
 use crate::{Capabilities, PresentCapabilities, QueueKind, RenderHardwareInterface};
 
@@ -118,6 +119,10 @@ impl VulkanTestBackend {
     /// skip message, or panics if `CLOCKWORK_REQUIRED_CAPABILITIES` includes
     /// it.
     ///
+    /// A dedicated transfer queue that device selection left unused because
+    /// its driver breaks copies there is a driver bug, not a missing
+    /// capability, so it skips even when the capability is required.
+    ///
     /// # Panics
     ///
     /// Panics if the device lacks `capability` and it's required.
@@ -128,7 +133,16 @@ impl VulkanTestBackend {
             .filter(|&kind| self.rhi.queue(kind).kind() == kind)
             .collect();
         let supported = capability.is_in(capabilities, self.rhi.present_capabilities(), &dedicated);
-        if !supported {
+        if !supported
+            && capability == Capability::DedicatedTransferQueue
+            && copies_break_on_transfer_families(&self.rhi.core.physical_device)
+        {
+            test_support::skip_for_driver_bug(
+                &capabilities.device_name,
+                "copies by address break on its transfer-only queue family, so transfers \
+                 share the compute family (see TODO.md)",
+            );
+        } else if !supported {
             test_support::missing_capability(
                 capability.name(),
                 &capabilities.device_name,

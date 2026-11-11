@@ -57,8 +57,8 @@ pub(super) struct QueueFamilies {
     /// Compute work: a dedicated compute family if the device has one, and
     /// `graphics` otherwise.
     pub compute: u32,
-    /// Transfers: a dedicated transfer family if the device has one, then
-    /// `compute`.
+    /// Transfers: a dedicated transfer family if the device has one and its
+    /// driver copies correctly there, then `compute`.
     pub transfer: u32,
     /// Can present to the window's surface. `None` when headless. May be the
     /// same family as `graphics`.
@@ -363,12 +363,39 @@ fn queue_families(candidate: &Candidate) -> QueueFamilies {
     };
     let graphics = graphics.expect("requirements guarantee a graphics queue family");
     let compute = dedicated_compute_family(&candidate.device).unwrap_or(graphics);
+    let transfer = if copies_break_on_transfer_families(&candidate.device) {
+        info!(
+            "not using {}'s transfer-only queue family: its driver breaks copies by address \
+             there, so transfers share the compute family",
+            candidate.device.name(),
+        );
+        None
+    } else {
+        dedicated_transfer_family(&candidate.device)
+    };
     QueueFamilies {
         graphics,
         compute,
-        transfer: dedicated_transfer_family(&candidate.device).unwrap_or(compute),
+        transfer: transfer.unwrap_or(compute),
         present,
     }
+}
+
+/// Whether `device`'s driver breaks copies by address on a transfer-only
+/// queue family, so that transfers must share the compute family instead
+/// (design 0002, "Risks").
+///
+/// NVIDIA's proprietary driver does, up to 617.42 at least, in two ways
+/// NVIDIA has acknowledged, with fixes due in a later driver:
+///
+/// - `vkCmdCopyMemoryKHR` writes nothing when a range is flagged
+///   `UNKNOWN_STORAGE_BUFFER_USAGE`, which Vulkan allows for any range.
+/// - `vkCmdCopyImageToMemoryKHR` isn't synchronized with the work around it.
+///
+/// Both work on the compute family. `TODO.md` tracks limiting this to the
+/// drivers before the fix once it ships.
+pub(super) fn copies_break_on_transfer_families(device: &PhysicalDevice) -> bool {
+    device.properties.vulkan12.driver_id == vk::DriverId::NVIDIA_PROPRIETARY
 }
 
 /// The first of `device`'s queue families that supports compute but not
@@ -1044,6 +1071,28 @@ mod tests {
         );
         let families = headless_families(device);
         assert_eq!((families.compute, families.transfer), (1, 1));
+    }
+
+    /// On NVIDIA's proprietary driver, which breaks copies by address on
+    /// transfer-only families, transfers share the compute family even when
+    /// there's a transfer-only family. Other drivers keep it.
+    #[test]
+    fn nvidia_transfers_share_the_compute_family() {
+        let with_driver = |driver_id| {
+            let mut device = with_family(
+                with_family(
+                    device("device", vk::PhysicalDeviceType::DISCRETE_GPU, 8 * GIB),
+                    vk::QueueFlags::COMPUTE | vk::QueueFlags::TRANSFER,
+                ),
+                vk::QueueFlags::TRANSFER,
+            );
+            device.properties.vulkan12.driver_id = driver_id;
+            device
+        };
+        let families = headless_families(with_driver(vk::DriverId::NVIDIA_PROPRIETARY));
+        assert_eq!((families.compute, families.transfer), (1, 1));
+        let families = headless_families(with_driver(vk::DriverId::AMD_PROPRIETARY));
+        assert_eq!((families.compute, families.transfer), (1, 2));
     }
 
     /// Without a dedicated compute family, a dedicated transfer family is
