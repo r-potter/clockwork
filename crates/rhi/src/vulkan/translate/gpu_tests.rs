@@ -325,6 +325,172 @@ fn compute_reads_and_writes_heap_textures() {
     resources.destroy_texture(destination);
 }
 
+/// Each mip of an 8×8 texture is written by compute from the mip above,
+/// sampled through a view of that mip, into a storage view of its own,
+/// with a barrier on each mip between its write and its read. The
+/// smallest is then sampled through a view of only that mip, and mip 1
+/// and the sample are read back (R21's `mip_chain_by_compute`).
+#[test]
+fn mip_chain_by_compute() {
+    const MIPS: u32 = 4;
+    let session = TestSession::new();
+    let backend = VulkanTestBackend::headless(&session);
+    let resources = backend.resources();
+    let texture = |label, size, mip_levels, usage| {
+        resources
+            .create_texture(&TextureDesc {
+                label,
+                dimension: TextureDimension::D2,
+                format: Format::Rgba32Float,
+                extent: Extent3d::new_2d(size, size),
+                mip_levels,
+                array_layers: 1,
+                usage,
+            })
+            .unwrap()
+    };
+    let chain = texture(
+        "chain",
+        8,
+        MIPS,
+        TextureUsage::SAMPLED | TextureUsage::STORAGE | TextureUsage::COPY_SOURCE,
+    );
+    let smallest = texture(
+        "smallest",
+        1,
+        1,
+        TextureUsage::STORAGE | TextureUsage::COPY_SOURCE,
+    );
+    let sampler = resources
+        .create_sampler(&SamplerDesc {
+            label: "nearest",
+            mag_filter: Filter::Nearest,
+            min_filter: Filter::Nearest,
+            mip_filter: Filter::Nearest,
+            address_modes: [AddressMode::ClampToEdge; 3],
+        })
+        .unwrap();
+    let fill = resources
+        .create_program(&test_shaders::fill_texels().desc())
+        .unwrap();
+    let downsample = resources
+        .create_program(&test_shaders::downsample().desc())
+        .unwrap();
+    let copy = resources
+        .create_program(&test_shaders::copy_texels().desc())
+        .unwrap();
+    let index = |texture, view| resources.texture_index(texture, view).unwrap();
+    let sampled = |mip| index(chain, TextureView::Sampled(Subresource::mip(mip)));
+    let storage = |mip| index(chain, TextureView::Storage(Subresource::mip(mip)));
+
+    let mut list = CommandList::new("mip chain");
+    list.barrier(&[
+        Barrier::texture(chain, Access::None, Access::ComputeShaderWrite),
+        Barrier::texture(smallest, Access::None, Access::ComputeShaderWrite),
+    ]);
+    list.bind_program(fill);
+    list.push_data(0, &index_push_data(&[storage(0)]));
+    list.dispatch([1, 1, 1]);
+    list.bind_program(downsample);
+    for mip in 1..MIPS {
+        list.barrier(&[Barrier::subresource(
+            chain,
+            Subresource::mip(mip - 1),
+            Access::ComputeShaderWrite,
+            Access::ComputeShaderSampledRead,
+        )]);
+        list.push_data(0, &index_push_data(&[sampled(mip - 1), storage(mip)]));
+        list.dispatch([1, 1, 1]);
+    }
+    list.barrier(&[Barrier::subresource(
+        chain,
+        Subresource::mip(MIPS - 1),
+        Access::ComputeShaderWrite,
+        Access::ComputeShaderSampledRead,
+    )]);
+    list.bind_program(copy);
+    list.push_data(
+        0,
+        &index_push_data(&[
+            sampled(MIPS - 1),
+            resources.sampler_index(sampler),
+            index(smallest, TextureView::Storage(Subresource::mip(0))),
+        ]),
+    );
+    list.dispatch([1, 1, 1]);
+    list.barrier(&[
+        Barrier::subresource(
+            chain,
+            Subresource::mip(1),
+            Access::ComputeShaderSampledRead,
+            Access::CopyRead,
+        ),
+        Barrier::texture(smallest, Access::ComputeShaderWrite, Access::CopyRead),
+    ]);
+    let mut read_back = Vec::new();
+    for (texture, mip, size) in [(chain, 1, 4), (smallest, 0, 1)] {
+        let extent = Extent3d::new_2d(size, size);
+        let layout = TextureDataLayout::tightly_packed(Format::Rgba32Float, extent);
+        let bytes = u64::from(layout.bytes_per_row * size);
+        let readback = create(&**resources, "readback", bytes, MemoryLocation::Readback);
+        list.copy_texture_to_buffer(
+            TextureCopy {
+                texture,
+                mip,
+                layers: 0..1,
+                origin: [0; 3],
+                extent,
+            },
+            resources.buffer_address(readback),
+            layout,
+        );
+        list.barrier(&[Barrier::buffer(
+            readback,
+            Access::CopyWrite,
+            Access::HostRead,
+        )]);
+        read_back.push((readback, bytes));
+    }
+    run(&backend, QueueKind::Graphics, &list);
+
+    // Mip 0's texel (x, y) is (x, y, x + y, 1), so each of mip 1's is its
+    // 2×2 block's average, and the smallest is the average of all of mip 0.
+    let mip_1: Vec<f32> = (0..4)
+        .flat_map(|y| {
+            (0..4).flat_map(move |x| {
+                let (x, y) = (2.0 * x as f32 + 0.5, 2.0 * y as f32 + 0.5);
+                [x, y, x + y, 1.0]
+            })
+        })
+        .collect();
+    let read = |(buffer, size)| read_texels(&**resources, buffer, size);
+    assert_eq!(read(read_back[0]), mip_1);
+    assert_eq!(read(read_back[1]), [3.5, 3.5, 7.0, 1.0]);
+
+    for (readback, _) in read_back {
+        resources.destroy_buffer(readback);
+    }
+    for program in [fill, downsample, copy] {
+        resources.destroy_program(program);
+    }
+    resources.destroy_sampler(sampler);
+    resources.destroy_texture(chain);
+    resources.destroy_texture(smallest);
+}
+
+/// The `size` bytes of `buffer`, a readback buffer, as `f32`s, such as the
+/// channels of `Rgba32Float` texels copied into it.
+fn read_texels(resources: &dyn GpuResources, buffer: Buffer, size: u64) -> Vec<f32> {
+    let mut bytes = vec![0; size as usize];
+    resources.read_buffer(buffer, 0, &mut bytes).unwrap();
+    let (chunks, rest) = bytes.as_chunks::<4>();
+    assert!(rest.is_empty(), "the buffer holds whole f32s");
+    chunks
+        .iter()
+        .map(|&chunk| f32::from_le_bytes(chunk))
+        .collect()
+}
+
 /// Dispatching with a vertex and fragment program panics when translated,
 /// naming the list and the program.
 #[test]
