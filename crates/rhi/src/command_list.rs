@@ -17,7 +17,8 @@
 use std::ops::Range;
 
 use crate::{
-    Barrier, GpuAddress, MAX_PUSH_DATA_SIZE, Program, RenderState, TextureCopy, TextureDataLayout,
+    Barrier, GpuAddress, MAX_PUSH_DATA_SIZE, Program, Rect2d, RenderState, TextureCopy,
+    TextureDataLayout, Viewport,
 };
 
 /// The alignment, in bytes, of a fill's address and size, as Vulkan
@@ -119,6 +120,16 @@ pub(crate) enum Command {
     SetRenderState {
         /// The state's index in the arena.
         state: usize,
+    },
+    /// Sets the viewport later draws use.
+    SetViewport {
+        /// The viewport.
+        viewport: Viewport,
+    },
+    /// Sets the scissor later draws use.
+    SetScissor {
+        /// The scissor.
+        scissor: Rect2d,
     },
     /// Writes `data` in the list's arena to the push data later dispatches
     /// read, at `offset`.
@@ -377,6 +388,78 @@ impl CommandList {
         });
     }
 
+    /// Sets the viewport later draws use, until it's set again: how they map
+    /// to their attachments, and the range their depths map to.
+    ///
+    /// Translation panics if the queue doesn't draw: only the graphics
+    /// queue does.
+    ///
+    /// # Panics
+    ///
+    /// Panics if any of the viewport's values isn't finite, if it's empty,
+    /// or if a depth isn't from 0 to 1, which Vulkan doesn't allow.
+    pub fn set_viewport(&mut self, viewport: &Viewport) {
+        let Viewport {
+            x,
+            y,
+            width,
+            height,
+            min_depth,
+            max_depth,
+        } = *viewport;
+        assert!(
+            [x, y, width, height, min_depth, max_depth]
+                .iter()
+                .all(|value| value.is_finite()),
+            "command list \"{}\" sets a viewport with a value that isn't finite: {viewport:?}",
+            self.label,
+        );
+        assert!(
+            width > 0.0 && height > 0.0,
+            "command list \"{}\" sets an empty {width}x{height} viewport",
+            self.label,
+        );
+        assert!(
+            (0.0..=1.0).contains(&min_depth) && (0.0..=1.0).contains(&max_depth),
+            "command list \"{}\" sets a viewport with depths {min_depth} to {max_depth}, but \
+             depths must be from 0 to 1",
+            self.label,
+        );
+        self.commands.push(Command::SetViewport {
+            viewport: *viewport,
+        });
+    }
+
+    /// Sets the scissor later draws use, until it's set again: the
+    /// rectangle of their attachments outside which they write nothing. An
+    /// empty scissor discards every fragment.
+    ///
+    /// Translation panics if the queue doesn't draw: only the graphics
+    /// queue does.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the scissor's right or bottom edge is past `i32::MAX`,
+    /// which Vulkan doesn't allow.
+    pub fn set_scissor(&mut self, scissor: Rect2d) {
+        let Rect2d { offset, extent } = scissor;
+        let fits = |start: u32, size: u32| {
+            u64::from(start) + u64::from(size) <= i32::MAX.unsigned_abs().into()
+        };
+        assert!(
+            fits(offset.x, extent.width) && fits(offset.y, extent.height),
+            "command list \"{}\" sets a {}x{} scissor at ({}, {}), whose edges must be at most \
+             {}",
+            self.label,
+            extent.width,
+            extent.height,
+            offset.x,
+            offset.y,
+            i32::MAX,
+        );
+        self.commands.push(Command::SetScissor { scissor });
+    }
+
     /// Writes `data` to the push data later dispatches read, at `offset`
     /// bytes into it (design 0002, "Binding model"). The rest of the push
     /// data keeps what was last written there, so a list can change one
@@ -584,7 +667,7 @@ pub(crate) struct BufferTextureCopy {
 
 /// A recorded command as tests see it, with its arena data resolved.
 #[cfg(test)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) enum RecordedCommand<'a> {
     /// See [`CommandList::barrier`].
     Barrier(&'a [Barrier]),
@@ -614,6 +697,10 @@ pub(crate) enum RecordedCommand<'a> {
     BindProgram(Program),
     /// See [`CommandList::set_render_state`].
     SetRenderState(&'a RenderState),
+    /// See [`CommandList::set_viewport`].
+    SetViewport(Viewport),
+    /// See [`CommandList::set_scissor`].
+    SetScissor(Rect2d),
     /// See [`CommandList::push_data`].
     PushData {
         /// Where the block goes in the push data, in bytes.
@@ -675,6 +762,8 @@ impl CommandList {
                 Command::SetRenderState { state } => {
                     RecordedCommand::SetRenderState(&self.render_states[state])
                 }
+                Command::SetViewport { viewport } => RecordedCommand::SetViewport(viewport),
+                Command::SetScissor { scissor } => RecordedCommand::SetScissor(scissor),
                 Command::PushData { offset, ref data } => RecordedCommand::PushData {
                     offset,
                     data: &self.push_data[data.clone()],
@@ -1149,21 +1238,136 @@ mod tests {
         CommandList::new("overlap").copy_buffer(GpuAddress(0x1080), GpuAddress(0x1000), 256);
     }
 
-    /// Render states are recorded in order, each with its value as it was
-    /// set.
+    /// A viewport over part of a 1920x1080 attachment, with a depth range of
+    /// its own.
+    const VIEWPORT: Viewport = Viewport {
+        x: 960.0,
+        y: 0.0,
+        width: 960.0,
+        height: 540.0,
+        min_depth: 0.25,
+        max_depth: 0.75,
+    };
+
+    /// Render states, viewports and scissors are recorded in order, each
+    /// with its value as it was set.
     #[test]
     fn render_state_is_recorded() {
         let culled = RenderState::default();
         let unculled = culled.cull(crate::CullMode::None);
+        let scissor = Rect2d {
+            offset: crate::Offset2d { x: 1000, y: 20 },
+            extent: crate::Extent2d {
+                width: 100,
+                height: 50,
+            },
+        };
         let mut list = CommandList::new("draws");
         list.set_render_state(&culled);
+        list.set_viewport(&VIEWPORT);
+        list.set_scissor(scissor);
         list.set_render_state(&unculled);
         assert_eq!(
             list.recorded(),
             [
                 RecordedCommand::SetRenderState(&culled),
+                RecordedCommand::SetViewport(VIEWPORT),
+                RecordedCommand::SetScissor(scissor),
                 RecordedCommand::SetRenderState(&unculled),
             ],
         );
+    }
+
+    /// A viewport may start off the attachment, and its depths may be
+    /// reversed.
+    #[test]
+    fn viewports_may_start_off_the_attachment() {
+        let viewport = Viewport {
+            x: -10.5,
+            y: -20.0,
+            min_depth: 1.0,
+            max_depth: 0.0,
+            ..VIEWPORT
+        };
+        let mut list = CommandList::new("offset");
+        list.set_viewport(&viewport);
+        assert_eq!(list.recorded(), [RecordedCommand::SetViewport(viewport)]);
+    }
+
+    /// An empty viewport panics, naming its size.
+    #[test]
+    #[should_panic(expected = "command list \"empty\" sets an empty 0x540 viewport")]
+    fn empty_viewports_panic() {
+        CommandList::new("empty").set_viewport(&Viewport {
+            width: 0.0,
+            ..VIEWPORT
+        });
+    }
+
+    /// A viewport with a value that isn't finite panics.
+    #[test]
+    #[should_panic(
+        expected = "command list \"nan\" sets a viewport with a value that isn't finite"
+    )]
+    fn viewports_that_are_not_finite_panic() {
+        CommandList::new("nan").set_viewport(&Viewport {
+            y: f32::NAN,
+            ..VIEWPORT
+        });
+    }
+
+    /// A viewport with a depth outside 0 to 1 panics, naming its depths.
+    #[test]
+    #[should_panic(
+        expected = "command list \"deep\" sets a viewport with depths 0 to 2, but depths must be \
+                    from 0 to 1"
+    )]
+    fn viewport_depths_past_one_panic() {
+        CommandList::new("deep").set_viewport(&Viewport {
+            min_depth: 0.0,
+            max_depth: 2.0,
+            ..VIEWPORT
+        });
+    }
+
+    /// An empty scissor is recorded, and discards every fragment.
+    #[test]
+    fn empty_scissors_are_recorded() {
+        let scissor = Rect2d::from_extent(crate::Extent2d {
+            width: 0,
+            height: 0,
+        });
+        let mut list = CommandList::new("empty");
+        list.set_scissor(scissor);
+        assert_eq!(list.recorded(), [RecordedCommand::SetScissor(scissor)]);
+    }
+
+    /// A scissor whose edge is past `i32::MAX` panics, and one whose edge is
+    /// exactly there doesn't.
+    #[test]
+    #[should_panic(
+        expected = "command list \"wide\" sets a 2x1 scissor at (2147483646, 0), whose edges must \
+                    be at most 2147483647"
+    )]
+    fn scissors_past_i32_max_panic() {
+        let mut list = CommandList::new("wide");
+        let at_the_edge = Rect2d {
+            offset: crate::Offset2d {
+                x: i32::MAX.unsigned_abs() - 1,
+                y: 0,
+            },
+            extent: crate::Extent2d {
+                width: 1,
+                height: 1,
+            },
+        };
+        list.set_scissor(at_the_edge);
+        list.set_scissor(Rect2d {
+            extent: crate::Extent2d {
+                width: 2,
+                height: 1,
+            },
+            ..at_the_edge
+        });
     }
 }

@@ -59,6 +59,7 @@ mod test_support;
 mod texture;
 mod timing;
 mod view;
+mod viewport;
 mod vulkan;
 
 use std::fmt::{self, Debug};
@@ -88,6 +89,7 @@ pub use texture::{
 };
 pub use timing::{CommandBufferTimings, SubmissionTimings, Timing};
 pub use view::TextureView;
+pub use viewport::{Extent2d, Offset2d, Rect2d, Viewport};
 use vulkan::VulkanRenderHardwareInterface;
 
 /// A window a backend can render to.

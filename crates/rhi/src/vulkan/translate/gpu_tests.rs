@@ -15,11 +15,11 @@ use crate::test_shaders;
 use crate::vulkan::test_support::{Capability, VulkanTestBackend, require_capabilities};
 use crate::{
     Access, AddressMode, Barrier, Blend, Buffer, BufferDesc, BufferUsage, ColourMask, ColourWrite,
-    CommandList, CompareOp, CullMode, DepthTest, DescriptorIndex, Extent3d, Filter, Format,
-    FrontFace, GpuAddress, GpuResources, MemoryLocation, QueueId, QueueKind,
-    RenderHardwareInterface, RenderState, SamplerDesc, SubmitDesc, Subresource, Texture,
+    CommandList, CompareOp, CullMode, DepthTest, DescriptorIndex, Extent2d, Extent3d, Filter,
+    Format, FrontFace, GpuAddress, GpuResources, MemoryLocation, Offset2d, QueueId, QueueKind,
+    Rect2d, RenderHardwareInterface, RenderState, SamplerDesc, SubmitDesc, Subresource, Texture,
     TextureCopy, TextureDataLayout, TextureDesc, TextureDimension, TextureUsage, TextureView,
-    Topology,
+    Topology, Viewport,
 };
 
 /// A buffer of `size` bytes in `location`, for copies.
@@ -560,8 +560,9 @@ fn the_compute_queue_runs_only_compute_programs() {
     resources.destroy_program(program);
 }
 
-/// Render state is set on the graphics queue, with the defaults and with
-/// every piece changed, and validation reports nothing.
+/// Render state, viewports and scissors are set on the graphics queue,
+/// with the defaults and with every piece changed, and validation reports
+/// nothing.
 #[test]
 fn render_state_is_set_on_the_graphics_queue() {
     let session = TestSession::new();
@@ -590,6 +591,27 @@ fn render_state_is_set_on_the_graphics_queue() {
     let mut list = CommandList::new("draw");
     list.bind_program(program);
     list.set_render_state(&RenderState::default());
+    let extent = Extent2d {
+        width: 64,
+        height: 32,
+    };
+    list.set_viewport(&Viewport::from_extent(extent));
+    list.set_scissor(Rect2d::from_extent(extent));
+    list.set_viewport(&Viewport {
+        x: -8.5,
+        y: 4.0,
+        width: 32.0,
+        height: 16.0,
+        min_depth: 0.75,
+        max_depth: 0.25,
+    });
+    list.set_scissor(Rect2d {
+        offset: Offset2d { x: 8, y: 4 },
+        extent: Extent2d {
+            width: 16,
+            height: 0,
+        },
+    });
     list.set_render_state(&changed);
     list.set_render_state(&changed.depth(None));
     list.set_render_state(&changed.topology(Topology::LineList));
@@ -597,20 +619,38 @@ fn render_state_is_set_on_the_graphics_queue() {
     resources.destroy_program(program);
 }
 
-/// Only the graphics queue draws, so setting render state panics when
-/// translated for a compute queue of its own.
+/// Only the graphics queue draws, so setting render state, a viewport or a
+/// scissor panics when translated for a compute queue of its own.
 #[test]
 fn only_the_graphics_queue_sets_render_state() {
     let session = TestSession::new();
     let backend = VulkanTestBackend::headless(&session);
     require_capabilities!(backend, Capability::DedicatedComputeQueue);
-    let mut list = CommandList::new("draw");
-    list.set_render_state(&RenderState::default());
-    assert_eq!(
-        translation_panic(&backend, QueueKind::Compute, &list),
-        "command list \"draw\" sets render state, but only the graphics queue draws, not the \
-         compute queue",
-    );
+    // Checks that a list recorded by `record` panics, saying it `does`.
+    let check = |does: &str, record: &dyn Fn(&mut CommandList)| {
+        let mut list = CommandList::new("draw");
+        record(&mut list);
+        assert_eq!(
+            translation_panic(&backend, QueueKind::Compute, &list),
+            format!(
+                "command list \"draw\" {does}, but only the graphics queue draws, not the \
+                 compute queue"
+            ),
+        );
+    };
+    let extent = Extent2d {
+        width: 64,
+        height: 32,
+    };
+    check("sets render state", &|list| {
+        list.set_render_state(&RenderState::default());
+    });
+    check("sets a viewport", &|list| {
+        list.set_viewport(&Viewport::from_extent(extent));
+    });
+    check("sets a scissor", &|list| {
+        list.set_scissor(Rect2d::from_extent(extent));
+    });
 }
 
 /// Bytes written to an upload buffer, copied on the GPU to a GPU-only

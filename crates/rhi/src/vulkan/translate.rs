@@ -551,6 +551,18 @@ impl VulkanDevice {
                         );
                     }
                 }
+                Command::SetViewport { viewport } => {
+                    check_draws(list, kind, "sets a viewport");
+                    // SAFETY: Guaranteed by the caller, and the queue's
+                    // family supports graphics.
+                    unsafe { self.device.set_viewport(buffer, viewport) };
+                }
+                &Command::SetScissor { scissor } => {
+                    check_draws(list, kind, "sets a scissor");
+                    // SAFETY: Guaranteed by the caller, and the queue's
+                    // family supports graphics.
+                    unsafe { self.device.set_scissor(buffer, scissor) };
+                }
                 &Command::PushData { offset, ref data } => {
                     assert!(
                         runs_programs,
