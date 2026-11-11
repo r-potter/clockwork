@@ -5,7 +5,8 @@ use ash::vk;
 
 use super::device::LogicalDevice;
 use crate::{
-    ColourMask, CompareOp, CullMode, FrontFace, MAX_COLOUR_ATTACHMENTS, RenderState, Topology,
+    BlendFactor, BlendOp, ColourMask, CompareOp, CullMode, FrontFace, MAX_COLOUR_ATTACHMENTS,
+    RenderState, Topology,
 };
 
 impl From<Topology> for vk::PrimitiveTopology {
@@ -54,6 +55,35 @@ impl From<CompareOp> for vk::CompareOp {
     }
 }
 
+impl From<BlendFactor> for vk::BlendFactor {
+    fn from(factor: BlendFactor) -> Self {
+        match factor {
+            BlendFactor::Zero => Self::ZERO,
+            BlendFactor::One => Self::ONE,
+            BlendFactor::SourceColour => Self::SRC_COLOR,
+            BlendFactor::OneMinusSourceColour => Self::ONE_MINUS_SRC_COLOR,
+            BlendFactor::DestinationColour => Self::DST_COLOR,
+            BlendFactor::OneMinusDestinationColour => Self::ONE_MINUS_DST_COLOR,
+            BlendFactor::SourceAlpha => Self::SRC_ALPHA,
+            BlendFactor::OneMinusSourceAlpha => Self::ONE_MINUS_SRC_ALPHA,
+            BlendFactor::DestinationAlpha => Self::DST_ALPHA,
+            BlendFactor::OneMinusDestinationAlpha => Self::ONE_MINUS_DST_ALPHA,
+        }
+    }
+}
+
+impl From<BlendOp> for vk::BlendOp {
+    fn from(op: BlendOp) -> Self {
+        match op {
+            BlendOp::Add => Self::ADD,
+            BlendOp::Subtract => Self::SUBTRACT,
+            BlendOp::ReverseSubtract => Self::REVERSE_SUBTRACT,
+            BlendOp::Min => Self::MIN,
+            BlendOp::Max => Self::MAX,
+        }
+    }
+}
+
 impl From<ColourMask> for vk::ColorComponentFlags {
     fn from(mask: ColourMask) -> Self {
         let channel = |written: bool, flag: Self| if written { flag } else { Self::empty() };
@@ -64,13 +94,46 @@ impl From<ColourMask> for vk::ColorComponentFlags {
     }
 }
 
-/// The colour write masks that set `state`'s first `attachments` colour
-/// attachments. Pure, so it's tested without a GPU.
-fn colour_masks(state: &RenderState, attachments: usize) -> Vec<vk::ColorComponentFlags> {
-    state.colour[..attachments]
+/// The colour blend enables, equations and write masks that set `state`'s
+/// first `attachments` colour attachments. Pure, so it's tested without a
+/// GPU.
+fn colour_writes(
+    state: &RenderState,
+    attachments: usize,
+) -> (
+    Vec<vk::Bool32>,
+    Vec<vk::ColorBlendEquationEXT>,
+    Vec<vk::ColorComponentFlags>,
+) {
+    let writes = &state.colour[..attachments];
+    let enables = writes
+        .iter()
+        .map(|write| vk::Bool32::from(write.blend.is_some()))
+        .collect();
+    // An attachment that doesn't blend gets an equation that replaces, which
+    // Vulkan ignores.
+    let equations = writes
+        .iter()
+        .map(|write| {
+            let Some(blend) = write.blend else {
+                return vk::ColorBlendEquationEXT::default()
+                    .src_color_blend_factor(vk::BlendFactor::ONE)
+                    .src_alpha_blend_factor(vk::BlendFactor::ONE);
+            };
+            vk::ColorBlendEquationEXT::default()
+                .src_color_blend_factor(blend.colour.source.into())
+                .dst_color_blend_factor(blend.colour.destination.into())
+                .color_blend_op(blend.colour.operation.into())
+                .src_alpha_blend_factor(blend.alpha.source.into())
+                .dst_alpha_blend_factor(blend.alpha.destination.into())
+                .alpha_blend_op(blend.alpha.operation.into())
+        })
+        .collect();
+    let masks = writes
         .iter()
         .map(|write| vk::ColorComponentFlags::from(write.mask))
-        .collect()
+        .collect();
+    (enables, equations, masks)
 }
 
 /// How many colour attachments render state is set for on a device that
@@ -98,7 +161,7 @@ impl LogicalDevice {
     ) {
         let device = self.handle();
         let shader_object = self.shader_object();
-        let masks = colour_masks(state, attachments);
+        let (enables, equations, masks) = colour_writes(state, attachments);
         let depth_compare = state
             .depth
             .map_or(vk::CompareOp::ALWAYS, |depth| depth.compare.into());
@@ -130,8 +193,8 @@ impl LogicalDevice {
             device.cmd_set_depth_compare_op(buffer, depth_compare);
             device.cmd_set_stencil_test_enable(buffer, false);
 
-            // Write colour as `state` says, without blending.
-            shader_object.cmd_set_color_blend_enable(buffer, 0, &vec![vk::FALSE; attachments]);
+            shader_object.cmd_set_color_blend_enable(buffer, 0, &enables);
+            shader_object.cmd_set_color_blend_equation(buffer, 0, &equations);
             shader_object.cmd_set_color_write_mask(buffer, 0, &masks);
         }
     }
@@ -142,22 +205,34 @@ mod tests {
     //! T0 tests of translating colour writes.
 
     use super::*;
-    use crate::ColourWrite;
+    use crate::{Blend, ColourWrite};
 
-    /// Each attachment gets its own mask, and only as many attachments as
-    /// asked for are set.
+    /// Each attachment gets its own blend enable, equation and mask, and
+    /// only as many attachments as asked for are set.
     #[test]
-    fn colour_masks_are_per_attachment() {
+    fn colour_writes_are_per_attachment() {
         let state = RenderState::default().colour(
             1,
             ColourWrite {
+                blend: Some(Blend::ALPHA),
                 mask: ColourMask {
                     alpha: false,
                     ..ColourMask::ALL
                 },
             },
         );
-        let masks = colour_masks(&state, 4);
+        let (enables, equations, masks) = colour_writes(&state, 4);
+        assert_eq!(enables, [vk::FALSE, vk::TRUE, vk::FALSE, vk::FALSE]);
+        assert_eq!(
+            equations[1].src_color_blend_factor,
+            vk::BlendFactor::SRC_ALPHA
+        );
+        assert_eq!(
+            equations[1].dst_color_blend_factor,
+            vk::BlendFactor::ONE_MINUS_SRC_ALPHA,
+        );
+        assert_eq!(equations[1].src_alpha_blend_factor, vk::BlendFactor::ONE);
+        assert_eq!(equations.len(), 4);
         assert_eq!(
             masks,
             [

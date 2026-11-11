@@ -79,8 +79,8 @@ pub use error::{RhiError, RhiResult};
 pub use program::{Program, ProgramDesc, ShaderStage};
 pub use queue::{CommandBuffer, GpuTimepoint, Queue, QueueId, SubmitDesc};
 pub use render_state::{
-    ColourMask, ColourWrite, CompareOp, CullMode, DepthTest, FrontFace, MAX_COLOUR_ATTACHMENTS,
-    RenderState, Topology,
+    Blend, BlendComponent, BlendFactor, BlendOp, ColourMask, ColourWrite, CompareOp, CullMode,
+    DepthTest, FrontFace, MAX_COLOUR_ATTACHMENTS, RenderState, Topology,
 };
 pub use sampler::{AddressMode, Filter, Sampler, SamplerDesc};
 pub use texture::{
