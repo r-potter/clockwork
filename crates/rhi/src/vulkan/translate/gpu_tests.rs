@@ -14,10 +14,12 @@ use clockwork_diagnostics::capture::TestSession;
 use crate::test_shaders;
 use crate::vulkan::test_support::{Capability, VulkanTestBackend, require_capabilities};
 use crate::{
-    Access, AddressMode, Barrier, Buffer, BufferDesc, BufferUsage, CommandList, DescriptorIndex,
-    Extent3d, Filter, Format, GpuAddress, GpuResources, MemoryLocation, QueueId, QueueKind,
-    RenderHardwareInterface, SamplerDesc, SubmitDesc, Subresource, Texture, TextureCopy,
-    TextureDataLayout, TextureDesc, TextureDimension, TextureUsage, TextureView,
+    Access, AddressMode, Barrier, Buffer, BufferDesc, BufferUsage, ColourMask, ColourWrite,
+    CommandList, CompareOp, CullMode, DepthTest, DescriptorIndex, Extent3d, Filter, Format,
+    FrontFace, GpuAddress, GpuResources, MemoryLocation, QueueId, QueueKind,
+    RenderHardwareInterface, RenderState, SamplerDesc, SubmitDesc, Subresource, Texture,
+    TextureCopy, TextureDataLayout, TextureDesc, TextureDimension, TextureUsage, TextureView,
+    Topology,
 };
 
 /// A buffer of `size` bytes in `location`, for copies.
@@ -556,6 +558,58 @@ fn the_compute_queue_runs_only_compute_programs() {
         "command list \"draw\" binds program \"triangle\", which the compute queue can't run",
     );
     resources.destroy_program(program);
+}
+
+/// Render state is set on the graphics queue, with the defaults and with
+/// every piece changed, and validation reports nothing.
+#[test]
+fn render_state_is_set_on_the_graphics_queue() {
+    let session = TestSession::new();
+    let backend = VulkanTestBackend::headless(&session);
+    let resources = backend.resources();
+    let program = resources
+        .create_program(&test_shaders::triangle().desc())
+        .unwrap();
+    let masked = ColourWrite {
+        mask: ColourMask {
+            alpha: false,
+            ..ColourMask::ALL
+        },
+    };
+    let changed = RenderState::default()
+        .topology(Topology::TriangleStrip)
+        .cull(CullMode::Front)
+        .front_face(FrontFace::Clockwise)
+        .depth(Some(DepthTest {
+            compare: CompareOp::GreaterOrEqual,
+            write: false,
+        }))
+        .colour(0, masked)
+        .colour(1, ColourWrite::default());
+    let mut list = CommandList::new("draw");
+    list.bind_program(program);
+    list.set_render_state(&RenderState::default());
+    list.set_render_state(&changed);
+    list.set_render_state(&changed.depth(None));
+    list.set_render_state(&changed.topology(Topology::LineList));
+    run(&backend, QueueKind::Graphics, &list);
+    resources.destroy_program(program);
+}
+
+/// Only the graphics queue draws, so setting render state panics when
+/// translated for a compute queue of its own.
+#[test]
+fn only_the_graphics_queue_sets_render_state() {
+    let session = TestSession::new();
+    let backend = VulkanTestBackend::headless(&session);
+    require_capabilities!(backend, Capability::DedicatedComputeQueue);
+    let mut list = CommandList::new("draw");
+    list.set_render_state(&RenderState::default());
+    assert_eq!(
+        translation_panic(&backend, QueueKind::Compute, &list),
+        "command list \"draw\" sets render state, but only the graphics queue draws, not the \
+         compute queue",
+    );
 }
 
 /// Bytes written to an upload buffer, copied on the GPU to a GPU-only

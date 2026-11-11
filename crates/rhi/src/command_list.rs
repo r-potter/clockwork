@@ -16,7 +16,9 @@
 
 use std::ops::Range;
 
-use crate::{Barrier, GpuAddress, MAX_PUSH_DATA_SIZE, Program, TextureCopy, TextureDataLayout};
+use crate::{
+    Barrier, GpuAddress, MAX_PUSH_DATA_SIZE, Program, RenderState, TextureCopy, TextureDataLayout,
+};
 
 /// The alignment, in bytes, of a fill's address and size, as Vulkan
 /// requires of fills.
@@ -55,6 +57,8 @@ pub struct CommandList {
     /// Every copy between a buffer and a texture, which commands refer to
     /// by index.
     texture_copies: Vec<BufferTextureCopy>,
+    /// Every render state set, which commands refer to by index.
+    render_states: Vec<RenderState>,
     /// Every push data block, which commands refer to by range. Each
     /// block's size is a multiple of 4, so each starts at a multiple of 4.
     push_data: Vec<u8>,
@@ -110,6 +114,12 @@ pub(crate) enum Command {
         /// The program.
         program: Program,
     },
+    /// Sets the render state later draws use to `render_states[state]` in
+    /// the list's arena.
+    SetRenderState {
+        /// The state's index in the arena.
+        state: usize,
+    },
     /// Writes `data` in the list's arena to the push data later dispatches
     /// read, at `offset`.
     PushData {
@@ -161,6 +171,7 @@ impl CommandList {
             text: String::new(),
             barriers: Vec::new(),
             texture_copies: Vec::new(),
+            render_states: Vec::new(),
             push_data: Vec::new(),
             program_bound: false,
             open_regions: 0,
@@ -191,6 +202,11 @@ impl CommandList {
     /// The texture copy at `index` in the arena, for translation.
     pub(crate) fn texture_copy(&self, index: usize) -> &BufferTextureCopy {
         &self.texture_copies[index]
+    }
+
+    /// The render state at `index` in the arena, for translation.
+    pub(crate) fn render_state(&self, index: usize) -> &RenderState {
+        &self.render_states[index]
     }
 
     /// The push data block at `range` of the arena, for translation.
@@ -347,6 +363,18 @@ impl CommandList {
     pub fn bind_program(&mut self, program: Program) {
         self.commands.push(Command::BindProgram { program });
         self.program_bound = true;
+    }
+
+    /// Sets the render state later draws use, until another is set (design
+    /// 0002, "Programs"). Every piece of it is set each time.
+    ///
+    /// Translation panics if the queue doesn't draw: only the graphics
+    /// queue does.
+    pub fn set_render_state(&mut self, state: &RenderState) {
+        self.render_states.push(*state);
+        self.commands.push(Command::SetRenderState {
+            state: self.render_states.len() - 1,
+        });
     }
 
     /// Writes `data` to the push data later dispatches read, at `offset`
@@ -584,6 +612,8 @@ pub(crate) enum RecordedCommand<'a> {
     },
     /// See [`CommandList::bind_program`].
     BindProgram(Program),
+    /// See [`CommandList::set_render_state`].
+    SetRenderState(&'a RenderState),
     /// See [`CommandList::push_data`].
     PushData {
         /// Where the block goes in the push data, in bytes.
@@ -642,6 +672,9 @@ impl CommandList {
                     RecordedCommand::CopyTextureToBuffer(&self.texture_copies[copy])
                 }
                 Command::BindProgram { program } => RecordedCommand::BindProgram(program),
+                Command::SetRenderState { state } => {
+                    RecordedCommand::SetRenderState(&self.render_states[state])
+                }
                 Command::PushData { offset, ref data } => RecordedCommand::PushData {
                     offset,
                     data: &self.push_data[data.clone()],
@@ -1114,5 +1147,23 @@ mod tests {
     )]
     fn overlapping_copies_panic() {
         CommandList::new("overlap").copy_buffer(GpuAddress(0x1080), GpuAddress(0x1000), 256);
+    }
+
+    /// Render states are recorded in order, each with its value as it was
+    /// set.
+    #[test]
+    fn render_state_is_recorded() {
+        let culled = RenderState::default();
+        let unculled = culled.cull(crate::CullMode::None);
+        let mut list = CommandList::new("draws");
+        list.set_render_state(&culled);
+        list.set_render_state(&unculled);
+        assert_eq!(
+            list.recorded(),
+            [
+                RecordedCommand::SetRenderState(&culled),
+                RecordedCommand::SetRenderState(&unculled),
+            ],
+        );
     }
 }
