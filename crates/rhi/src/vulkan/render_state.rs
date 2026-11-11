@@ -1,12 +1,15 @@
-//! Setting render state with dynamic state, since shader objects have no
-//! pipeline to bake it into (design 0002, "Programs").
+//! Setting render state, viewports and scissors with dynamic state, since
+//! shader objects have no pipeline to bake them into (design 0002,
+//! "Programs").
+
+use std::slice;
 
 use ash::vk;
 
 use super::device::LogicalDevice;
 use crate::{
     BlendFactor, BlendOp, ColourMask, CompareOp, CullMode, FrontFace, MAX_COLOUR_ATTACHMENTS,
-    RenderState, Topology,
+    Rect2d, RenderState, Topology, Viewport,
 };
 
 impl From<Topology> for vk::PrimitiveTopology {
@@ -196,6 +199,68 @@ impl LogicalDevice {
             shader_object.cmd_set_color_blend_enable(buffer, 0, &enables);
             shader_object.cmd_set_color_blend_equation(buffer, 0, &equations);
             shader_object.cmd_set_color_write_mask(buffer, 0, &masks);
+        }
+    }
+
+    /// Records a command into `buffer` that sets the viewport to `viewport`.
+    ///
+    /// # Safety
+    ///
+    /// `buffer` must be recording, on this device, for a family that
+    /// supports graphics, and no other thread may use it.
+    pub(super) unsafe fn set_viewport(&self, buffer: vk::CommandBuffer, viewport: &Viewport) {
+        let viewport = vk::Viewport::from(*viewport);
+        // SAFETY: Guaranteed by the caller, and the slice is valid for the
+        // duration of the call.
+        unsafe {
+            self.handle()
+                .cmd_set_viewport_with_count(buffer, slice::from_ref(&viewport));
+        }
+    }
+
+    /// Records a command into `buffer` that sets the scissor to `scissor`.
+    ///
+    /// # Safety
+    ///
+    /// `buffer` must be recording, on this device, for a family that
+    /// supports graphics, and no other thread may use it.
+    pub(super) unsafe fn set_scissor(&self, buffer: vk::CommandBuffer, scissor: Rect2d) {
+        let scissor = vk::Rect2D::from(scissor);
+        // SAFETY: Guaranteed by the caller, and the slice is valid for the
+        // duration of the call.
+        unsafe {
+            self.handle()
+                .cmd_set_scissor_with_count(buffer, slice::from_ref(&scissor));
+        }
+    }
+}
+
+impl From<Viewport> for vk::Viewport {
+    fn from(viewport: Viewport) -> Self {
+        Self {
+            x: viewport.x,
+            y: viewport.y,
+            width: viewport.width,
+            height: viewport.height,
+            min_depth: viewport.min_depth,
+            max_depth: viewport.max_depth,
+        }
+    }
+}
+
+impl From<Rect2d> for vk::Rect2D {
+    fn from(rect: Rect2d) -> Self {
+        // Recording checks that a scissor's edges are at most `i32::MAX`.
+        let signed = |value: u32| i32::try_from(value).expect("scissor offsets fit in an i32");
+        Self {
+            offset: vk::Offset2D {
+                x: signed(rect.offset.x),
+                y: signed(rect.offset.y),
+            },
+            extent: vk::Extent2D {
+                width: rect.extent.width,
+                height: rect.extent.height,
+            },
         }
     }
 }
