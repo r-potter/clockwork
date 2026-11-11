@@ -99,6 +99,21 @@ pub(crate) fn copy_texels() -> TestProgram {
     )
 }
 
+/// A compute program that writes each texel of a 2D storage view as the
+/// average of the 2×2 block under it in a 2D sampled view twice its size,
+/// one pass of generating a mip chain with a box filter
+/// (`shaders/downsample.slang`). Each view should cover one mip. Its push
+/// data is the sampled view's and the storage view's
+/// [`DescriptorIndex`](crate::DescriptorIndex), in that order, and it runs
+/// in 8×8 workgroups.
+pub(crate) fn downsample() -> TestProgram {
+    TestProgram::new(
+        "downsample",
+        include_bytes!(concat!(env!("OUT_DIR"), "/downsample.spv")),
+        &[(ShaderStage::Compute, c"main")],
+    )
+}
+
 /// The triangle's vertex and fragment program (`shaders/triangle.slang`).
 pub(crate) fn triangle() -> TestProgram {
     TestProgram::new(

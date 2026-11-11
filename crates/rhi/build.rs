@@ -21,6 +21,7 @@ const SHADERS: &[&str] = &[
     "count_groups",
     "fill_texels",
     "copy_texels",
+    "downsample",
 ];
 
 /// The Slang modules shaders import, as file names in `shaders/` without
