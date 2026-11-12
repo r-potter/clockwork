@@ -51,6 +51,7 @@ mod handle;
 mod program;
 mod queue;
 mod render_state;
+mod rendering;
 mod sampler;
 #[cfg(test)]
 mod test_shaders;
@@ -83,6 +84,7 @@ pub use render_state::{
     Blend, BlendComponent, BlendFactor, BlendOp, ColourMask, ColourWrite, CompareOp, CullMode,
     DepthTest, FrontFace, MAX_COLOUR_ATTACHMENTS, RenderState, Topology,
 };
+pub use rendering::{ColorAttachment, LoadOp, Rendering, StoreOp};
 pub use sampler::{AddressMode, Filter, Sampler, SamplerDesc};
 pub use texture::{
     Extent3d, Format, FormatInfo, Texture, TextureDesc, TextureDimension, TextureUsage,

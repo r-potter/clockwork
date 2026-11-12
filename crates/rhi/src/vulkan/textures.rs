@@ -14,16 +14,24 @@
 //! image descriptor from a `VkImageViewCreateInfo`, so no `VkImageView` is
 //! created. The slots are freed with the texture.
 //!
+//! Rendering needs a `VkImageView` of each attachment, so those are
+//! created the first time a translation renders to one, and cached in the
+//! entry in the same way, behind a `Mutex` of their own. They use no heap
+//! slot, and are destroyed with the texture.
+//!
 //! Lock order: as for buffers, the texture table is never held while
 //! allocating or freeing memory. Writing a view takes the table's read
 //! lock, then the entry's view lock, then the resource heap's slot
 //! allocator. Freeing a texture's slots takes only the allocator, since
-//! the entry is out of the table by then.
+//! the entry is out of the table by then. Translation takes an entry's
+//! attachment view lock while it holds the table's read lock, and takes
+//! nothing else while holding it.
 
 #[cfg(test)]
 mod gpu_tests;
 
 use std::collections::HashMap;
+use std::ops::Range;
 use std::slice;
 use std::sync::{Mutex, PoisonError, RwLockReadGuard, RwLockWriteGuard};
 
@@ -35,6 +43,7 @@ use super::error::{error, error_from_chain};
 use super::memory::{MemoryAllocation, MemoryRequest, Resource, image_memory_requirements};
 use crate::copy::CopiedTexture;
 use crate::handle::HandleTable;
+use crate::rendering::AttachedTexture;
 use crate::view::{ViewType, ViewedTexture};
 use crate::{
     Access, DescriptorIndex, Extent3d, Format, FormatInfo, HeapKind, MemoryLocation, RhiError,
@@ -63,6 +72,9 @@ pub(super) struct TextureEntry {
     /// The slot in the resource heap of each view asked for, by the view
     /// with its ranges resolved.
     views: Mutex<HashMap<TextureView, u32>>,
+    /// The image view of each attachment rendered to, by its mip and its
+    /// layers, resolved.
+    attachment_views: Mutex<HashMap<(u32, Range<u32>), vk::ImageView>>,
 }
 
 impl TextureEntry {
@@ -81,6 +93,11 @@ impl TextureEntry {
         self.format.info()
     }
 
+    /// Its format.
+    pub(super) fn texel_format(&self) -> Format {
+        self.format
+    }
+
     /// What copy checks need to know about the texture labelled `label`.
     pub(super) fn copied<'a>(&self, label: &'a str) -> CopiedTexture<'a> {
         CopiedTexture {
@@ -97,6 +114,19 @@ impl TextureEntry {
         ViewedTexture {
             label,
             dimension: self.dimension,
+            mip_count: self.mip_count,
+            layer_count: self.layer_count,
+            usage: self.usage,
+        }
+    }
+
+    /// What attachment checks need to know about the texture labelled
+    /// `label`.
+    pub(super) fn attached<'a>(&self, label: &'a str) -> AttachedTexture<'a> {
+        AttachedTexture {
+            label,
+            dimension: self.dimension,
+            extent: self.extent,
             mip_count: self.mip_count,
             layer_count: self.layer_count,
             usage: self.usage,
@@ -344,6 +374,7 @@ impl VulkanDevice {
             mip_count: desc.mip_levels,
             layer_count: desc.array_layers,
             views: Mutex::new(HashMap::new()),
+            attachment_views: Mutex::new(HashMap::new()),
         };
         Ok(Texture::from_handle(
             self.lock_textures_for_writing().insert(desc.label, entry),
@@ -361,17 +392,28 @@ impl VulkanDevice {
         self.retire(Retired::Texture(entry));
     }
 
-    /// Destroys a texture taken out of the table, frees its memory, and
-    /// frees its views' slots.
+    /// Destroys a texture taken out of the table and its attachment views,
+    /// frees its memory, and frees its views' slots.
     ///
     /// # Safety
     ///
     /// No submitted work may still use the texture or its views.
     pub(super) unsafe fn free_texture(&self, entry: TextureEntry) {
+        let device = self.device.handle();
+        let attachment_views = entry
+            .attachment_views
+            .into_inner()
+            .unwrap_or_else(PoisonError::into_inner);
+        for view in attachment_views.into_values() {
+            // SAFETY: The view was created on this device, and the caller
+            // guarantees that nothing uses it. It's destroyed before its
+            // image.
+            unsafe { device.destroy_image_view(view, None) };
+        }
         // SAFETY: The image was created on this device, and the caller
         // guarantees that nothing uses it. It's destroyed before its memory
         // is freed.
-        unsafe { self.device.handle().destroy_image(entry.image, None) };
+        unsafe { device.destroy_image(entry.image, None) };
         self.allocator.free(entry.allocation);
         let views = entry
             .views
@@ -452,6 +494,70 @@ impl VulkanDevice {
         }
         views.insert(view, slot);
         Ok(DescriptorIndex(slot))
+    }
+
+    /// The image view of mip `mip` of `layers`, resolved, of `entry`, the
+    /// texture labelled `label`, for rendering to, creating it the first
+    /// time it's asked for: a 2D view of one layer, or a 2D array view of
+    /// several.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RhiError::OutOfDeviceMemory`] if device memory runs out, or
+    /// [`RhiError::Other`] if the view can't be created otherwise.
+    ///
+    /// # Safety
+    ///
+    /// `entry` must be in this device's texture table, which must stay
+    /// locked while the view is recorded, and `mip` and `layers` must be
+    /// inside the texture, which must not be a 3D texture.
+    pub(super) unsafe fn attachment_view(
+        &self,
+        entry: &TextureEntry,
+        label: &str,
+        mip: u32,
+        layers: Range<u32>,
+    ) -> RhiResult<vk::ImageView> {
+        // Held while the view is created, so two threads rendering to a new
+        // attachment at once create it once.
+        let mut views = entry
+            .attachment_views
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let key = (mip, layers);
+        if let Some(&view) = views.get(&key) {
+            return Ok(view);
+        }
+        let (mip, layers) = &key;
+        let view_type = if layers.len() == 1 {
+            vk::ImageViewType::TYPE_2D
+        } else {
+            vk::ImageViewType::TYPE_2D_ARRAY
+        };
+        let image_view_create_info = vk::ImageViewCreateInfo::default()
+            .image(entry.image)
+            .view_type(view_type)
+            .format(vk::Format::from(entry.format))
+            .subresource_range(vk::ImageSubresourceRange {
+                aspect_mask: entry.aspect(),
+                base_mip_level: *mip,
+                level_count: 1,
+                base_array_layer: layers.start,
+                layer_count: layers.end - layers.start,
+            });
+        // SAFETY: `image_view_create_info` is valid for the call, and names
+        // a live image, since the table is locked, with a subresource inside
+        // it, as the caller guarantees, and a view type a 2D or cube image
+        // allows.
+        let view = unsafe {
+            self.device
+                .handle()
+                .create_image_view(&image_view_create_info, None)
+        }
+        .map_err(|result| error(result, "create an attachment view of texture", label))?;
+        self.device.set_object_name(view, label);
+        views.insert(key, view);
+        Ok(view)
     }
 
     /// Locks the texture table for reading, recovering it if a panic
