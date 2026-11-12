@@ -5,8 +5,10 @@
 //!
 //! Each attachment names one mip of a texture and a range of its layers.
 //! Whether a texture can be one, and the region rendering covers, are pure
-//! functions of the texture, checked when the list is translated and
-//! tested without a device, in [`ColorAttachment::resolve`].
+//! functions of the textures, checked when the list is translated and
+//! tested without a device: [`ColorAttachment::resolve`] checks an
+//! attachment against its texture, and [`render_area`] checks that a
+//! rendering's attachments agree.
 
 use std::ops::Range;
 
@@ -16,15 +18,17 @@ use crate::{Extent2d, Extent3d, Subresource, Texture, TextureDimension, TextureU
 /// [`CommandList::begin_rendering`](crate::CommandList::begin_rendering)
 /// until [`end_rendering`](crate::CommandList::end_rendering).
 ///
-/// Rendering covers the whole of the mip each attachment names. Rendering
-/// to several layers at once is layered rendering, with the layer chosen
-/// in the shader (`SV_RenderTargetArrayIndex`).
+/// Every attachment is the same size, at the mip it names, and names the
+/// same number of layers. Rendering to several layers at once is layered
+/// rendering, with the layer chosen in the shader
+/// (`SV_RenderTargetArrayIndex`).
 #[derive(Debug, Clone, PartialEq)]
 pub struct Rendering {
     /// The colour attachments, by number, which a fragment shader's
-    /// outputs (`SV_Target0` and on) and a
-    /// [`RenderState`](crate::RenderState)'s colour writes refer to.
-    /// Rendering has exactly one.
+    /// outputs (`SV_Target0` to `SV_Target7`) and a
+    /// [`RenderState`](crate::RenderState)'s colour writes refer to. At
+    /// most [`MAX_COLOUR_ATTACHMENTS`](crate::MAX_COLOUR_ATTACHMENTS), and
+    /// at most the device's limit.
     pub colour: Vec<ColorAttachment>,
 }
 
@@ -165,6 +169,47 @@ fn resolve_attachment(
     (subresource.layers, extent)
 }
 
+/// One attachment of a rendering, resolved: its texture's label, the layers
+/// it names, and the size of its mip.
+pub(crate) type ResolvedAttachment<'a> = (&'a str, Range<u32>, Extent2d);
+
+/// The size of the region a rendering in the list `list` covers, and the
+/// number of layers it renders to, from its `attachments`.
+///
+/// # Panics
+///
+/// Panics, naming the list and two attachments' textures, if the
+/// attachments aren't all the same size, at the mips they name, or don't
+/// all name the same number of layers.
+pub(crate) fn render_area<'a>(
+    list: &str,
+    attachments: impl IntoIterator<Item = ResolvedAttachment<'a>>,
+) -> (Extent2d, u32) {
+    let mut attachments = attachments.into_iter();
+    let (first, first_layers, extent) = attachments
+        .next()
+        .expect("recording checked that rendering has an attachment");
+    let layer_count = first_layers.len() as u32;
+    for (label, layers, other_extent) in attachments {
+        assert!(
+            other_extent == extent,
+            "command list \"{list}\" renders to attachments of different sizes: \"{first}\" is \
+             {}x{} and \"{label}\" is {}x{}, at the mips they name",
+            extent.width,
+            extent.height,
+            other_extent.width,
+            other_extent.height,
+        );
+        assert!(
+            layers.len() as u32 == layer_count,
+            "command list \"{list}\" renders to {layer_count} layers of \"{first}\" but {} of \
+             \"{label}\", and every attachment must name as many",
+            layers.len(),
+        );
+    }
+    (extent, layer_count)
+}
+
 // Rendering is plain data, recorded on any thread (design 0002,
 // "Threading", R15).
 const _: () = {
@@ -301,6 +346,57 @@ mod tests {
                 attachment(0, 2..4).resolve(&texture());
             }),
             "texture \"albedo\" has 3 layers, so a subresource can't name layers 2..4",
+        );
+    }
+
+    /// Attachments of one size and layer count render to that size and
+    /// that many layers.
+    #[test]
+    fn matching_attachments_give_the_render_area() {
+        let extent = Extent2d {
+            width: 32,
+            height: 16,
+        };
+        assert_eq!(
+            render_area(
+                "gbuffer",
+                [("albedo", 0..2, extent), ("normals", 3..5, extent)]
+            ),
+            (extent, 2),
+        );
+    }
+
+    /// Attachments of different sizes, or different numbers of layers,
+    /// panic, naming the list and the textures.
+    #[test]
+    fn mismatched_attachments_panic() {
+        let large = Extent2d {
+            width: 32,
+            height: 16,
+        };
+        let small = Extent2d {
+            width: 16,
+            height: 8,
+        };
+        assert_eq!(
+            panic_message(|| {
+                render_area(
+                    "gbuffer",
+                    [("albedo", 0..1, large), ("normals", 0..1, small)],
+                );
+            }),
+            "command list \"gbuffer\" renders to attachments of different sizes: \"albedo\" is \
+             32x16 and \"normals\" is 16x8, at the mips they name",
+        );
+        assert_eq!(
+            panic_message(|| {
+                render_area(
+                    "gbuffer",
+                    [("albedo", 0..2, large), ("normals", 0..1, large)],
+                );
+            }),
+            "command list \"gbuffer\" renders to 2 layers of \"albedo\" but 1 of \"normals\", and \
+             every attachment must name as many",
         );
     }
 }

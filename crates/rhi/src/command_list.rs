@@ -17,8 +17,8 @@
 use std::ops::Range;
 
 use crate::{
-    Barrier, ColorAttachment, GpuAddress, MAX_PUSH_DATA_SIZE, Program, Rect2d, RenderState,
-    Rendering, TextureCopy, TextureDataLayout, Viewport,
+    Barrier, ColorAttachment, GpuAddress, MAX_COLOUR_ATTACHMENTS, MAX_PUSH_DATA_SIZE, Program,
+    Rect2d, RenderState, Rendering, TextureCopy, TextureDataLayout, Viewport,
 };
 
 /// The alignment, in bytes, of a fill's address and size, as Vulkan
@@ -401,8 +401,9 @@ impl CommandList {
     ///
     /// # Panics
     ///
-    /// Panics if rendering is already open, or if `rendering` doesn't have
-    /// exactly one colour attachment.
+    /// Panics if rendering is already open, or if `rendering` has no
+    /// attachments, or more than [`MAX_COLOUR_ATTACHMENTS`] colour
+    /// attachments.
     pub fn begin_rendering(&mut self, rendering: &Rendering) {
         assert!(
             !self.rendering,
@@ -410,9 +411,14 @@ impl CommandList {
             self.label,
         );
         assert!(
-            rendering.colour.len() == 1,
+            !rendering.colour.is_empty(),
+            "command list \"{}\" begins rendering with no attachments",
+            self.label,
+        );
+        assert!(
+            rendering.colour.len() <= MAX_COLOUR_ATTACHMENTS,
             "command list \"{}\" begins rendering with {} colour attachments, but rendering has \
-             exactly one",
+             at most {MAX_COLOUR_ATTACHMENTS}",
             self.label,
             rendering.colour.len(),
         );
@@ -1393,11 +1399,11 @@ mod tests {
     #[test]
     fn renderings_are_recorded() {
         let shadows = rendering("shadow map", 1);
-        let mut gbuffer = rendering("albedo", 1);
-        gbuffer.colour[0].mip = 1;
-        gbuffer.colour[0].layers = 2..4;
-        gbuffer.colour[0].load = LoadOp::Load;
-        gbuffer.colour[0].store = StoreOp::DontCare;
+        let mut gbuffer = rendering("albedo", 2);
+        gbuffer.colour[1].mip = 1;
+        gbuffer.colour[1].layers = 2..4;
+        gbuffer.colour[1].load = LoadOp::Load;
+        gbuffer.colour[1].store = StoreOp::DontCare;
         let mut list = CommandList::new("frame");
         list.begin_rendering(&shadows);
         list.end_rendering();
@@ -1446,21 +1452,28 @@ mod tests {
         list.check_complete();
     }
 
-    /// Rendering needs exactly one colour attachment.
+    /// Rendering needs an attachment, and at most eight colour attachments.
     #[test]
-    fn renderings_need_one_colour_attachment() {
-        for count in [0, 2] {
+    fn renderings_need_one_to_eight_colour_attachments() {
+        let mut list = CommandList::new("frame");
+        list.begin_rendering(&rendering("albedo", MAX_COLOUR_ATTACHMENTS));
+        list.end_rendering();
+        for (count, message) in [
+            (
+                0,
+                "command list \"frame\" begins rendering with no attachments",
+            ),
+            (
+                MAX_COLOUR_ATTACHMENTS + 1,
+                "command list \"frame\" begins rendering with 9 colour attachments, but rendering \
+                 has at most 8",
+            ),
+        ] {
             let panic = std::panic::catch_unwind(|| {
                 CommandList::new("frame").begin_rendering(&rendering("albedo", count));
             })
             .expect_err("the rendering should panic");
-            assert_eq!(
-                panic.downcast_ref::<String>().unwrap(),
-                &format!(
-                    "command list \"frame\" begins rendering with {count} colour attachments, \
-                     but rendering has exactly one"
-                ),
-            );
+            assert_eq!(panic.downcast_ref::<String>().unwrap(), message);
         }
     }
 
