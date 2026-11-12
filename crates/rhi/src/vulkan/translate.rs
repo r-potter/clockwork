@@ -47,7 +47,8 @@ use super::render_state::colour_attachments;
 use super::timings::RecordedTimings;
 use crate::barrier::BarrierTarget;
 use crate::command_list::{
-    Command, DISPATCH_ARGUMENTS_SIZE, DRAW_ARGUMENTS_SIZE, indirect_draws_size,
+    Command, DISPATCH_ARGUMENTS_SIZE, DRAW_ARGUMENTS_SIZE, DRAW_INDEXED_ARGUMENTS_SIZE,
+    indirect_draws_size,
 };
 use crate::copy::check_texture_copy;
 use crate::deferred::Translation;
@@ -100,6 +101,31 @@ fn indirect_draws_range(
         .address(arguments.0)
         .size(size)
         .stride(if draws > 1 { stride } else { 0 })
+}
+
+/// The info for `draws` indirect draws, indexed or not, whose arguments
+/// are each `arguments_size` bytes, the first at `arguments` and each next
+/// `stride` bytes after.
+///
+/// # Panics
+///
+/// Panics if the arguments' size overflows, which recording checks
+/// against.
+fn indirect_draw_info(
+    arguments: GpuAddress,
+    draws: u32,
+    stride: u64,
+    arguments_size: u64,
+) -> vk::DrawIndirect2InfoKHR<'static> {
+    vk::DrawIndirect2InfoKHR::default()
+        .address_range(indirect_draws_range(
+            arguments,
+            draws,
+            stride,
+            arguments_size,
+        ))
+        .address_flags(ADDRESS_FLAGS)
+        .draw_count(draws)
 }
 
 /// A command list translated for one queue, holding the command pool its
@@ -697,15 +723,8 @@ impl VulkanDevice {
                     stride,
                 } => {
                     bound.check_draw(list);
-                    let draw_info = vk::DrawIndirect2InfoKHR::default()
-                        .address_range(indirect_draws_range(
-                            arguments,
-                            draws,
-                            stride,
-                            DRAW_ARGUMENTS_SIZE,
-                        ))
-                        .address_flags(ADDRESS_FLAGS)
-                        .draw_count(draws);
+                    let draw_info =
+                        indirect_draw_info(arguments, draws, stride, DRAW_ARGUMENTS_SIZE);
                     // SAFETY: Guaranteed by the caller, a render pass is open,
                     // so the queue draws, a vertex and fragment program is
                     // bound, with the heaps, recording checked that render
@@ -717,6 +736,27 @@ impl VulkanDevice {
                         self.device
                             .device_address_commands()
                             .cmd_draw_indirect2(buffer, &draw_info);
+                    }
+                }
+                &Command::DrawIndexedIndirect {
+                    arguments,
+                    draws,
+                    stride,
+                } => {
+                    bound.check_draw(list);
+                    let draw_info =
+                        indirect_draw_info(arguments, draws, stride, DRAW_INDEXED_ARGUMENTS_SIZE);
+                    // SAFETY: Guaranteed by the caller, a render pass is open,
+                    // so the queue draws, a vertex and fragment program is
+                    // bound, with the heaps, recording checked that render
+                    // state, a viewport, a scissor and an index buffer are
+                    // set, that the draw count is within the limit device
+                    // selection requires, and the arguments' address and
+                    // stride, and `draw_info` is valid for the call.
+                    unsafe {
+                        self.device
+                            .device_address_commands()
+                            .cmd_draw_indexed_indirect2(buffer, &draw_info);
                     }
                 }
                 &Command::Draw {

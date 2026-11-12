@@ -1170,8 +1170,139 @@ fn indirect_draws_read_their_arguments() {
     resources.destroy_program(program);
 }
 
-/// Drawing, directly or indirectly, with only a compute program bound
-/// panics when translated, naming the list.
+/// The triangle program draws indexed and indirectly into two layers of an
+/// 8×8 colour attachment, each cleared to transparent black, from 16-bit
+/// indices that name one vertex three times, then each vertex, and from
+/// the same arguments, 4 bytes into a buffer: a draw of no indices, 4
+/// bytes of zeros, then a draw of three indices from the fourth, 24 bytes
+/// after the first, with a vertex offset of 3 and a first instance of 5.
+///
+/// - layer 0: two draws 24 bytes apart, so the triangle is drawn only if
+///   the second draw's arguments are read a stride after the first's, its
+///   first index is used, and `SV_VertexID` is the index read, without the
+///   vertex offset, which would name vertices past the triangle's three
+/// - layer 1: one draw, so only the first draw's arguments are read, and
+///   nothing is drawn
+#[test]
+fn indexed_indirect_draws_read_their_arguments() {
+    const SIZE: u32 = 8;
+    let session = TestSession::new();
+    let backend = VulkanTestBackend::headless(&session);
+    let resources = backend.resources();
+    let program = resources
+        .create_program(&test_shaders::triangle().desc())
+        .unwrap();
+    let texture = resources
+        .create_texture(&TextureDesc {
+            label: "triangles",
+            dimension: TextureDimension::D2,
+            format: Format::Rgba32Float,
+            extent: Extent3d::new_2d(SIZE, SIZE),
+            mip_levels: 1,
+            array_layers: 2,
+            usage: TextureUsage::COLOUR_ATTACHMENT | TextureUsage::COPY_SOURCE,
+        })
+        .unwrap();
+    let indices: Vec<u8> = [0_u16, 0, 0, 2, 1, 0]
+        .iter()
+        .flat_map(|index| index.to_le_bytes())
+        .collect();
+    // Each draw's index count, instance count, first index, vertex offset
+    // and first instance, after 4 bytes that aren't read.
+    let arguments: Vec<u8> = [0_u32, 0, 1, 0, 0, 0, 0, 3, 1, 3, 3, 5]
+        .iter()
+        .flat_map(|word| word.to_le_bytes())
+        .collect();
+    let index_buffer = resources
+        .create_buffer(&BufferDesc {
+            label: "indices",
+            size: indices.len() as u64,
+            usage: BufferUsage::INDEX,
+            location: MemoryLocation::Upload,
+        })
+        .unwrap();
+    let arguments_buffer = resources
+        .create_buffer(&BufferDesc {
+            label: "arguments",
+            size: arguments.len() as u64,
+            usage: BufferUsage::INDIRECT,
+            location: MemoryLocation::Upload,
+        })
+        .unwrap();
+    resources.write_buffer(index_buffer, 0, &indices);
+    resources.write_buffer(arguments_buffer, 0, &arguments);
+    let first = GpuAddress(resources.buffer_address(arguments_buffer).0 + 4);
+    let extent = Extent3d::new_2d(SIZE, SIZE);
+    let layout = TextureDataLayout::tightly_packed(Format::Rgba32Float, extent);
+    let layer_size = u64::from(layout.bytes_per_row * SIZE);
+    let readback = create(
+        &**resources,
+        "readback",
+        2 * layer_size,
+        MemoryLocation::Readback,
+    );
+    let attachment = Extent2d {
+        width: SIZE,
+        height: SIZE,
+    };
+
+    let mut list = CommandList::new("indexed indirect triangles");
+    list.barrier(&[
+        Barrier::texture(texture, Access::None, Access::ColorAttachmentWrite),
+        Barrier::buffer(index_buffer, Access::HostWrite, Access::IndexRead),
+        Barrier::buffer(arguments_buffer, Access::HostWrite, Access::IndirectRead),
+    ]);
+    list.bind_program(program);
+    list.set_render_state(&RenderState::default().cull(CullMode::None));
+    list.set_viewport(&Viewport::from_extent(attachment));
+    list.set_scissor(Rect2d::from_extent(attachment));
+    list.bind_index_buffer(
+        resources.buffer_address(index_buffer),
+        indices.len() as u64,
+        IndexFormat::Uint16,
+    );
+    for (layer, draws) in [(0, 2), (1, 1)] {
+        let mut render_pass = RenderPassDesc::colour(texture, LoadOp::Clear([0.0; 4]));
+        render_pass.colour[0].layers = layer..layer + 1;
+        list.begin_render_pass(&render_pass);
+        list.draw_indexed_indirect(first, draws, 24);
+        list.end_render_pass();
+    }
+    list.barrier(&[Barrier::texture(
+        texture,
+        Access::ColorAttachmentWrite,
+        Access::CopyRead,
+    )]);
+    for layer in 0..2 {
+        list.copy_texture_to_buffer(
+            TextureCopy {
+                layers: layer..layer + 1,
+                ..whole(texture, extent)
+            },
+            GpuAddress(resources.buffer_address(readback).0 + u64::from(layer) * layer_size),
+            layout,
+        );
+    }
+    list.barrier(&[Barrier::buffer(
+        readback,
+        Access::CopyWrite,
+        Access::HostRead,
+    )]);
+    run(&backend, QueueKind::Graphics, &list);
+
+    let texels = read_texels(&**resources, readback, 2 * layer_size);
+    let layers: Vec<&[f32]> = texels.chunks(texels.len() / 2).collect();
+    assert_triangle_centre(texel(layers[0], SIZE, 4, 4));
+    assert_eq!(texel(layers[1], SIZE, 4, 4), [0.0; 4]);
+    resources.destroy_buffer(readback);
+    resources.destroy_buffer(arguments_buffer);
+    resources.destroy_buffer(index_buffer);
+    resources.destroy_texture(texture);
+    resources.destroy_program(program);
+}
+
+/// Drawing, directly or indirectly, indexed or not, with only a compute
+/// program bound panics when translated, naming the list.
 #[test]
 fn draws_need_a_vertex_and_fragment_program() {
     let session = TestSession::new();
@@ -1190,9 +1321,26 @@ fn draws_need_a_vertex_and_fragment_program() {
         width: 4,
         height: 4,
     };
-    let draws: [&dyn Fn(&mut CommandList); 2] = [&|list| list.draw(3, 1), &|list| {
-        list.draw_indirect(GpuAddress(0x1000), 1, 16)
-    }];
+    // Binding an index buffer is translated before the draw panics, so it
+    // must be a real one. The draws aren't, so their arguments can be
+    // anywhere.
+    let index_buffer = resources
+        .create_buffer(&BufferDesc {
+            label: "indices",
+            size: 6,
+            usage: BufferUsage::INDEX,
+            location: MemoryLocation::Device,
+        })
+        .unwrap();
+    let indices = resources.buffer_address(index_buffer);
+    let draws: [&dyn Fn(&mut CommandList); 3] = [
+        &|list| list.draw(3, 1),
+        &|list| list.draw_indirect(GpuAddress(0x1000), 1, 16),
+        &|list| {
+            list.bind_index_buffer(indices, 6, IndexFormat::Uint16);
+            list.draw_indexed_indirect(GpuAddress(0x1000), 1, 20);
+        },
+    ];
     for draw in draws {
         let mut list = CommandList::new("draw");
         list.bind_program(program);
@@ -1207,6 +1355,7 @@ fn draws_need_a_vertex_and_fragment_program() {
             "command list \"draw\" draws with no vertex and fragment program bound",
         );
     }
+    resources.destroy_buffer(index_buffer);
     resources.destroy_texture(texture);
     resources.destroy_program(program);
 }
