@@ -18,8 +18,8 @@ use std::ops::Range;
 
 use crate::{
     Barrier, ColorAttachment, DepthAttachment, GpuAddress, IndexFormat, MAX_COLOUR_ATTACHMENTS,
-    MAX_PUSH_DATA_SIZE, Program, Rect2d, RenderPassDesc, RenderState, TextureCopy,
-    TextureDataLayout, Viewport,
+    MAX_DRAW_INDIRECT_COUNT, MAX_PUSH_DATA_SIZE, Program, Rect2d, RenderPassDesc, RenderState,
+    TextureCopy, TextureDataLayout, Viewport,
 };
 
 /// The alignment, in bytes, of a fill's address and size, as Vulkan
@@ -34,9 +34,28 @@ const PUSH_DATA_ALIGNMENT: u32 = 4;
 /// workgroup counts, as Vulkan's `VkDispatchIndirectCommand` lays them out.
 pub(crate) const DISPATCH_ARGUMENTS_SIZE: u64 = 12;
 
-/// The alignment, in bytes, of indirect arguments' address, as Vulkan
-/// requires of indirect commands.
+/// The size, in bytes, of an indirect draw's arguments: four `u32`s, the
+/// vertex count, instance count, first vertex and first instance, as
+/// Vulkan's `VkDrawIndirectCommand` lays them out.
+pub(crate) const DRAW_ARGUMENTS_SIZE: u64 = 16;
+
+/// The alignment, in bytes, of indirect arguments' address, and of the
+/// stride between indirect draws' arguments, as Vulkan requires of
+/// indirect commands.
 const INDIRECT_ALIGNMENT: u64 = 4;
+
+/// The size, in bytes, of the arguments of `draws` indirect draws, each
+/// `arguments_size` bytes, `stride` bytes apart: from the start of the
+/// first to the end of the last, or 0 for none. `None` if that doesn't fit
+/// in a `u64`.
+pub(crate) fn indirect_draws_size(draws: u32, stride: u64, arguments_size: u64) -> Option<u64> {
+    match draws {
+        0 => Some(0),
+        draws => u64::from(draws - 1)
+            .checked_mul(stride)?
+            .checked_add(arguments_size),
+    }
+}
 
 /// A list of GPU commands, recorded on any thread with no device, then
 /// translated by a queue.
@@ -194,6 +213,17 @@ pub(crate) enum Command {
         indices: u32,
         /// The number of instances.
         instances: u32,
+    },
+    /// Runs the vertex and fragment program that's bound, `draws` times,
+    /// on the arguments the GPU reads at `arguments`, `stride` bytes apart,
+    /// when the draws run.
+    DrawIndirect {
+        /// The address of the first draw's arguments.
+        arguments: GpuAddress,
+        /// The number of draws.
+        draws: u32,
+        /// The distance, in bytes, from one draw's arguments to the next.
+        stride: u64,
     },
     /// Runs the compute program that's bound, on `groups` workgroups in
     /// each dimension.
@@ -765,6 +795,42 @@ impl CommandList {
         });
     }
 
+    /// Runs the vertex and fragment program that's bound `draw_count` times,
+    /// rendering to the render pass's attachments, each draw on arguments
+    /// the GPU reads when it runs, so that what's drawn can be decided on
+    /// the GPU. Each draw's arguments are four `u32`s: the vertex count and
+    /// instance count, as for [`draw`](Self::draw), then the first vertex
+    /// and the first instance. The first draw's are at `arguments`, and
+    /// each next draw's `stride` bytes after, so they can be packed
+    /// tightly, with a stride of 16, or be part of larger records. A draw
+    /// count of 0 draws nothing, as does a vertex or instance count of 0.
+    ///
+    /// The arguments must be in a buffer with [`BufferUsage::INDIRECT`],
+    /// and be read with [`Access::IndirectRead`], so a barrier is needed
+    /// after the GPU writes them.
+    ///
+    /// Translation panics if no vertex and fragment program is bound, as
+    /// when only a compute program is.
+    ///
+    /// # Panics
+    ///
+    /// Panics as [`draw`](Self::draw) does, if `draw_count` is more than
+    /// [`MAX_DRAW_INDIRECT_COUNT`], if `stride` is less than 16 or isn't a
+    /// multiple of 4, if `arguments` isn't a multiple of 4, or if the
+    /// arguments pass the end of the address space.
+    ///
+    /// [`BufferUsage::INDIRECT`]: crate::BufferUsage::INDIRECT
+    /// [`Access::IndirectRead`]: crate::Access::IndirectRead
+    pub fn draw_indirect(&mut self, arguments: GpuAddress, draw_count: u32, stride: u64) {
+        self.check_draw();
+        self.check_indirect_draws(arguments, draw_count, stride, DRAW_ARGUMENTS_SIZE);
+        self.commands.push(Command::DrawIndirect {
+            arguments,
+            draws: draw_count,
+            stride,
+        });
+    }
+
     /// Runs the compute program that's bound, on `groups` workgroups in x,
     /// y and z. A dimension of 0 runs nothing.
     ///
@@ -925,6 +991,53 @@ impl CommandList {
         }
     }
 
+    /// Checks that `draw_count` indirect draws can read their arguments,
+    /// each `arguments_size` bytes, from `arguments`, `stride` bytes apart.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `draw_count` is more than [`MAX_DRAW_INDIRECT_COUNT`], if
+    /// `stride` is less than `arguments_size` or isn't a multiple of 4, if
+    /// `arguments` isn't a multiple of 4, or if the arguments pass the end
+    /// of the address space.
+    fn check_indirect_draws(
+        &self,
+        arguments: GpuAddress,
+        draw_count: u32,
+        stride: u64,
+        arguments_size: u64,
+    ) {
+        assert!(
+            draw_count <= MAX_DRAW_INDIRECT_COUNT,
+            "command list \"{}\" draws indirectly {draw_count} times, but an indirect draw can \
+             run at most {MAX_DRAW_INDIRECT_COUNT}",
+            self.label,
+        );
+        assert!(
+            stride >= arguments_size && stride.is_multiple_of(INDIRECT_ALIGNMENT),
+            "command list \"{}\" draws indirectly with a stride of {stride} bytes, but the \
+             stride must be at least {arguments_size} and a multiple of {INDIRECT_ALIGNMENT}",
+            self.label,
+        );
+        assert!(
+            arguments.0.is_multiple_of(INDIRECT_ALIGNMENT),
+            "command list \"{}\" draws with arguments at {:#x}, but indirect arguments' \
+             address must be a multiple of {INDIRECT_ALIGNMENT}",
+            self.label,
+            arguments.0,
+        );
+        if draw_count > 0 {
+            let Some(size) = indirect_draws_size(draw_count, stride, arguments_size) else {
+                panic!(
+                    "command list \"{}\" draws indirectly {draw_count} times, {stride} bytes \
+                     apart, past the end of the address space",
+                    self.label,
+                );
+            };
+            self.check_range("draws with arguments of", arguments, size);
+        }
+    }
+
     /// Checks that `size` bytes at `address` are a range a command can use:
     /// at least one byte, and not past the end of the address space. `verb`
     /// says what the command does with it, for the message.
@@ -1043,6 +1156,15 @@ pub(crate) enum RecordedCommand<'a> {
         /// The number of instances.
         instances: u32,
     },
+    /// See [`CommandList::draw_indirect`].
+    DrawIndirect {
+        /// The address of the first draw's arguments.
+        arguments: GpuAddress,
+        /// The number of draws.
+        draws: u32,
+        /// The distance, in bytes, from one draw's arguments to the next.
+        stride: u64,
+    },
     /// See [`CommandList::dispatch`].
     Dispatch([u32; 3]),
     /// See [`CommandList::dispatch_indirect`].
@@ -1129,6 +1251,15 @@ impl CommandList {
                 Command::DrawIndexed { indices, instances } => {
                     RecordedCommand::DrawIndexed { indices, instances }
                 }
+                Command::DrawIndirect {
+                    arguments,
+                    draws,
+                    stride,
+                } => RecordedCommand::DrawIndirect {
+                    arguments,
+                    draws,
+                    stride,
+                },
                 Command::Dispatch { groups } => RecordedCommand::Dispatch(groups),
                 Command::DispatchIndirect { arguments } => {
                     RecordedCommand::DispatchIndirect(arguments)
@@ -2068,6 +2199,150 @@ mod tests {
     )]
     fn empty_index_buffers_panic() {
         CommandList::new("frame").bind_index_buffer(GpuAddress(0x1000), 0, IndexFormat::Uint32);
+    }
+
+    /// Indirect draws are recorded in order with their arguments' address,
+    /// draw count and stride, and a draw count of 0 is recorded too.
+    #[test]
+    fn indirect_draws_are_recorded() {
+        let mut list = ready_to_draw();
+        list.draw_indirect(GpuAddress(0x1000), 1, 16);
+        list.draw_indirect(GpuAddress(0x2004), 3, 32);
+        list.draw_indirect(GpuAddress(0x3000), 0, 16);
+        list.end_render_pass();
+        list.check_complete();
+        let recorded = list.recorded();
+        assert_eq!(
+            recorded[recorded.len() - 4..],
+            [
+                RecordedCommand::DrawIndirect {
+                    arguments: GpuAddress(0x1000),
+                    draws: 1,
+                    stride: 16,
+                },
+                RecordedCommand::DrawIndirect {
+                    arguments: GpuAddress(0x2004),
+                    draws: 3,
+                    stride: 32,
+                },
+                RecordedCommand::DrawIndirect {
+                    arguments: GpuAddress(0x3000),
+                    draws: 0,
+                    stride: 16,
+                },
+                RecordedCommand::EndRenderPass,
+            ],
+        );
+    }
+
+    /// An indirect draw checks what any draw needs, before its arguments.
+    #[test]
+    #[should_panic(expected = "command list \"frame\" draws outside a render pass")]
+    fn indirect_draws_need_a_render_pass() {
+        let mut list = ready_to_draw();
+        list.end_render_pass();
+        list.draw_indirect(GpuAddress(0x1002), 1, 16);
+    }
+
+    /// An indirect draw's stride must hold a whole draw's arguments, and be
+    /// a multiple of 4, whatever the draw count, and 16 and more are
+    /// enough.
+    #[test]
+    fn indirect_draw_strides_must_hold_whole_aligned_arguments() {
+        for stride in [0, 12, 18] {
+            let panic = std::panic::catch_unwind(|| {
+                ready_to_draw().draw_indirect(GpuAddress(0x1000), 1, stride);
+            })
+            .expect_err("the stride should panic");
+            assert_eq!(
+                panic.downcast_ref::<String>().unwrap(),
+                &format!(
+                    "command list \"frame\" draws indirectly with a stride of {stride} bytes, \
+                     but the stride must be at least 16 and a multiple of 4"
+                ),
+            );
+        }
+        let mut list = ready_to_draw();
+        list.draw_indirect(GpuAddress(0x1000), 2, 16);
+        list.draw_indirect(GpuAddress(0x1000), 2, 20);
+    }
+
+    /// Indirect draw arguments at an address that isn't a multiple of 4
+    /// panic.
+    #[test]
+    #[should_panic(
+        expected = "command list \"frame\" draws with arguments at 0x1002, but indirect \
+                    arguments' address must be a multiple of 4"
+    )]
+    fn unaligned_indirect_draw_arguments_panic() {
+        ready_to_draw().draw_indirect(GpuAddress(0x1002), 1, 16);
+    }
+
+    /// An indirect draw can run up to [`MAX_DRAW_INDIRECT_COUNT`] draws,
+    /// and more panic.
+    #[test]
+    #[should_panic(
+        expected = "command list \"frame\" draws indirectly 65536 times, but an indirect draw \
+                    can run at most 65535"
+    )]
+    fn too_many_indirect_draws_panic() {
+        let mut list = ready_to_draw();
+        list.draw_indirect(GpuAddress(0x1000), MAX_DRAW_INDIRECT_COUNT, 16);
+        list.draw_indirect(GpuAddress(0x1000), MAX_DRAW_INDIRECT_COUNT + 1, 16);
+    }
+
+    /// Indirect draw arguments that pass the end of the address space
+    /// panic, counting from the first draw's arguments to the end of the
+    /// last's.
+    #[test]
+    #[should_panic(
+        expected = "command list \"frame\" draws with arguments of 52 bytes at \
+                    0xffffffffffffffcc, past the end of the address space"
+    )]
+    fn indirect_draws_past_the_address_space_panic() {
+        let mut list = ready_to_draw();
+        let arguments = GpuAddress(u64::MAX - 51);
+        // 48 bytes of arguments fit, however they're spread.
+        list.draw_indirect(arguments, 2, 32);
+        list.draw_indirect(arguments, 3, 16);
+        list.draw_indirect(arguments, 2, 36);
+    }
+
+    /// An indirect draw whose arguments' size overflows passes the end of
+    /// the address space, wherever its arguments are.
+    #[test]
+    #[should_panic(
+        expected = "command list \"frame\" draws indirectly 3 times, 18446744073709551612 bytes \
+                    apart, past the end of the address space"
+    )]
+    fn indirect_draws_whose_size_overflows_panic() {
+        ready_to_draw().draw_indirect(GpuAddress(0), 3, u64::MAX - 3);
+    }
+
+    /// An indirect draw count of 0 reads no arguments, so they can be
+    /// anywhere aligned.
+    #[test]
+    fn no_indirect_draws_read_no_arguments() {
+        ready_to_draw().draw_indirect(GpuAddress(u64::MAX - 3), 0, 16);
+    }
+
+    /// Indirect draws' arguments span from the start of the first draw's
+    /// to the end of the last's, and the size of too many is `None`.
+    #[test]
+    fn indirect_draw_sizes_span_every_draw() {
+        for (draws, stride, size) in [
+            (0, 16, Some(0)),
+            (1, 32, Some(16)),
+            (3, 16, Some(48)),
+            (3, 32, Some(80)),
+            (u32::MAX, u64::MAX, None),
+        ] {
+            assert_eq!(
+                indirect_draws_size(draws, stride, DRAW_ARGUMENTS_SIZE),
+                size,
+                "{draws} draws {stride} bytes apart",
+            );
+        }
     }
 
     /// A render pass needs an attachment, and at most eight colour attachments.
