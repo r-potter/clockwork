@@ -4,7 +4,7 @@
 //! Synchronization validation doesn't track copies and fills by address
 //! (`VK_KHR_device_address_commands`), on either side, so a missing
 //! barrier between them isn't reported, and R8's
-//! `missing_barrier_is_reported` waits for draws and dispatches in
+//! `missing_barrier_is_reported`, which renders twice, is still to come in
 //! `rhi-shaders`.
 
 use std::panic::{self, AssertUnwindSafe};
@@ -834,6 +834,136 @@ fn render_passes_clear_their_attachments() {
     for texture in [float, integer, depth] {
         resources.destroy_texture(texture);
     }
+}
+
+/// The triangle program draws into an 8×8 colour attachment cleared to
+/// transparent black, twice, as two instances, which write the same
+/// texels. The texel at the centre is its corners' colours, red, green and
+/// blue, weighted by where the texel's centre is in the triangle, and the
+/// corner texel, outside the triangle, keeps the clear value. A compute
+/// program is bound after the triangle's, which leaves the triangle's
+/// bound for the draw.
+#[test]
+fn draws_render_to_the_render_pass() {
+    const SIZE: u32 = 8;
+    let session = TestSession::new();
+    let backend = VulkanTestBackend::headless(&session);
+    let resources = backend.resources();
+    let program = resources
+        .create_program(&test_shaders::triangle().desc())
+        .unwrap();
+    let compute = resources
+        .create_program(&test_shaders::write_value().desc())
+        .unwrap();
+    let texture = resources
+        .create_texture(&TextureDesc {
+            label: "triangle",
+            dimension: TextureDimension::D2,
+            format: Format::Rgba32Float,
+            extent: Extent3d::new_2d(SIZE, SIZE),
+            mip_levels: 1,
+            array_layers: 1,
+            usage: TextureUsage::COLOUR_ATTACHMENT | TextureUsage::COPY_SOURCE,
+        })
+        .unwrap();
+    let extent = Extent3d::new_2d(SIZE, SIZE);
+    let layout = TextureDataLayout::tightly_packed(Format::Rgba32Float, extent);
+    let size = u64::from(layout.bytes_per_row * SIZE);
+    let readback = create(&**resources, "readback", size, MemoryLocation::Readback);
+    let attachment = Extent2d {
+        width: SIZE,
+        height: SIZE,
+    };
+
+    let mut list = CommandList::new("triangle");
+    list.barrier(&[Barrier::texture(
+        texture,
+        Access::None,
+        Access::ColorAttachmentWrite,
+    )]);
+    list.bind_program(program);
+    list.bind_program(compute);
+    list.set_render_state(&RenderState::default().cull(CullMode::None));
+    list.set_viewport(&Viewport::from_extent(attachment));
+    list.set_scissor(Rect2d::from_extent(attachment));
+    list.begin_render_pass(&RenderPassDesc::colour(texture, LoadOp::Clear([0.0; 4])));
+    list.draw(3, 2);
+    list.end_render_pass();
+    list.barrier(&[Barrier::texture(
+        texture,
+        Access::ColorAttachmentWrite,
+        Access::CopyRead,
+    )]);
+    list.copy_texture_to_buffer(
+        whole(texture, extent),
+        resources.buffer_address(readback),
+        layout,
+    );
+    list.barrier(&[Barrier::buffer(
+        readback,
+        Access::CopyWrite,
+        Access::HostRead,
+    )]);
+    run(&backend, QueueKind::Graphics, &list);
+
+    let texels = read_texels(&**resources, readback, size);
+    let texel = |x: u32, y: u32| {
+        let at = ((y * SIZE + x) * 4) as usize;
+        [texels[at], texels[at + 1], texels[at + 2], texels[at + 3]]
+    };
+    // The centre of texel (4, 4) is at (0.125, 0.125) in clip space, which
+    // is 0.375 of the way to the top corner, 0.4375 to the bottom right and
+    // 0.1875 to the bottom left.
+    let centre = texel(4, 4);
+    let expected = [0.375, 0.4375, 0.1875, 1.0];
+    assert!(
+        centre
+            .iter()
+            .zip(expected)
+            .all(|(texel, expected)| (texel - expected).abs() < 1e-3),
+        "the centre texel is {centre:?}, not {expected:?}",
+    );
+    assert_eq!(texel(0, 0), [0.0; 4]);
+    resources.destroy_buffer(readback);
+    resources.destroy_texture(texture);
+    resources.destroy_program(program);
+    resources.destroy_program(compute);
+}
+
+/// Drawing with only a compute program bound panics when translated,
+/// naming the list.
+#[test]
+fn draws_need_a_vertex_and_fragment_program() {
+    let session = TestSession::new();
+    let backend = VulkanTestBackend::headless(&session);
+    let resources = backend.resources();
+    let program = resources
+        .create_program(&test_shaders::write_value().desc())
+        .unwrap();
+    let texture = create_texture(
+        &**resources,
+        "colour",
+        Format::Rgba8Unorm,
+        TextureUsage::COLOUR_ATTACHMENT,
+    );
+    let extent = Extent2d {
+        width: 4,
+        height: 4,
+    };
+    let mut list = CommandList::new("draw");
+    list.bind_program(program);
+    list.set_render_state(&RenderState::default());
+    list.set_viewport(&Viewport::from_extent(extent));
+    list.set_scissor(Rect2d::from_extent(extent));
+    list.begin_render_pass(&RenderPassDesc::colour(texture, LoadOp::DontCare));
+    list.draw(3, 1);
+    list.end_render_pass();
+    assert_eq!(
+        translation_panic(&backend, QueueKind::Graphics, &list),
+        "command list \"draw\" draws with no vertex and fragment program bound",
+    );
+    resources.destroy_texture(texture);
+    resources.destroy_program(program);
 }
 
 /// Attachments that can't be rendered to together panic when translated,
