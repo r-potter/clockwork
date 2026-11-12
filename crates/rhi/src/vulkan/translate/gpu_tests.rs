@@ -17,10 +17,10 @@ use crate::{
     Access, AddressMode, Barrier, Blend, Buffer, BufferDesc, BufferUsage, ColorAttachment,
     ColourMask, ColourWrite, CommandList, CompareOp, CullMode, DepthAttachment, DepthTest,
     DescriptorIndex, Extent2d, Extent3d, Filter, Format, FrontFace, GpuAddress, GpuResources,
-    LoadOp, MemoryLocation, Offset2d, QueueId, QueueKind, Rect2d, RenderHardwareInterface,
-    RenderPassDesc, RenderState, SamplerDesc, StoreOp, SubmitDesc, Subresource, Texture,
-    TextureCopy, TextureDataLayout, TextureDesc, TextureDimension, TextureUsage, TextureView,
-    Topology, Viewport,
+    IndexFormat, LoadOp, MemoryLocation, Offset2d, QueueId, QueueKind, Rect2d,
+    RenderHardwareInterface, RenderPassDesc, RenderState, SamplerDesc, StoreOp, SubmitDesc,
+    Subresource, Texture, TextureCopy, TextureDataLayout, TextureDesc, TextureDimension,
+    TextureUsage, TextureView, Topology, Viewport,
 };
 
 /// A buffer of `size` bytes in `location`, for copies.
@@ -661,9 +661,9 @@ fn render_state_is_set_on_the_graphics_queue() {
     resources.destroy_program(program);
 }
 
-/// Only the graphics queue draws, so setting render state, a viewport or a
-/// scissor, or beginning a render pass, panics when translated for a compute
-/// queue of its own.
+/// Only the graphics queue draws, so setting render state, a viewport, a
+/// scissor or an index buffer, or beginning a render pass, panics when
+/// translated for a compute queue of its own.
 #[test]
 fn only_the_graphics_queue_sets_render_state() {
     let session = TestSession::new();
@@ -693,6 +693,9 @@ fn only_the_graphics_queue_sets_render_state() {
     });
     check("sets a scissor", &|list| {
         list.set_scissor(Rect2d::from_extent(extent));
+    });
+    check("binds an index buffer", &|list| {
+        list.bind_index_buffer(GpuAddress(0x1000), 12, IndexFormat::Uint16);
     });
     let resources = backend.resources();
     let texture = create_texture(
@@ -907,14 +910,33 @@ fn draws_render_to_the_render_pass() {
     run(&backend, QueueKind::Graphics, &list);
 
     let texels = read_texels(&**resources, readback, size);
-    let texel = |x: u32, y: u32| {
-        let at = ((y * SIZE + x) * 4) as usize;
-        [texels[at], texels[at + 1], texels[at + 2], texels[at + 3]]
-    };
+    assert_triangle_centre(texel(&texels, SIZE, 4, 4));
+    assert_eq!(texel(&texels, SIZE, 0, 0), [0.0; 4]);
+    resources.destroy_buffer(readback);
+    resources.destroy_texture(texture);
+    resources.destroy_program(program);
+    resources.destroy_program(compute);
+}
+
+/// Texel (`x`, `y`) of `Rgba32Float` texels in rows `width` texels wide,
+/// read back tightly packed.
+fn texel(texels: &[f32], width: u32, x: u32, y: u32) -> [f32; 4] {
+    let at = ((y * width + x) * 4) as usize;
+    [texels[at], texels[at + 1], texels[at + 2], texels[at + 3]]
+}
+
+/// Checks that `centre`, the centre texel of an 8×8 attachment the
+/// triangle program drew into, is its corners' colours, red, green and
+/// blue, weighted by where the texel's centre is in the triangle.
+///
+/// # Panics
+///
+/// Panics, naming both colours, if any channel differs by more than
+/// rounding.
+fn assert_triangle_centre(centre: [f32; 4]) {
     // The centre of texel (4, 4) is at (0.125, 0.125) in clip space, which
     // is 0.375 of the way to the top corner, 0.4375 to the bottom right and
     // 0.1875 to the bottom left.
-    let centre = texel(4, 4);
     let expected = [0.375, 0.4375, 0.1875, 1.0];
     assert!(
         centre
@@ -923,11 +945,122 @@ fn draws_render_to_the_render_pass() {
             .all(|(texel, expected)| (texel - expected).abs() < 1e-3),
         "the centre texel is {centre:?}, not {expected:?}",
     );
-    assert_eq!(texel(0, 0), [0.0; 4]);
+}
+
+/// The triangle program draws indexed into three layers of an 8×8 colour
+/// attachment, each cleared to transparent black, with the vertex index
+/// each corner's colour comes from read from the index buffer bound:
+///
+/// - layer 0: 16-bit indices, bound from partway into the buffer, after
+///   indices that would draw nothing
+/// - layer 1: 32-bit indices, in another order
+/// - layer 2: 16-bit indices that all name one vertex, so nothing is drawn
+///
+/// The first two layers' centres are the triangle's colours, and the
+/// third's is the clear value.
+#[test]
+fn indexed_draws_read_their_index_buffer() {
+    const SIZE: u32 = 8;
+    let session = TestSession::new();
+    let backend = VulkanTestBackend::headless(&session);
+    let resources = backend.resources();
+    let program = resources
+        .create_program(&test_shaders::triangle().desc())
+        .unwrap();
+    let texture = resources
+        .create_texture(&TextureDesc {
+            label: "triangles",
+            dimension: TextureDimension::D2,
+            format: Format::Rgba32Float,
+            extent: Extent3d::new_2d(SIZE, SIZE),
+            mip_levels: 1,
+            array_layers: 3,
+            usage: TextureUsage::COLOUR_ATTACHMENT | TextureUsage::COPY_SOURCE,
+        })
+        .unwrap();
+    // Six 16-bit indices, the first three naming one vertex, then three
+    // 32-bit indices, which start 4-byte aligned.
+    let indices: Vec<u8> = [0_u16, 0, 0, 2, 1, 0]
+        .iter()
+        .flat_map(|index| index.to_le_bytes())
+        .chain([1_u32, 2, 0].iter().flat_map(|index| index.to_le_bytes()))
+        .collect();
+    let index_buffer = resources
+        .create_buffer(&BufferDesc {
+            label: "indices",
+            size: indices.len() as u64,
+            usage: BufferUsage::INDEX,
+            location: MemoryLocation::Upload,
+        })
+        .unwrap();
+    resources.write_buffer(index_buffer, 0, &indices);
+    let base = resources.buffer_address(index_buffer).0;
+    let extent = Extent3d::new_2d(SIZE, SIZE);
+    let layout = TextureDataLayout::tightly_packed(Format::Rgba32Float, extent);
+    let layer_size = u64::from(layout.bytes_per_row * SIZE);
+    let readback = create(
+        &**resources,
+        "readback",
+        3 * layer_size,
+        MemoryLocation::Readback,
+    );
+    let attachment = Extent2d {
+        width: SIZE,
+        height: SIZE,
+    };
+
+    let mut list = CommandList::new("indexed triangles");
+    list.barrier(&[
+        Barrier::texture(texture, Access::None, Access::ColorAttachmentWrite),
+        Barrier::buffer(index_buffer, Access::HostWrite, Access::IndexRead),
+    ]);
+    list.bind_program(program);
+    list.set_render_state(&RenderState::default().cull(CullMode::None));
+    list.set_viewport(&Viewport::from_extent(attachment));
+    list.set_scissor(Rect2d::from_extent(attachment));
+    for (layer, address, size, format) in [
+        (0, base + 6, 6, IndexFormat::Uint16),
+        (1, base + 12, 12, IndexFormat::Uint32),
+        (2, base, 6, IndexFormat::Uint16),
+    ] {
+        let mut render_pass = RenderPassDesc::colour(texture, LoadOp::Clear([0.0; 4]));
+        render_pass.colour[0].layers = layer..layer + 1;
+        list.bind_index_buffer(GpuAddress(address), size, format);
+        list.begin_render_pass(&render_pass);
+        list.draw_indexed(3, 1);
+        list.end_render_pass();
+    }
+    list.barrier(&[Barrier::texture(
+        texture,
+        Access::ColorAttachmentWrite,
+        Access::CopyRead,
+    )]);
+    for layer in 0..3 {
+        list.copy_texture_to_buffer(
+            TextureCopy {
+                layers: layer..layer + 1,
+                ..whole(texture, extent)
+            },
+            GpuAddress(resources.buffer_address(readback).0 + u64::from(layer) * layer_size),
+            layout,
+        );
+    }
+    list.barrier(&[Barrier::buffer(
+        readback,
+        Access::CopyWrite,
+        Access::HostRead,
+    )]);
+    run(&backend, QueueKind::Graphics, &list);
+
+    let texels = read_texels(&**resources, readback, 3 * layer_size);
+    let layers: Vec<&[f32]> = texels.chunks(texels.len() / 3).collect();
+    assert_triangle_centre(texel(layers[0], SIZE, 4, 4));
+    assert_triangle_centre(texel(layers[1], SIZE, 4, 4));
+    assert_eq!(texel(layers[2], SIZE, 4, 4), [0.0; 4]);
     resources.destroy_buffer(readback);
+    resources.destroy_buffer(index_buffer);
     resources.destroy_texture(texture);
     resources.destroy_program(program);
-    resources.destroy_program(compute);
 }
 
 /// Drawing with only a compute program bound panics when translated,

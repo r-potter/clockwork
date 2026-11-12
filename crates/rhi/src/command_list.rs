@@ -17,7 +17,7 @@
 use std::ops::Range;
 
 use crate::{
-    Barrier, ColorAttachment, DepthAttachment, GpuAddress, MAX_COLOUR_ATTACHMENTS,
+    Barrier, ColorAttachment, DepthAttachment, GpuAddress, IndexFormat, MAX_COLOUR_ATTACHMENTS,
     MAX_PUSH_DATA_SIZE, Program, Rect2d, RenderPassDesc, RenderState, TextureCopy,
     TextureDataLayout, Viewport,
 };
@@ -79,6 +79,9 @@ pub struct CommandList {
     viewport_set: bool,
     /// Whether a scissor has been set, so that draws can run.
     scissor_set: bool,
+    /// The size, in bytes, and format of the index buffer bound, if one
+    /// is, so that indexed draws can run and be checked against it.
+    index_buffer: Option<(u64, IndexFormat)>,
     /// Whether a render pass is open: begun, and not yet ended.
     in_render_pass: bool,
     /// How many debug regions are open.
@@ -165,11 +168,30 @@ pub(crate) enum Command {
         /// The block, as a range of the arena.
         data: Range<usize>,
     },
+    /// Binds `size` bytes of `format` indices at `address`, for later
+    /// indexed draws.
+    BindIndexBuffer {
+        /// The first index.
+        address: GpuAddress,
+        /// How many bytes of indices there are.
+        size: u64,
+        /// The type of each index.
+        format: IndexFormat,
+    },
     /// Runs the vertex and fragment program that's bound on `vertices`
     /// vertices, `instances` times.
     Draw {
         /// The number of vertices.
         vertices: u32,
+        /// The number of instances.
+        instances: u32,
+    },
+    /// Runs the vertex and fragment program that's bound on the vertices
+    /// that the first `indices` indices of the index buffer name,
+    /// `instances` times.
+    DrawIndexed {
+        /// The number of indices.
+        indices: u32,
         /// The number of instances.
         instances: u32,
     },
@@ -224,6 +246,7 @@ impl CommandList {
             render_state_set: false,
             viewport_set: false,
             scissor_set: false,
+            index_buffer: None,
             in_render_pass: false,
             open_regions: 0,
             open_timings: 0,
@@ -660,6 +683,88 @@ impl CommandList {
         });
     }
 
+    /// Binds `size` bytes of indices of `format` at `address`, for later
+    /// indexed draws, until another index buffer is bound. It may be bound
+    /// inside a render pass or before one.
+    ///
+    /// The indices must be in a buffer with [`BufferUsage::INDEX`], and be
+    /// read with [`Access::IndexRead`], so a barrier is needed after
+    /// they're written.
+    ///
+    /// Translation panics if the queue doesn't draw: only the graphics
+    /// queue does.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `size` is zero, if the range passes the end of the address
+    /// space, or if `address` or `size` isn't a multiple of the size of an
+    /// index, as Vulkan requires.
+    ///
+    /// [`BufferUsage::INDEX`]: crate::BufferUsage::INDEX
+    /// [`Access::IndexRead`]: crate::Access::IndexRead
+    pub fn bind_index_buffer(&mut self, address: GpuAddress, size: u64, format: IndexFormat) {
+        self.check_range("binds an index buffer of", address, size);
+        assert!(
+            address.0.is_multiple_of(format.size()),
+            "command list \"{}\" binds an index buffer at {:#x}, but the address of {format:?} \
+             indices must be a multiple of {}",
+            self.label,
+            address.0,
+            format.size(),
+        );
+        assert!(
+            size.is_multiple_of(format.size()),
+            "command list \"{}\" binds an index buffer of {size} bytes, but the size of \
+             {format:?} indices must be a multiple of {}",
+            self.label,
+            format.size(),
+        );
+        self.commands.push(Command::BindIndexBuffer {
+            address,
+            size,
+            format,
+        });
+        self.index_buffer = Some((size, format));
+    }
+
+    /// Runs the vertex and fragment program that's bound on the vertices
+    /// the first `index_count` indices of the index buffer name,
+    /// `instance_count` times, rendering to the render pass's attachments.
+    /// A count of 0 draws nothing.
+    ///
+    /// Each vertex's index, as the vertex shader sees it, is the index read
+    /// from the buffer, which the shader uses to read its vertex by
+    /// address, as for [`draw`](Self::draw).
+    ///
+    /// Translation panics if no vertex and fragment program is bound, as
+    /// when only a compute program is.
+    ///
+    /// # Panics
+    ///
+    /// Panics as [`draw`](Self::draw) does, if no index buffer has been
+    /// bound, or if the index buffer bound holds fewer than `index_count`
+    /// indices.
+    pub fn draw_indexed(&mut self, index_count: u32, instance_count: u32) {
+        self.check_draw();
+        let (size, format) = self.index_buffer.unwrap_or_else(|| {
+            panic!(
+                "command list \"{}\" draws indexed with no index buffer bound",
+                self.label,
+            )
+        });
+        let held = size / format.size();
+        assert!(
+            u64::from(index_count) <= held,
+            "command list \"{}\" draws {index_count} indices, but the index buffer bound holds \
+             {held}",
+            self.label,
+        );
+        self.commands.push(Command::DrawIndexed {
+            indices: index_count,
+            instances: instance_count,
+        });
+    }
+
     /// Runs the compute program that's bound, on `groups` workgroups in x,
     /// y and z. A dimension of 0 runs nothing.
     ///
@@ -915,10 +1020,26 @@ pub(crate) enum RecordedCommand<'a> {
         /// The block.
         data: &'a [u8],
     },
+    /// See [`CommandList::bind_index_buffer`].
+    BindIndexBuffer {
+        /// The first index.
+        address: GpuAddress,
+        /// How many bytes of indices there are.
+        size: u64,
+        /// The type of each index.
+        format: IndexFormat,
+    },
     /// See [`CommandList::draw`].
     Draw {
         /// The number of vertices.
         vertices: u32,
+        /// The number of instances.
+        instances: u32,
+    },
+    /// See [`CommandList::draw_indexed`].
+    DrawIndexed {
+        /// The number of indices.
+        indices: u32,
         /// The number of instances.
         instances: u32,
     },
@@ -996,6 +1117,18 @@ impl CommandList {
                     vertices,
                     instances,
                 },
+                Command::BindIndexBuffer {
+                    address,
+                    size,
+                    format,
+                } => RecordedCommand::BindIndexBuffer {
+                    address,
+                    size,
+                    format,
+                },
+                Command::DrawIndexed { indices, instances } => {
+                    RecordedCommand::DrawIndexed { indices, instances }
+                }
                 Command::Dispatch { groups } => RecordedCommand::Dispatch(groups),
                 Command::DispatchIndirect { arguments } => {
                     RecordedCommand::DispatchIndirect(arguments)
@@ -1796,6 +1929,145 @@ mod tests {
                 &format!("command list \"frame\" draws with no {missing}"),
             );
         }
+    }
+
+    /// Index buffers and indexed draws are recorded in order with their
+    /// values, an index buffer bound before a render pass is kept for the
+    /// draws in it, and binding another replaces it, so a draw may read up
+    /// to the indices the new one holds.
+    #[test]
+    fn indexed_draws_are_recorded() {
+        let mut list = ready_to_draw();
+        list.end_render_pass();
+        list.bind_index_buffer(GpuAddress(0x1000), 12, IndexFormat::Uint16);
+        list.begin_render_pass(&render_pass("albedo", 1));
+        list.draw_indexed(6, 1);
+        list.bind_index_buffer(GpuAddress(0x2004), 32, IndexFormat::Uint32);
+        list.draw_indexed(8, 2);
+        list.draw_indexed(0, 1);
+        list.end_render_pass();
+        list.check_complete();
+        let recorded = list.recorded();
+        let first = recorded.len() - 7;
+        assert_eq!(
+            recorded[first],
+            RecordedCommand::BindIndexBuffer {
+                address: GpuAddress(0x1000),
+                size: 12,
+                format: IndexFormat::Uint16,
+            },
+        );
+        assert!(matches!(
+            recorded[first + 1],
+            RecordedCommand::BeginRenderPass { .. }
+        ));
+        assert_eq!(
+            recorded[first + 2..],
+            [
+                RecordedCommand::DrawIndexed {
+                    indices: 6,
+                    instances: 1,
+                },
+                RecordedCommand::BindIndexBuffer {
+                    address: GpuAddress(0x2004),
+                    size: 32,
+                    format: IndexFormat::Uint32,
+                },
+                RecordedCommand::DrawIndexed {
+                    indices: 8,
+                    instances: 2,
+                },
+                RecordedCommand::DrawIndexed {
+                    indices: 0,
+                    instances: 1,
+                },
+                RecordedCommand::EndRenderPass,
+            ][..],
+        );
+    }
+
+    /// An indexed draw with no index buffer bound panics, naming the list.
+    #[test]
+    #[should_panic(expected = "command list \"frame\" draws indexed with no index buffer bound")]
+    fn indexed_draws_need_an_index_buffer() {
+        ready_to_draw().draw_indexed(3, 1);
+    }
+
+    /// An indexed draw checks what any draw needs, before its index
+    /// buffer.
+    #[test]
+    #[should_panic(expected = "command list \"frame\" draws outside a render pass")]
+    fn indexed_draws_need_a_render_pass() {
+        let mut list = ready_to_draw();
+        list.end_render_pass();
+        list.bind_index_buffer(GpuAddress(0x1000), 12, IndexFormat::Uint16);
+        list.draw_indexed(3, 1);
+    }
+
+    /// An indexed draw that reads more indices than the index buffer bound
+    /// holds panics, counting indices rather than bytes, and one that reads
+    /// exactly as many doesn't.
+    #[test]
+    #[should_panic(
+        expected = "command list \"frame\" draws 4 indices, but the index buffer bound holds 3"
+    )]
+    fn indexed_draws_past_their_index_buffer_panic() {
+        let mut list = ready_to_draw();
+        // Six bytes hold three 16-bit indices.
+        list.bind_index_buffer(GpuAddress(0x1000), 6, IndexFormat::Uint16);
+        list.draw_indexed(3, 1);
+        list.draw_indexed(4, 1);
+    }
+
+    /// An index buffer whose address isn't a multiple of its index size
+    /// panics, naming the format, whichever format it is.
+    #[test]
+    fn unaligned_index_buffers_panic() {
+        for (address, format, size) in [
+            (0x1001, IndexFormat::Uint16, 2),
+            (0x1002, IndexFormat::Uint32, 4),
+        ] {
+            let panic = std::panic::catch_unwind(|| {
+                CommandList::new("frame").bind_index_buffer(GpuAddress(address), 12, format);
+            })
+            .expect_err("the index buffer should panic");
+            assert_eq!(
+                panic.downcast_ref::<String>().unwrap(),
+                &format!(
+                    "command list \"frame\" binds an index buffer at {address:#x}, but the \
+                     address of {format:?} indices must be a multiple of {size}"
+                ),
+            );
+        }
+    }
+
+    /// An index buffer whose size isn't a multiple of its index size
+    /// panics, naming the format, whichever format it is.
+    #[test]
+    fn index_buffers_of_partial_indices_panic() {
+        for (bytes, format, size) in [(7, IndexFormat::Uint16, 2), (10, IndexFormat::Uint32, 4)] {
+            let panic = std::panic::catch_unwind(|| {
+                CommandList::new("frame").bind_index_buffer(GpuAddress(0x1000), bytes, format);
+            })
+            .expect_err("the index buffer should panic");
+            assert_eq!(
+                panic.downcast_ref::<String>().unwrap(),
+                &format!(
+                    "command list \"frame\" binds an index buffer of {bytes} bytes, but the size \
+                     of {format:?} indices must be a multiple of {size}"
+                ),
+            );
+        }
+    }
+
+    /// An empty index buffer panics, as any empty range does.
+    #[test]
+    #[should_panic(
+        expected = "command list \"frame\" binds an index buffer of 0 bytes at 0x1000, but a \
+                    range must have at least one byte"
+    )]
+    fn empty_index_buffers_panic() {
+        CommandList::new("frame").bind_index_buffer(GpuAddress(0x1000), 0, IndexFormat::Uint32);
     }
 
     /// A render pass needs an attachment, and at most eight colour attachments.
