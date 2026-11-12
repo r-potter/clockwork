@@ -2,7 +2,7 @@
 //! hold, so it's set in a command list (design 0002, "Programs").
 
 /// The most colour attachments a [`RenderState`] describes, numbered from 0.
-/// Rendering may use fewer, as the device allows.
+/// A render pass may use fewer, as the device allows.
 pub const MAX_COLOUR_ATTACHMENTS: usize = 8;
 
 /// The rasterization state draws use, set with
