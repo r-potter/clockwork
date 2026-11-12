@@ -186,8 +186,8 @@ impl VulkanDevice {
     /// open, names a stale handle, binds a program the queue can't run,
     /// renders or sets render state on a queue that doesn't draw, or
     /// renders to attachments their textures can't be, or that can't be
-    /// rendered to together, or if a dispatch's program isn't a compute
-    /// program.
+    /// rendered to together, or if it dispatches with no compute program
+    /// bound.
     pub(super) fn translate(
         self: &Arc<Self>,
         id: QueueId,
@@ -248,8 +248,8 @@ impl VulkanDevice {
     /// from nor to that queue, binds a program or pushes data the queue
     /// can't use, renders or sets render state on a queue that doesn't
     /// draw, renders to attachments their textures can't be, or that can't
-    /// be rendered to together, or dispatches with a program that isn't a
-    /// compute program.
+    /// be rendered to together, or dispatches with no compute program
+    /// bound.
     unsafe fn record(
         &self,
         buffer: vk::CommandBuffer,
@@ -278,9 +278,10 @@ impl VulkanDevice {
         // lock order above requires.
         let textures = self.lock_textures_for_reading();
         let programs = self.lock_programs_for_reading();
-        // The program last bound, by label, and whether it's a compute
-        // program.
-        let mut program_bound = None;
+        // The programs last bound at each bind point, by label. Binding a
+        // program binds only its own stages, so a compute program and a
+        // vertex and fragment program stay bound together.
+        let mut bound = BoundPrograms::default();
         // Reused for each barrier command, so recording them doesn't allocate
         // once they've grown.
         let mut memory_barriers = Vec::new();
@@ -541,7 +542,9 @@ impl VulkanDevice {
                             entry.shaders(),
                         );
                     }
-                    program_bound = Some((label, entry.is_compute()));
+                    if entry.is_compute() {
+                        bound.compute = Some(label);
+                    }
                 }
                 &Command::BeginRenderPass { ref colour, depth } => {
                     check_draws(list, kind, "begins a render pass");
@@ -612,13 +615,13 @@ impl VulkanDevice {
                     }
                 }
                 &Command::Dispatch { groups: [x, y, z] } => {
-                    check_dispatch(list, program_bound);
+                    bound.check_dispatch(list);
                     // SAFETY: Guaranteed by the caller, and a compute
                     // program the queue can run is bound, with the heaps.
                     unsafe { device.cmd_dispatch(buffer, x, y, z) };
                 }
                 &Command::DispatchIndirect { arguments } => {
-                    check_dispatch(list, program_bound);
+                    bound.check_dispatch(list);
                     let dispatch_info = vk::DispatchIndirect2InfoKHR::default()
                         .address_range(
                             vk::DeviceAddressRangeKHR::default()
@@ -776,19 +779,30 @@ fn check_draws(list: &CommandList, kind: QueueKind, does: &str) {
     );
 }
 
-/// Checks that a dispatch in `list` can run `program_bound`, the label of
-/// the program last bound and whether it's a compute program.
-///
-/// # Panics
-///
-/// Panics, naming the list and the program, if it isn't a compute program.
-fn check_dispatch(list: &CommandList, program_bound: Option<(&str, bool)>) {
-    let (label, is_compute) = program_bound.expect("recording checked that a program is bound");
-    assert!(
-        is_compute,
-        "command list \"{}\" dispatches with program \"{label}\", which isn't a compute program",
-        list.label(),
-    );
+/// The labels of the programs last bound at each of Vulkan's bind points,
+/// while a list is translated. Binding a program binds only its own
+/// stages, so binding a compute program leaves a vertex and fragment
+/// program bound, and the other way around.
+#[derive(Debug, Default)]
+struct BoundPrograms<'a> {
+    /// The compute program, for dispatches.
+    compute: Option<&'a str>,
+}
+
+impl BoundPrograms<'_> {
+    /// Checks that a dispatch in `list` has a compute program to run.
+    ///
+    /// # Panics
+    ///
+    /// Panics, naming the list, if no compute program is bound, as when
+    /// it binds only vertex and fragment programs.
+    fn check_dispatch(&self, list: &CommandList) {
+        assert!(
+            self.compute.is_some(),
+            "command list \"{}\" dispatches with no compute program bound",
+            list.label(),
+        );
+    }
 }
 
 /// How `transfer`, a barrier's queue transfer, is recorded in the command
