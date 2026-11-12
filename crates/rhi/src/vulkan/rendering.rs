@@ -2,14 +2,13 @@
 //! views created and cached on first use (design 0002, "Subresources and
 //! views").
 
-use std::slice;
-
 use ash::vk;
 
 use super::VulkanDevice;
 use super::textures::TextureEntry;
 use crate::handle::HandleTable;
-use crate::{Access, ColorAttachment, Format, LoadOp, RhiResult, StoreOp};
+use crate::rendering::render_area;
+use crate::{Access, ColorAttachment, CommandList, Format, LoadOp, RhiResult, StoreOp};
 
 impl<T> From<LoadOp<T>> for vk::AttachmentLoadOp {
     fn from(load: LoadOp<T>) -> Self {
@@ -51,13 +50,13 @@ fn clear_colour(format: Format, colour: [f32; 4]) -> vk::ClearColorValue {
 }
 
 impl VulkanDevice {
-    /// Records a command into `buffer` that begins rendering to
-    /// `attachment`, a colour attachment whose texture is in `textures`,
-    /// over the whole of the mip it names.
+    /// Records a command into `buffer` that begins rendering to `colour`,
+    /// the colour attachments of a rendering in `list`, whose textures are
+    /// in `textures`.
     ///
     /// # Errors
     ///
-    /// Returns an error if the attachment view can't be created.
+    /// Returns an error if an attachment view can't be created.
     ///
     /// # Safety
     ///
@@ -68,42 +67,71 @@ impl VulkanDevice {
     ///
     /// # Panics
     ///
-    /// Panics, naming the texture, if it's stale or can't be a colour
-    /// attachment, or if the attachment is out of range.
+    /// Panics, naming the list, if a texture is stale or can't be an
+    /// attachment, if an attachment is out of range, if the attachments
+    /// differ in size or layer count, or if there are more than the device
+    /// renders to.
     pub(super) unsafe fn begin_rendering(
         &self,
         buffer: vk::CommandBuffer,
-        attachment: &ColorAttachment,
+        list: &CommandList,
+        colour: &[ColorAttachment],
         textures: &HandleTable<TextureEntry>,
     ) -> RhiResult<()> {
-        let (label, entry) = textures
-            .lookup(attachment.texture.handle())
-            .unwrap_or_else(|err| panic!("{err}"));
-        let (layers, extent) = attachment.resolve(&entry.attached(label));
-        let layer_count = layers.end - layers.start;
-        // SAFETY: The entry is in `textures`, which the caller keeps locked
-        // while the view is used, and the attachment's checks passed, so its
-        // mip and layers are inside a texture that isn't 3D.
-        let view = unsafe { self.attachment_view(entry, label, attachment.mip, layers) }?;
-        let clear_value = match attachment.load {
-            LoadOp::Clear(colour) => vk::ClearValue {
-                color: clear_colour(entry.texel_format(), colour),
-            },
-            LoadOp::Load | LoadOp::DontCare => vk::ClearValue::default(),
-        };
-        // The attachment is in the layout writing it needs, as the barriers
-        // before rendering put it.
+        let max_colour_attachments = self.physical_device.limits().max_color_attachments;
+        assert!(
+            colour.len() <= max_colour_attachments as usize,
+            "command list \"{}\" renders to {} colour attachments, but {} renders to at most \
+             {max_colour_attachments}",
+            list.label(),
+            colour.len(),
+            self.physical_device.name(),
+        );
+        let resolved: Vec<_> = colour
+            .iter()
+            .map(|attachment| {
+                let (label, entry) = textures
+                    .lookup(attachment.texture.handle())
+                    .unwrap_or_else(|err| panic!("{err}"));
+                let (layers, extent) = attachment.resolve(&entry.attached(label));
+                (label, entry, layers, extent)
+            })
+            .collect();
+        let (extent, layer_count) = render_area(
+            list.label(),
+            resolved
+                .iter()
+                .map(|(label, _, layers, extent)| (*label, layers.clone(), *extent)),
+        );
+        // The attachments are in the layout writing them needs, as the
+        // barriers before rendering put them.
         let layout = vk::ImageLayout::from(
             Access::ColorAttachmentWrite
                 .layout()
                 .expect("attachment accesses apply to textures"),
         );
-        let colour_info = vk::RenderingAttachmentInfo::default()
-            .image_view(view)
-            .image_layout(layout)
-            .load_op(attachment.load.into())
-            .store_op(attachment.store.into())
-            .clear_value(clear_value);
+        let mut colour_infos = Vec::with_capacity(colour.len());
+        for (attachment, (label, entry, layers, _)) in colour.iter().zip(resolved) {
+            // SAFETY: The entry is in `textures`, which the caller keeps
+            // locked while the view is used, and the attachment's checks
+            // passed, so its mip and layers are inside a texture that isn't
+            // 3D.
+            let view = unsafe { self.attachment_view(entry, label, attachment.mip, layers) }?;
+            let clear_value = match attachment.load {
+                LoadOp::Clear(colour) => vk::ClearValue {
+                    color: clear_colour(entry.texel_format(), colour),
+                },
+                LoadOp::Load | LoadOp::DontCare => vk::ClearValue::default(),
+            };
+            colour_infos.push(
+                vk::RenderingAttachmentInfo::default()
+                    .image_view(view)
+                    .image_layout(layout)
+                    .load_op(attachment.load.into())
+                    .store_op(attachment.store.into())
+                    .clear_value(clear_value),
+            );
+        }
         let rendering_info = vk::RenderingInfo::default()
             .render_area(vk::Rect2D {
                 offset: vk::Offset2D::default(),
@@ -113,10 +141,12 @@ impl VulkanDevice {
                 },
             })
             .layer_count(layer_count)
-            .color_attachments(slice::from_ref(&colour_info));
-        // SAFETY: Guaranteed by the caller, the view is of a live image,
-        // since the table is locked, the render area and layer count are
-        // the view's, and `rendering_info` is valid for the call.
+            .color_attachments(&colour_infos);
+        // SAFETY: Guaranteed by the caller, every view is of a live image,
+        // since the table is locked, the render area and layer count fit
+        // every attachment, as `render_area` checked, there are no more
+        // attachments than the device renders to, and `rendering_info` is
+        // valid for the call.
         unsafe {
             self.device
                 .handle()

@@ -667,10 +667,10 @@ fn only_the_graphics_queue_sets_render_state() {
     resources.destroy_texture(texture);
 }
 
-/// Rendering clears its colour attachment to its clear value, a float
-/// format's to its floats and an integer format's to its integers, in the
-/// mip and layer it names, and stores it, so that copying that subresource
-/// out reads the clear value in every texel.
+/// Rendering clears each colour attachment to its own clear value, a
+/// float format's to its floats and an integer format's to its integers,
+/// in the mip and layer each names, and stores it, so that copying that
+/// subresource out reads the clear value in every texel.
 #[test]
 fn rendering_clears_its_attachments() {
     let session = TestSession::new();
@@ -704,13 +704,12 @@ fn rendering_clears_its_attachments() {
         load,
         store: StoreOp::Store,
     };
-    let renderings = [
-        attachment(float, LoadOp::Clear(colour)),
-        attachment(integer, LoadOp::Clear([7.0, 0.0, 0.0, 0.0])),
-    ]
-    .map(|attachment| Rendering {
-        colour: vec![attachment],
-    });
+    let rendering = Rendering {
+        colour: vec![
+            attachment(float, LoadOp::Clear(colour)),
+            attachment(integer, LoadOp::Clear([7.0, 0.0, 0.0, 0.0])),
+        ],
+    };
     let region = |texture| TextureCopy {
         texture,
         mip: 1,
@@ -725,10 +724,8 @@ fn rendering_clears_its_attachments() {
 
     let mut list = CommandList::new("clear");
     list.barrier(&barriers(Access::None, Access::ColorAttachmentWrite));
-    for rendering in &renderings {
-        list.begin_rendering(rendering);
-        list.end_rendering();
-    }
+    list.begin_rendering(&rendering);
+    list.end_rendering();
     list.barrier(&barriers(Access::ColorAttachmentWrite, Access::CopyRead));
     list.copy_texture_to_buffer(
         region(float),
@@ -761,6 +758,34 @@ fn rendering_clears_its_attachments() {
     for texture in [float, integer] {
         resources.destroy_texture(texture);
     }
+}
+
+/// Attachments that can't be rendered to together panic when translated,
+/// naming the list and the textures: here, mips of different sizes.
+#[test]
+fn mismatched_attachments_panic_when_translated() {
+    let session = TestSession::new();
+    let backend = VulkanTestBackend::headless(&session);
+    let resources = backend.resources();
+    let usage = TextureUsage::COLOUR_ATTACHMENT;
+    let albedo = create_texture(&**resources, "albedo", Format::Rgba8Unorm, usage);
+    let normals = create_texture(&**resources, "normals", Format::Rgba8Unorm, usage);
+    let mut rendering = Rendering::colour(albedo, LoadOp::DontCare);
+    rendering.colour.push(ColorAttachment {
+        texture: normals,
+        mip: 1,
+        ..rendering.colour[0].clone()
+    });
+    let mut list = CommandList::new("gbuffer");
+    list.begin_rendering(&rendering);
+    list.end_rendering();
+    assert_eq!(
+        translation_panic(&backend, QueueKind::Graphics, &list),
+        "command list \"gbuffer\" renders to attachments of different sizes: \"albedo\" is 4x4 \
+         and \"normals\" is 2x2, at the mips they name",
+    );
+    resources.destroy_texture(albedo);
+    resources.destroy_texture(normals);
 }
 
 /// Bytes written to an upload buffer, copied on the GPU to a GPU-only
