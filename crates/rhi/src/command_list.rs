@@ -477,8 +477,10 @@ impl CommandList {
         self.commands.push(Command::EndRenderPass);
     }
 
-    /// Binds `program`, for later dispatches to run, until another is
-    /// bound (design 0002, "Programs").
+    /// Binds `program`, for later dispatches to run, until another of its
+    /// kind is bound (design 0002, "Programs"). A compute program and a
+    /// vertex and fragment program are bound separately, as Vulkan binds
+    /// them, so binding one leaves the other bound.
     ///
     /// Translation panics if the program is stale, or if the queue can't
     /// run it: the transfer queue runs no programs, and only the graphics
@@ -616,8 +618,8 @@ impl CommandList {
     /// Runs the compute program that's bound, on `groups` workgroups in x,
     /// y and z. A dimension of 0 runs nothing.
     ///
-    /// Translation panics if the program that's bound isn't a compute
-    /// program.
+    /// Translation panics if no compute program is bound, as when only a
+    /// vertex and fragment program is.
     ///
     /// # Panics
     ///
@@ -641,8 +643,8 @@ impl CommandList {
     /// and be read with [`Access::IndirectRead`], so a barrier is needed
     /// after the GPU writes them.
     ///
-    /// Translation panics if the program that's bound isn't a compute
-    /// program.
+    /// Translation panics if no compute program is bound, as when only a
+    /// vertex and fragment program is.
     ///
     /// # Panics
     ///

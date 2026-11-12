@@ -176,7 +176,7 @@ fn compute_dispatches_indirectly() {
     resources.destroy_program(program);
 }
 
-/// An indirect dispatch's program must be a compute program too.
+/// An indirect dispatch needs a compute program bound too.
 #[test]
 fn indirect_dispatches_need_a_compute_program() {
     let session = TestSession::new();
@@ -190,7 +190,7 @@ fn indirect_dispatches_need_a_compute_program() {
     list.dispatch_indirect(GpuAddress(0x1000));
     assert_eq!(
         translation_panic(&backend, QueueKind::Graphics, &list),
-        "command list \"draw\" dispatches with program \"triangle\", which isn't a compute program",
+        "command list \"draw\" dispatches with no compute program bound",
     );
     resources.destroy_program(program);
 }
@@ -494,8 +494,8 @@ fn read_texels(resources: &dyn GpuResources, buffer: Buffer, size: u64) -> Vec<f
         .collect()
 }
 
-/// Dispatching with a vertex and fragment program panics when translated,
-/// naming the list and the program.
+/// Dispatching with only a vertex and fragment program bound panics when
+/// translated, naming the list.
 #[test]
 fn dispatches_need_a_compute_program() {
     let session = TestSession::new();
@@ -509,9 +509,50 @@ fn dispatches_need_a_compute_program() {
     list.dispatch([1, 1, 1]);
     assert_eq!(
         translation_panic(&backend, QueueKind::Graphics, &list),
-        "command list \"draw\" dispatches with program \"triangle\", which isn't a compute program",
+        "command list \"draw\" dispatches with no compute program bound",
     );
     resources.destroy_program(program);
+}
+
+/// Binding a vertex and fragment program binds only its own stages, so a
+/// compute program bound before it still runs for a later dispatch, which
+/// writes its value.
+#[test]
+fn compute_programs_stay_bound_across_graphics_binds() {
+    let session = TestSession::new();
+    let backend = VulkanTestBackend::headless(&session);
+    let resources = backend.resources();
+    let compute = resources
+        .create_program(&test_shaders::write_value().desc())
+        .unwrap();
+    let graphics = resources
+        .create_program(&test_shaders::triangle().desc())
+        .unwrap();
+    let output = resources
+        .create_buffer(&BufferDesc {
+            label: "output",
+            size: 4,
+            usage: BufferUsage::STORAGE,
+            location: MemoryLocation::Readback,
+        })
+        .unwrap();
+    let mut list = CommandList::new("both bound");
+    list.bind_program(compute);
+    list.bind_program(graphics);
+    list.push_data(0, &resources.buffer_address(output).0.to_le_bytes());
+    list.dispatch([1, 1, 1]);
+    list.barrier(&[Barrier::buffer(
+        output,
+        Access::ComputeShaderWrite,
+        Access::HostRead,
+    )]);
+    run(&backend, QueueKind::Graphics, &list);
+    let mut value = [0; 4];
+    resources.read_buffer(output, 0, &mut value).unwrap();
+    assert_eq!(u32::from_le_bytes(value), 0xC10C_C0DE);
+    resources.destroy_buffer(output);
+    resources.destroy_program(compute);
+    resources.destroy_program(graphics);
 }
 
 /// A transfer queue of its own runs no programs, so binding one, or
