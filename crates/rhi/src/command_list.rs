@@ -39,6 +39,12 @@ pub(crate) const DISPATCH_ARGUMENTS_SIZE: u64 = 12;
 /// Vulkan's `VkDrawIndirectCommand` lays them out.
 pub(crate) const DRAW_ARGUMENTS_SIZE: u64 = 16;
 
+/// The size, in bytes, of an indirect indexed draw's arguments: the index
+/// count, instance count and first index as `u32`s, the vertex offset as an
+/// `i32`, and the first instance as a `u32`, as Vulkan's
+/// `VkDrawIndexedIndirectCommand` lays them out.
+pub(crate) const DRAW_INDEXED_ARGUMENTS_SIZE: u64 = 20;
+
 /// The alignment, in bytes, of indirect arguments' address, and of the
 /// stride between indirect draws' arguments, as Vulkan requires of
 /// indirect commands.
@@ -218,6 +224,17 @@ pub(crate) enum Command {
     /// on the arguments the GPU reads at `arguments`, `stride` bytes apart,
     /// when the draws run.
     DrawIndirect {
+        /// The address of the first draw's arguments.
+        arguments: GpuAddress,
+        /// The number of draws.
+        draws: u32,
+        /// The distance, in bytes, from one draw's arguments to the next.
+        stride: u64,
+    },
+    /// Runs the vertex and fragment program that's bound, `draws` times,
+    /// on vertices the index buffer names, from the arguments the GPU
+    /// reads at `arguments`, `stride` bytes apart, when the draws run.
+    DrawIndexedIndirect {
         /// The address of the first draw's arguments.
         arguments: GpuAddress,
         /// The number of draws.
@@ -776,12 +793,7 @@ impl CommandList {
     /// indices.
     pub fn draw_indexed(&mut self, index_count: u32, instance_count: u32) {
         self.check_draw();
-        let (size, format) = self.index_buffer.unwrap_or_else(|| {
-            panic!(
-                "command list \"{}\" draws indexed with no index buffer bound",
-                self.label,
-            )
-        });
+        let (size, format) = self.check_index_buffer_bound();
         let held = size / format.size();
         assert!(
             u64::from(index_count) <= held,
@@ -829,6 +841,74 @@ impl CommandList {
             draws: draw_count,
             stride,
         });
+    }
+
+    /// Runs the vertex and fragment program that's bound `draw_count` times
+    /// on vertices the index buffer names, rendering to the render pass's
+    /// attachments, each draw on arguments the GPU reads when it runs, so
+    /// that what's drawn can be decided on the GPU. Each draw's arguments
+    /// are five 32-bit values: the index count and instance count, as for
+    /// [`draw_indexed`](Self::draw_indexed), the first index, a signed
+    /// vertex offset, and the first instance. The first draw's are at
+    /// `arguments`, and each next draw's `stride` bytes after, so they can
+    /// be packed tightly, with a stride of 20, or be part of larger
+    /// records. A draw count of 0 draws nothing, as does an index or
+    /// instance count of 0.
+    ///
+    /// Each vertex's index, as the vertex shader sees it in `SV_VertexID`,
+    /// is the index read from the buffer, as for
+    /// [`draw_indexed`](Self::draw_indexed): Slang subtracts the vertex
+    /// offset that Vulkan adds, and `SV_InstanceID` doesn't include the
+    /// first instance either. A shader that needs them reads
+    /// `SV_StartVertexLocation` and `SV_StartInstanceLocation`.
+    ///
+    /// The indices each draw reads aren't known when recording, so they
+    /// aren't checked against the index buffer bound, and what a draw that
+    /// reads past its end draws is undefined, as in Vulkan.
+    ///
+    /// The arguments must be in a buffer with [`BufferUsage::INDIRECT`],
+    /// and be read with [`Access::IndirectRead`], so a barrier is needed
+    /// after the GPU writes them.
+    ///
+    /// Translation panics if no vertex and fragment program is bound, as
+    /// when only a compute program is.
+    ///
+    /// # Panics
+    ///
+    /// Panics as [`draw`](Self::draw) does, if no index buffer has been
+    /// bound, if `draw_count` is more than [`MAX_DRAW_INDIRECT_COUNT`], if
+    /// `stride` is less than 20 or isn't a multiple of 4, if `arguments`
+    /// isn't a multiple of 4, or if the arguments pass the end of the
+    /// address space.
+    ///
+    /// [`BufferUsage::INDIRECT`]: crate::BufferUsage::INDIRECT
+    /// [`Access::IndirectRead`]: crate::Access::IndirectRead
+    pub fn draw_indexed_indirect(&mut self, arguments: GpuAddress, draw_count: u32, stride: u64) {
+        self.check_draw();
+        // The GPU decides which indices each draw reads, so only that an
+        // index buffer is bound can be checked.
+        self.check_index_buffer_bound();
+        self.check_indirect_draws(arguments, draw_count, stride, DRAW_INDEXED_ARGUMENTS_SIZE);
+        self.commands.push(Command::DrawIndexedIndirect {
+            arguments,
+            draws: draw_count,
+            stride,
+        });
+    }
+
+    /// Checks that an index buffer is bound, for an indexed draw, and
+    /// returns its size, in bytes, and format.
+    ///
+    /// # Panics
+    ///
+    /// Panics if no index buffer has been bound.
+    fn check_index_buffer_bound(&self) -> (u64, IndexFormat) {
+        self.index_buffer.unwrap_or_else(|| {
+            panic!(
+                "command list \"{}\" draws indexed with no index buffer bound",
+                self.label,
+            )
+        })
     }
 
     /// Runs the compute program that's bound, on `groups` workgroups in x,
@@ -1165,6 +1245,15 @@ pub(crate) enum RecordedCommand<'a> {
         /// The distance, in bytes, from one draw's arguments to the next.
         stride: u64,
     },
+    /// See [`CommandList::draw_indexed_indirect`].
+    DrawIndexedIndirect {
+        /// The address of the first draw's arguments.
+        arguments: GpuAddress,
+        /// The number of draws.
+        draws: u32,
+        /// The distance, in bytes, from one draw's arguments to the next.
+        stride: u64,
+    },
     /// See [`CommandList::dispatch`].
     Dispatch([u32; 3]),
     /// See [`CommandList::dispatch_indirect`].
@@ -1256,6 +1345,15 @@ impl CommandList {
                     draws,
                     stride,
                 } => RecordedCommand::DrawIndirect {
+                    arguments,
+                    draws,
+                    stride,
+                },
+                Command::DrawIndexedIndirect {
+                    arguments,
+                    draws,
+                    stride,
+                } => RecordedCommand::DrawIndexedIndirect {
                     arguments,
                     draws,
                     stride,
@@ -2343,6 +2441,97 @@ mod tests {
                 "{draws} draws {stride} bytes apart",
             );
         }
+    }
+
+    /// Indexed indirect draws are recorded in order with their arguments'
+    /// address, draw count and stride, and a draw count of 0 is recorded
+    /// too.
+    #[test]
+    fn indexed_indirect_draws_are_recorded() {
+        let mut list = ready_to_draw();
+        list.bind_index_buffer(GpuAddress(0x1000), 12, IndexFormat::Uint16);
+        list.draw_indexed_indirect(GpuAddress(0x2000), 1, 20);
+        list.draw_indexed_indirect(GpuAddress(0x3004), 3, 32);
+        list.draw_indexed_indirect(GpuAddress(0x4000), 0, 20);
+        list.end_render_pass();
+        list.check_complete();
+        let recorded = list.recorded();
+        assert_eq!(
+            recorded[recorded.len() - 4..],
+            [
+                RecordedCommand::DrawIndexedIndirect {
+                    arguments: GpuAddress(0x2000),
+                    draws: 1,
+                    stride: 20,
+                },
+                RecordedCommand::DrawIndexedIndirect {
+                    arguments: GpuAddress(0x3004),
+                    draws: 3,
+                    stride: 32,
+                },
+                RecordedCommand::DrawIndexedIndirect {
+                    arguments: GpuAddress(0x4000),
+                    draws: 0,
+                    stride: 20,
+                },
+                RecordedCommand::EndRenderPass,
+            ],
+        );
+    }
+
+    /// An indexed indirect draw checks what any draw needs, before its
+    /// index buffer.
+    #[test]
+    #[should_panic(expected = "command list \"frame\" draws outside a render pass")]
+    fn indexed_indirect_draws_need_a_render_pass() {
+        let mut list = ready_to_draw();
+        list.end_render_pass();
+        list.draw_indexed_indirect(GpuAddress(0x1000), 1, 20);
+    }
+
+    /// An indexed indirect draw with no index buffer bound panics, as an
+    /// indexed draw does, before its arguments are checked.
+    #[test]
+    #[should_panic(expected = "command list \"frame\" draws indexed with no index buffer bound")]
+    fn indexed_indirect_draws_need_an_index_buffer() {
+        ready_to_draw().draw_indexed_indirect(GpuAddress(0x1002), 1, 20);
+    }
+
+    /// An indexed indirect draw's stride must hold its 20 bytes of
+    /// arguments, more than an indirect draw's, and be a multiple of 4.
+    #[test]
+    fn indexed_indirect_draw_strides_must_hold_whole_aligned_arguments() {
+        for stride in [16, 22] {
+            let panic = std::panic::catch_unwind(|| {
+                let mut list = ready_to_draw();
+                list.bind_index_buffer(GpuAddress(0x1000), 12, IndexFormat::Uint16);
+                list.draw_indexed_indirect(GpuAddress(0x2000), 1, stride);
+            })
+            .expect_err("the stride should panic");
+            assert_eq!(
+                panic.downcast_ref::<String>().unwrap(),
+                &format!(
+                    "command list \"frame\" draws indirectly with a stride of {stride} bytes, \
+                     but the stride must be at least 20 and a multiple of 4"
+                ),
+            );
+        }
+    }
+
+    /// Indexed indirect draws' arguments are checked as indirect draws'
+    /// are, counting 20 bytes for the last draw's.
+    #[test]
+    #[should_panic(
+        expected = "command list \"frame\" draws with arguments of 44 bytes at \
+                    0xffffffffffffffd4, past the end of the address space"
+    )]
+    fn indexed_indirect_draws_past_the_address_space_panic() {
+        let mut list = ready_to_draw();
+        list.bind_index_buffer(GpuAddress(0x1000), 12, IndexFormat::Uint16);
+        let arguments = GpuAddress(u64::MAX - 43);
+        // 40 bytes of arguments fit.
+        list.draw_indexed_indirect(arguments, 2, 20);
+        list.draw_indexed_indirect(arguments, 2, 24);
     }
 
     /// A render pass needs an attachment, and at most eight colour attachments.
