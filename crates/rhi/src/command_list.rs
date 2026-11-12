@@ -70,8 +70,15 @@ pub struct CommandList {
     /// Every push data block, which commands refer to by range. Each
     /// block's size is a multiple of 4, so each starts at a multiple of 4.
     push_data: Vec<u8>,
-    /// Whether a program has been bound, so that dispatches can run.
+    /// Whether a program has been bound, so that draws and dispatches can
+    /// run.
     program_bound: bool,
+    /// Whether render state has been set, so that draws can run.
+    render_state_set: bool,
+    /// Whether a viewport has been set, so that draws can run.
+    viewport_set: bool,
+    /// Whether a scissor has been set, so that draws can run.
+    scissor_set: bool,
     /// Whether a render pass is open: begun, and not yet ended.
     in_render_pass: bool,
     /// How many debug regions are open.
@@ -129,7 +136,7 @@ pub(crate) enum Command {
     },
     /// Ends the render pass.
     EndRenderPass,
-    /// Binds `program`, for later dispatches to run.
+    /// Binds `program`, for later draws and dispatches to run.
     BindProgram {
         /// The program.
         program: Program,
@@ -150,13 +157,21 @@ pub(crate) enum Command {
         /// The scissor.
         scissor: Rect2d,
     },
-    /// Writes `data` in the list's arena to the push data later dispatches
-    /// read, at `offset`.
+    /// Writes `data` in the list's arena to the push data later draws and
+    /// dispatches read, at `offset`.
     PushData {
         /// Where the block goes in the push data, in bytes.
         offset: u32,
         /// The block, as a range of the arena.
         data: Range<usize>,
+    },
+    /// Runs the vertex and fragment program that's bound on `vertices`
+    /// vertices, `instances` times.
+    Draw {
+        /// The number of vertices.
+        vertices: u32,
+        /// The number of instances.
+        instances: u32,
     },
     /// Runs the compute program that's bound, on `groups` workgroups in
     /// each dimension.
@@ -206,6 +221,9 @@ impl CommandList {
             depth_attachments: Vec::new(),
             push_data: Vec::new(),
             program_bound: false,
+            render_state_set: false,
+            viewport_set: false,
+            scissor_set: false,
             in_render_pass: false,
             open_regions: 0,
             open_timings: 0,
@@ -477,10 +495,10 @@ impl CommandList {
         self.commands.push(Command::EndRenderPass);
     }
 
-    /// Binds `program`, for later dispatches to run, until another of its
-    /// kind is bound (design 0002, "Programs"). A compute program and a
-    /// vertex and fragment program are bound separately, as Vulkan binds
-    /// them, so binding one leaves the other bound.
+    /// Binds `program`, for later draws or dispatches to run, until another
+    /// of its kind is bound (design 0002, "Programs"). A compute program
+    /// and a vertex and fragment program are bound separately, as Vulkan
+    /// binds them, so binding one leaves the other bound.
     ///
     /// Translation panics if the program is stale, or if the queue can't
     /// run it: the transfer queue runs no programs, and only the graphics
@@ -500,6 +518,7 @@ impl CommandList {
         self.commands.push(Command::SetRenderState {
             state: self.render_states.len() - 1,
         });
+        self.render_state_set = true;
     }
 
     /// Sets the viewport later draws use, until it's set again: how they map
@@ -542,6 +561,7 @@ impl CommandList {
         self.commands.push(Command::SetViewport {
             viewport: *viewport,
         });
+        self.viewport_set = true;
     }
 
     /// Sets the scissor later draws use, until it's set again: the
@@ -572,12 +592,13 @@ impl CommandList {
             i32::MAX,
         );
         self.commands.push(Command::SetScissor { scissor });
+        self.scissor_set = true;
     }
 
-    /// Writes `data` to the push data later dispatches read, at `offset`
-    /// bytes into it (design 0002, "Binding model"). The rest of the push
-    /// data keeps what was last written there, so a list can change one
-    /// field of a block, such as an index, between dispatches. Push data
+    /// Writes `data` to the push data later draws and dispatches read, at
+    /// `offset` bytes into it (design 0002, "Binding model"). The rest of
+    /// the push data keeps what was last written there, so a list can
+    /// change one field of a block, such as an index, between draws. Push data
     /// typically holds a single address of a structure, or a few addresses
     /// and indices. Nothing is recorded for an empty block.
     ///
@@ -612,6 +633,30 @@ impl CommandList {
         self.commands.push(Command::PushData {
             offset,
             data: start..self.push_data.len(),
+        });
+    }
+
+    /// Runs the vertex and fragment program that's bound on
+    /// `vertex_count` vertices, `instance_count` times, rendering to the
+    /// render pass's attachments. A count of 0 draws nothing.
+    ///
+    /// There are no vertex buffers: the vertex shader reads its vertices
+    /// through addresses in its push data, by its vertex and instance
+    /// indices, which count from 0 (design 0002, "Binding model").
+    ///
+    /// Translation panics if no vertex and fragment program is bound, as
+    /// when only a compute program is.
+    ///
+    /// # Panics
+    ///
+    /// Panics if no render pass is open, or if no program has been bound,
+    /// or no render state, viewport or scissor set, since shader objects
+    /// have no defaults for them.
+    pub fn draw(&mut self, vertex_count: u32, instance_count: u32) {
+        self.check_draw();
+        self.commands.push(Command::Draw {
+            vertices: vertex_count,
+            instances: instance_count,
         });
     }
 
@@ -753,6 +798,28 @@ impl CommandList {
         );
     }
 
+    /// Checks that the list can draw: that a render pass is open, and a
+    /// program, render state, a viewport and a scissor have been set.
+    ///
+    /// # Panics
+    ///
+    /// Panics, naming the list and what's missing, if any of them isn't.
+    fn check_draw(&self) {
+        assert!(
+            self.in_render_pass,
+            "command list \"{}\" draws outside a render pass",
+            self.label,
+        );
+        for (set, what) in [
+            (self.program_bound, "program bound"),
+            (self.render_state_set, "render state set"),
+            (self.viewport_set, "viewport set"),
+            (self.scissor_set, "scissor set"),
+        ] {
+            assert!(set, "command list \"{}\" draws with no {what}", self.label);
+        }
+    }
+
     /// Checks that `size` bytes at `address` are a range a command can use:
     /// at least one byte, and not past the end of the address space. `verb`
     /// says what the command does with it, for the message.
@@ -848,6 +915,13 @@ pub(crate) enum RecordedCommand<'a> {
         /// The block.
         data: &'a [u8],
     },
+    /// See [`CommandList::draw`].
+    Draw {
+        /// The number of vertices.
+        vertices: u32,
+        /// The number of instances.
+        instances: u32,
+    },
     /// See [`CommandList::dispatch`].
     Dispatch([u32; 3]),
     /// See [`CommandList::dispatch_indirect`].
@@ -914,6 +988,13 @@ impl CommandList {
                 Command::PushData { offset, ref data } => RecordedCommand::PushData {
                     offset,
                     data: &self.push_data[data.clone()],
+                },
+                Command::Draw {
+                    vertices,
+                    instances,
+                } => RecordedCommand::Draw {
+                    vertices,
+                    instances,
                 },
                 Command::Dispatch { groups } => RecordedCommand::Dispatch(groups),
                 Command::DispatchIndirect { arguments } => {
@@ -1591,6 +1672,129 @@ mod tests {
             );
             list.end_render_pass();
             record(&mut list);
+        }
+    }
+
+    /// A list in a render pass to an attachment called "albedo", ready to
+    /// draw: with a program bound, and render state, a viewport and a
+    /// scissor set.
+    fn ready_to_draw() -> CommandList {
+        let mut list = CommandList::new("frame");
+        list.bind_program(program());
+        list.set_render_state(&RenderState::default());
+        list.set_viewport(&Viewport::from_extent(ATTACHMENT));
+        list.set_scissor(Rect2d::from_extent(ATTACHMENT));
+        list.begin_render_pass(&render_pass("albedo", 1));
+        list
+    }
+
+    /// The size of the attachments draws render to.
+    const ATTACHMENT: crate::Extent2d = crate::Extent2d {
+        width: 4,
+        height: 4,
+    };
+
+    /// Draws are recorded in order with their counts, after the program,
+    /// state and push data they use, and a count of 0 is recorded too.
+    #[test]
+    fn draws_are_recorded() {
+        let mut list = ready_to_draw();
+        list.push_data(0, &[1, 0, 0, 0]);
+        list.draw(3, 1);
+        list.draw(6, 4);
+        list.draw(0, 1);
+        list.end_render_pass();
+        list.check_complete();
+        let recorded = list.recorded();
+        assert_eq!(
+            recorded[recorded.len() - 5..],
+            [
+                RecordedCommand::PushData {
+                    offset: 0,
+                    data: &[1, 0, 0, 0],
+                },
+                RecordedCommand::Draw {
+                    vertices: 3,
+                    instances: 1,
+                },
+                RecordedCommand::Draw {
+                    vertices: 6,
+                    instances: 4,
+                },
+                RecordedCommand::Draw {
+                    vertices: 0,
+                    instances: 1,
+                },
+                RecordedCommand::EndRenderPass,
+            ],
+        );
+    }
+
+    /// State set before a render pass, or in an earlier one, is kept for
+    /// draws in a later one, as Vulkan keeps it within a command buffer.
+    #[test]
+    fn draws_keep_state_across_render_passes() {
+        let mut list = ready_to_draw();
+        list.end_render_pass();
+        list.begin_render_pass(&render_pass("normals", 1));
+        list.draw(3, 1);
+        list.end_render_pass();
+        assert!(list.recorded().contains(&RecordedCommand::Draw {
+            vertices: 3,
+            instances: 1,
+        }));
+    }
+
+    /// A draw outside a render pass panics, naming the list, before and
+    /// after one.
+    #[test]
+    fn draws_outside_a_render_pass_panic() {
+        let mut list = ready_to_draw();
+        list.end_render_pass();
+        let mut fresh = CommandList::new("frame");
+        for list in [&mut list, &mut fresh] {
+            let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| list.draw(3, 1)))
+                .expect_err("the draw should panic");
+            assert_eq!(
+                panic.downcast_ref::<String>().unwrap(),
+                "command list \"frame\" draws outside a render pass",
+            );
+        }
+    }
+
+    /// A draw with no program bound, or no render state, viewport or
+    /// scissor set, panics, naming the list and what's missing.
+    #[test]
+    fn draws_need_a_program_and_state() {
+        /// Sets one thing a draw needs.
+        type Set = fn(&mut CommandList);
+        let steps: [(&str, Set); 4] = [
+            ("program bound", |list| list.bind_program(program())),
+            ("render state set", |list| {
+                list.set_render_state(&RenderState::default());
+            }),
+            ("viewport set", |list| {
+                list.set_viewport(&Viewport::from_extent(ATTACHMENT));
+            }),
+            ("scissor set", |list| {
+                list.set_scissor(Rect2d::from_extent(ATTACHMENT));
+            }),
+        ];
+        // Each list sets everything but one.
+        for (missing, _) in &steps {
+            let mut list = CommandList::new("frame");
+            for (what, set) in &steps {
+                if what != missing {
+                    set(&mut list);
+                }
+            }
+            list.begin_render_pass(&render_pass("albedo", 1));
+            let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| list.draw(3, 1)))
+                .expect_err("the draw should panic");
+            assert_eq!(
+                panic.downcast_ref::<String>().unwrap(),
+                &format!("command list \"frame\" draws with no {missing}"),
+            );
         }
     }
 

@@ -6,9 +6,10 @@
 //! removal (design 0002, "Keeping the recording model reversible"). It
 //! looks up every handle the list names, holding each table's read lock
 //! once for the whole list, and panics on a stale one, on a subresource
-//! outside its texture, on a program the queue can't run, on render state
-//! or a render pass for a queue that doesn't draw, and on attachments their
-//! textures can't be, or that can't be rendered to together.
+//! outside its texture, on a program the queue can't run, on a draw or
+//! dispatch with no program of its kind bound, on render state or a render
+//! pass for a queue that doesn't draw, and on attachments their textures
+//! can't be, or that can't be rendered to together.
 //!
 //! Every command buffer for a queue that runs programs, the graphics or
 //! compute queue, starts by binding both descriptor heaps, so each
@@ -186,8 +187,8 @@ impl VulkanDevice {
     /// open, names a stale handle, binds a program the queue can't run,
     /// renders or sets render state on a queue that doesn't draw, or
     /// renders to attachments their textures can't be, or that can't be
-    /// rendered to together, or if it dispatches with no compute program
-    /// bound.
+    /// rendered to together, or if it draws with no vertex and fragment
+    /// program bound, or dispatches with no compute program bound.
     pub(super) fn translate(
         self: &Arc<Self>,
         id: QueueId,
@@ -248,8 +249,8 @@ impl VulkanDevice {
     /// from nor to that queue, binds a program or pushes data the queue
     /// can't use, renders or sets render state on a queue that doesn't
     /// draw, renders to attachments their textures can't be, or that can't
-    /// be rendered to together, or dispatches with no compute program
-    /// bound.
+    /// be rendered to together, or draws with no vertex and fragment
+    /// program bound, or dispatches with no compute program bound.
     unsafe fn record(
         &self,
         buffer: vk::CommandBuffer,
@@ -544,6 +545,8 @@ impl VulkanDevice {
                     }
                     if entry.is_compute() {
                         bound.compute = Some(label);
+                    } else {
+                        bound.graphics = Some(label);
                     }
                 }
                 &Command::BeginRenderPass { ref colour, depth } => {
@@ -613,6 +616,17 @@ impl VulkanDevice {
                             .descriptor_heap()
                             .cmd_push_data(buffer, &push_data_info);
                     }
+                }
+                &Command::Draw {
+                    vertices,
+                    instances,
+                } => {
+                    bound.check_draw(list);
+                    // SAFETY: Guaranteed by the caller, a render pass is open,
+                    // so the queue draws, a vertex and fragment program is
+                    // bound, with the heaps, and recording checked that
+                    // render state, a viewport and a scissor are set.
+                    unsafe { device.cmd_draw(buffer, vertices, instances, 0, 0) };
                 }
                 &Command::Dispatch { groups: [x, y, z] } => {
                     bound.check_dispatch(list);
@@ -787,9 +801,26 @@ fn check_draws(list: &CommandList, kind: QueueKind, does: &str) {
 struct BoundPrograms<'a> {
     /// The compute program, for dispatches.
     compute: Option<&'a str>,
+    /// The vertex and fragment program, for draws.
+    graphics: Option<&'a str>,
 }
 
 impl BoundPrograms<'_> {
+    /// Checks that a draw in `list` has a vertex and fragment program to
+    /// run.
+    ///
+    /// # Panics
+    ///
+    /// Panics, naming the list, if no vertex and fragment program is
+    /// bound, as when it binds only compute programs.
+    fn check_draw(&self, list: &CommandList) {
+        assert!(
+            self.graphics.is_some(),
+            "command list \"{}\" draws with no vertex and fragment program bound",
+            list.label(),
+        );
+    }
+
     /// Checks that a dispatch in `list` has a compute program to run.
     ///
     /// # Panics
