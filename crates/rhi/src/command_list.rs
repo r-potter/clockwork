@@ -277,9 +277,10 @@ impl CommandList {
     ///
     /// # Panics
     ///
-    /// Panics if a barrier's accesses don't suit what it applies to (see
-    /// [`Barrier`]).
+    /// Panics if a render pass is open, or if a barrier's accesses don't suit
+    /// what it applies to (see [`Barrier`]).
     pub fn barrier(&mut self, barriers: &[Barrier]) {
+        self.check_outside_render_pass("records a barrier");
         if barriers.is_empty() {
             return;
         }
@@ -297,9 +298,11 @@ impl CommandList {
     ///
     /// # Panics
     ///
-    /// Panics if `size` is zero, if `destination` or `size` isn't a multiple
-    /// of 4, or if the range passes the end of the address space.
+    /// Panics if a render pass is open, if `size` is zero, if `destination` or
+    /// `size` isn't a multiple of 4, or if the range passes the end of the
+    /// address space.
     pub fn fill_buffer(&mut self, destination: GpuAddress, size: u64, value: u32) {
+        self.check_outside_render_pass("fills a buffer");
         self.check_range("fills", destination, size);
         assert!(
             destination.0.is_multiple_of(FILL_ALIGNMENT) && size.is_multiple_of(FILL_ALIGNMENT),
@@ -319,9 +322,10 @@ impl CommandList {
     ///
     /// # Panics
     ///
-    /// Panics if `size` is zero, if either range passes the end of the
-    /// address space, or if the ranges overlap.
+    /// Panics if a render pass is open, if `size` is zero, if either range
+    /// passes the end of the address space, or if the ranges overlap.
     pub fn copy_buffer(&mut self, source: GpuAddress, destination: GpuAddress, size: u64) {
+        self.check_outside_render_pass("copies a buffer");
         self.check_range("copies from", source, size);
         self.check_range("copies to", destination, size);
         assert!(
@@ -346,6 +350,10 @@ impl CommandList {
     /// The copy is checked when the list is translated, since that needs
     /// the texture (see [`TextureCopy`]).
     ///
+    /// # Panics
+    ///
+    /// Panics if a render pass is open.
+    ///
     /// [`Access::CopyWrite`]: crate::Access::CopyWrite
     pub fn copy_buffer_to_texture(
         &mut self,
@@ -353,6 +361,7 @@ impl CommandList {
         layout: TextureDataLayout,
         destination: TextureCopy,
     ) {
+        self.check_outside_render_pass("copies to a texture");
         let copy = self.push_texture_copy(source, layout, destination);
         self.commands.push(Command::CopyBufferToTexture { copy });
     }
@@ -364,6 +373,10 @@ impl CommandList {
     /// The copy is checked when the list is translated, since that needs
     /// the texture.
     ///
+    /// # Panics
+    ///
+    /// Panics if a render pass is open.
+    ///
     /// [`Access::CopyRead`]: crate::Access::CopyRead
     pub fn copy_texture_to_buffer(
         &mut self,
@@ -371,6 +384,7 @@ impl CommandList {
         destination: GpuAddress,
         layout: TextureDataLayout,
     ) {
+        self.check_outside_render_pass("copies from a texture");
         let copy = self.push_texture_copy(destination, layout, source);
         self.commands.push(Command::CopyTextureToBuffer { copy });
     }
@@ -590,8 +604,9 @@ impl CommandList {
     ///
     /// # Panics
     ///
-    /// Panics if no program has been bound.
+    /// Panics if a render pass is open, or if no program has been bound.
     pub fn dispatch(&mut self, groups: [u32; 3]) {
+        self.check_outside_render_pass("dispatches");
         assert!(
             self.program_bound,
             "command list \"{}\" dispatches with no program bound",
@@ -614,12 +629,14 @@ impl CommandList {
     ///
     /// # Panics
     ///
-    /// Panics if no program has been bound, if `arguments` isn't a multiple
-    /// of 4, or if the arguments pass the end of the address space.
+    /// Panics if a render pass is open, if no program has been bound, if
+    /// `arguments` isn't a multiple of 4, or if the arguments pass the end
+    /// of the address space.
     ///
     /// [`BufferUsage::INDIRECT`]: crate::BufferUsage::INDIRECT
     /// [`Access::IndirectRead`]: crate::Access::IndirectRead
     pub fn dispatch_indirect(&mut self, arguments: GpuAddress) {
+        self.check_outside_render_pass("dispatches");
         assert!(
             self.program_bound,
             "command list \"{}\" dispatches with no program bound",
@@ -701,6 +718,20 @@ impl CommandList {
         let start = self.text.len();
         self.text.push_str(text);
         start..self.text.len()
+    }
+
+    /// Checks that no render pass is open, for a command that Vulkan doesn't
+    /// allow inside a render pass, which `does` describes for the message.
+    ///
+    /// # Panics
+    ///
+    /// Panics, naming the list, if a render pass is open.
+    fn check_outside_render_pass(&self, does: &str) {
+        assert!(
+            !self.in_render_pass,
+            "command list \"{}\" {does} inside a render pass, which Vulkan doesn't allow",
+            self.label,
+        );
     }
 
     /// Checks that `size` bytes at `address` are a range a command can use:
@@ -1451,6 +1482,73 @@ mod tests {
         let mut list = CommandList::new("frame");
         list.begin_render_pass(&render_pass("albedo", 1));
         list.check_complete();
+    }
+
+    /// Dispatches, copies, fills and barriers inside a render pass panic,
+    /// naming the list and the command, and are allowed once it's ended.
+    #[test]
+    fn transfers_dispatches_and_barriers_panic_inside_a_render_pass() {
+        /// Records a command into a list.
+        type Record<'a> = Box<dyn Fn(&mut CommandList) + 'a>;
+        let texture = Texture::from_handle(HandleTable::new("texture").insert("albedo", ()));
+        let extent = Extent3d::new_2d(4, 4);
+        let layout = TextureDataLayout::tightly_packed(Format::Rgba8Unorm, extent);
+        let region = TextureCopy {
+            texture,
+            mip: 0,
+            layers: 0..1,
+            origin: [0; 3],
+            extent,
+        };
+        let commands: [(&str, Record<'_>); 7] = [
+            (
+                "records a barrier",
+                Box::new(|list| {
+                    list.barrier(&[Barrier::texture(texture, Access::None, Access::CopyWrite)]);
+                }),
+            ),
+            (
+                "fills a buffer",
+                Box::new(|list| list.fill_buffer(GpuAddress(0x1000), 4, 0)),
+            ),
+            (
+                "copies a buffer",
+                Box::new(|list| list.copy_buffer(GpuAddress(0x1000), GpuAddress(0x2000), 4)),
+            ),
+            (
+                "copies to a texture",
+                Box::new(|list| {
+                    list.copy_buffer_to_texture(GpuAddress(0x1000), layout, region.clone());
+                }),
+            ),
+            (
+                "copies from a texture",
+                Box::new(|list| {
+                    list.copy_texture_to_buffer(region.clone(), GpuAddress(0x1000), layout);
+                }),
+            ),
+            ("dispatches", Box::new(|list| list.dispatch([1, 1, 1]))),
+            (
+                "dispatches",
+                Box::new(|list| list.dispatch_indirect(GpuAddress(0x1000))),
+            ),
+        ];
+        for (does, record) in &commands {
+            let mut list = CommandList::new("frame");
+            list.bind_program(program());
+            list.begin_render_pass(&render_pass("albedo", 1));
+            let panic =
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| record(&mut list)))
+                    .expect_err("the command should panic");
+            assert_eq!(
+                panic.downcast_ref::<String>().unwrap(),
+                &format!(
+                    "command list \"frame\" {does} inside a render pass, which Vulkan doesn't allow"
+                ),
+            );
+            list.end_render_pass();
+            record(&mut list);
+        }
     }
 
     /// A render pass needs an attachment, and at most eight colour attachments.
