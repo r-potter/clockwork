@@ -17,8 +17,9 @@
 use std::ops::Range;
 
 use crate::{
-    Barrier, ColorAttachment, GpuAddress, MAX_COLOUR_ATTACHMENTS, MAX_PUSH_DATA_SIZE, Program,
-    Rect2d, RenderPassDesc, RenderState, TextureCopy, TextureDataLayout, Viewport,
+    Barrier, ColorAttachment, DepthAttachment, GpuAddress, MAX_COLOUR_ATTACHMENTS,
+    MAX_PUSH_DATA_SIZE, Program, Rect2d, RenderPassDesc, RenderState, TextureCopy,
+    TextureDataLayout, Viewport,
 };
 
 /// The alignment, in bytes, of a fill's address and size, as Vulkan
@@ -63,6 +64,9 @@ pub struct CommandList {
     /// Every render pass's colour attachments, which commands refer to by
     /// range.
     colour_attachments: Vec<ColorAttachment>,
+    /// Every render pass's depth attachment, which commands refer to by
+    /// index.
+    depth_attachments: Vec<DepthAttachment>,
     /// Every push data block, which commands refer to by range. Each
     /// block's size is a multiple of 4, so each starts at a multiple of 4.
     push_data: Vec<u8>,
@@ -115,11 +119,13 @@ pub(crate) enum Command {
         /// The copy's index in the arena.
         copy: usize,
     },
-    /// Begins a render pass to the colour attachments `colour_attachments` in
-    /// the list's arena.
+    /// Begins a render pass to the colour attachments `colour` and the depth
+    /// attachment `depth` in the list's arena.
     BeginRenderPass {
         /// The colour attachments, as a range of the arena.
         colour: Range<usize>,
+        /// The depth attachment's index in the arena, or `None` for none.
+        depth: Option<usize>,
     },
     /// Ends the render pass.
     EndRenderPass,
@@ -197,6 +203,7 @@ impl CommandList {
             texture_copies: Vec::new(),
             render_states: Vec::new(),
             colour_attachments: Vec::new(),
+            depth_attachments: Vec::new(),
             push_data: Vec::new(),
             program_bound: false,
             in_render_pass: false,
@@ -238,6 +245,11 @@ impl CommandList {
     /// The colour attachments at `range` of the arena, for translation.
     pub(crate) fn colour_attachments(&self, range: &Range<usize>) -> &[ColorAttachment] {
         &self.colour_attachments[range.clone()]
+    }
+
+    /// The depth attachment at `index` in the arena, for translation.
+    pub(crate) fn depth_attachment(&self, index: usize) -> &DepthAttachment {
+        &self.depth_attachments[index]
     }
 
     /// The push data block at `range` of the arena, for translation.
@@ -425,7 +437,7 @@ impl CommandList {
             self.label,
         );
         assert!(
-            !render_pass.colour.is_empty(),
+            !render_pass.colour.is_empty() || render_pass.depth.is_some(),
             "command list \"{}\" begins a render pass with no attachments",
             self.label,
         );
@@ -439,8 +451,13 @@ impl CommandList {
         let start = self.colour_attachments.len();
         self.colour_attachments
             .extend_from_slice(&render_pass.colour);
+        let depth = render_pass.depth.clone().map(|depth| {
+            self.depth_attachments.push(depth);
+            self.depth_attachments.len() - 1
+        });
         self.commands.push(Command::BeginRenderPass {
             colour: start..self.colour_attachments.len(),
+            depth,
         });
         self.in_render_pass = true;
     }
@@ -783,8 +800,13 @@ pub(crate) struct BufferTextureCopy {
 pub(crate) enum RecordedCommand<'a> {
     /// See [`CommandList::barrier`].
     Barrier(&'a [Barrier]),
-    /// See [`CommandList::begin_render_pass`]: the colour attachments.
-    BeginRenderPass(&'a [ColorAttachment]),
+    /// See [`CommandList::begin_render_pass`].
+    BeginRenderPass {
+        /// The colour attachments.
+        colour: &'a [ColorAttachment],
+        /// The depth attachment.
+        depth: Option<&'a DepthAttachment>,
+    },
     /// See [`CommandList::end_render_pass`].
     EndRenderPass,
     /// See [`CommandList::copy_buffer_to_texture`].
@@ -874,8 +896,11 @@ impl CommandList {
                 Command::CopyTextureToBuffer { copy } => {
                     RecordedCommand::CopyTextureToBuffer(&self.texture_copies[copy])
                 }
-                Command::BeginRenderPass { ref colour } => {
-                    RecordedCommand::BeginRenderPass(&self.colour_attachments[colour.clone()])
+                Command::BeginRenderPass { ref colour, depth } => {
+                    RecordedCommand::BeginRenderPass {
+                        colour: &self.colour_attachments[colour.clone()],
+                        depth: depth.map(|depth| &self.depth_attachments[depth]),
+                    }
                 }
                 Command::EndRenderPass => RecordedCommand::EndRenderPass,
                 Command::BindProgram { program } => RecordedCommand::BindProgram(program),
@@ -1415,7 +1440,8 @@ mod tests {
     }
 
     /// A render pass to a texture called `label`, with `count` colour
-    /// attachments of mip 0 of layer 0, each cleared to black.
+    /// attachments of mip 0 of layer 0, each cleared to black, and no depth
+    /// attachment.
     fn render_pass(label: &str, count: usize) -> RenderPassDesc {
         let texture = Texture::from_handle(HandleTable::new("texture").insert(label, ()));
         RenderPassDesc {
@@ -1423,14 +1449,23 @@ mod tests {
                 RenderPassDesc::colour(texture, LoadOp::Clear([0.0; 4])).colour[0].clone();
                 count
             ],
+            depth: None,
         }
     }
 
     /// Render passes are recorded in order, each with its attachments as they
-    /// were given, and a list whose render passes are ended can be translated.
+    /// were given, including a depth attachment with no colour attachments,
+    /// and a list whose render passes are ended can be translated.
     #[test]
     fn render_passes_are_recorded() {
-        let shadows = render_pass("shadow map", 1);
+        let mut shadows = render_pass("shadow map", 0);
+        shadows.depth = Some(DepthAttachment {
+            texture: Texture::from_handle(HandleTable::new("texture").insert("shadow map", ())),
+            mip: 0,
+            layers: 0..4,
+            load: LoadOp::Clear(0.0),
+            store: StoreOp::Store,
+        });
         let mut gbuffer = render_pass("albedo", 2);
         gbuffer.colour[1].mip = 1;
         gbuffer.colour[1].layers = 2..4;
@@ -1445,9 +1480,15 @@ mod tests {
         assert_eq!(
             list.recorded(),
             [
-                RecordedCommand::BeginRenderPass(&shadows.colour),
+                RecordedCommand::BeginRenderPass {
+                    colour: &[],
+                    depth: shadows.depth.as_ref(),
+                },
                 RecordedCommand::EndRenderPass,
-                RecordedCommand::BeginRenderPass(&gbuffer.colour),
+                RecordedCommand::BeginRenderPass {
+                    colour: &gbuffer.colour,
+                    depth: None,
+                },
                 RecordedCommand::EndRenderPass,
             ],
         );

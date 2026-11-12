@@ -6,9 +6,9 @@
 //! Each attachment names one mip of a texture and a range of its layers.
 //! Whether a texture can be one, and the region a render pass covers, are
 //! pure functions of the textures, checked when the list is translated and
-//! tested without a device: [`ColorAttachment::resolve`] checks an
-//! attachment against its texture, and [`render_area`] checks that a render
-//! pass's attachments agree.
+//! tested without a device: [`ColorAttachment::resolve`] and
+//! [`DepthAttachment::resolve`] check an attachment against its texture,
+//! and [`render_area`] checks that a render pass's attachments agree.
 
 use std::ops::Range;
 
@@ -28,8 +28,13 @@ pub struct RenderPassDesc {
     /// outputs (`SV_Target0` to `SV_Target7`) and a
     /// [`RenderState`](crate::RenderState)'s colour writes refer to. At
     /// most [`MAX_COLOUR_ATTACHMENTS`](crate::MAX_COLOUR_ATTACHMENTS), and
-    /// at most the device's limit.
+    /// at most the device's limit. May be empty if there's a depth
+    /// attachment, as for a shadow map.
     pub colour: Vec<ColorAttachment>,
+    /// The depth attachment, which the depth test of a
+    /// [`RenderState`](crate::RenderState) tests and writes, or `None` for
+    /// none.
+    pub depth: Option<DepthAttachment>,
 }
 
 impl RenderPassDesc {
@@ -44,6 +49,7 @@ impl RenderPassDesc {
                 load,
                 store: StoreOp::Store,
             }],
+            depth: None,
         }
     }
 }
@@ -86,6 +92,51 @@ impl ColorAttachment {
                 TextureUsage::COLOUR_ATTACHMENT,
                 "COLOUR_ATTACHMENT",
                 "a colour attachment",
+            ),
+            self.mip,
+            &self.layers,
+        )
+    }
+}
+
+/// A depth attachment: one mip of a texture, and the layers to render to.
+///
+/// The texture must have [`TextureUsage::DEPTH_ATTACHMENT`], and must be in
+/// the layout of
+/// [`Access::DepthAttachmentRead`](crate::Access::DepthAttachmentRead) `|`
+/// [`Access::DepthAttachmentWrite`](crate::Access::DepthAttachmentWrite)
+/// during the render pass, even if the render state doesn't write depth.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DepthAttachment {
+    /// The texture.
+    pub texture: Texture,
+    /// The mip rendered to.
+    pub mip: u32,
+    /// The layers rendered to. A range ending at
+    /// [`Subresource::REMAINING`] reaches the texture's last layer.
+    pub layers: Range<u32>,
+    /// What the attachment holds when the render pass begins. With reverse-Z, a
+    /// clear value of 0 is the far plane.
+    pub load: LoadOp<f32>,
+    /// What happens to what's rendered when the render pass ends.
+    pub store: StoreOp,
+}
+
+impl DepthAttachment {
+    /// The attachment's layers, resolved for `texture`, and the size of the
+    /// mip it names.
+    ///
+    /// # Panics
+    ///
+    /// Panics, naming the texture, if it can't be a depth attachment, or
+    /// if the mip or layers are out of range.
+    pub(crate) fn resolve(&self, texture: &AttachedTexture<'_>) -> (Range<u32>, Extent2d) {
+        resolve_attachment(
+            texture,
+            (
+                TextureUsage::DEPTH_ATTACHMENT,
+                "DEPTH_ATTACHMENT",
+                "a depth attachment",
             ),
             self.mip,
             &self.layers,
@@ -294,13 +345,16 @@ mod tests {
     }
 
     /// The `RenderPassDesc::colour` shorthand renders to mip 0 of layer 0, and
-    /// stores it.
+    /// stores it, with no depth attachment.
     #[test]
     fn single_colour_render_passes_use_the_first_mip_and_layer() {
         let expected = attachment(0, 0..1);
         assert_eq!(
-            RenderPassDesc::colour(expected.texture, LoadOp::Clear([0.0; 4])).colour,
-            [expected],
+            RenderPassDesc::colour(expected.texture, LoadOp::Clear([0.0; 4])),
+            RenderPassDesc {
+                colour: vec![expected],
+                depth: None,
+            },
         );
     }
 
@@ -328,6 +382,39 @@ mod tests {
                 attachment(0, 0..1).resolve(&volume);
             }),
             "3D texture \"albedo\" can't be a colour attachment",
+        );
+    }
+
+    /// A depth attachment needs the depth attachment usage, and resolves
+    /// as a colour attachment does.
+    #[test]
+    fn depth_attachments_need_their_usage() {
+        let depth = DepthAttachment {
+            texture: attachment(0, 0..1).texture,
+            mip: 1,
+            layers: 0..Subresource::REMAINING,
+            load: LoadOp::Clear(0.0),
+            store: StoreOp::DontCare,
+        };
+        let texture = AttachedTexture {
+            usage: TextureUsage::DEPTH_ATTACHMENT,
+            ..texture()
+        };
+        assert_eq!(
+            depth.resolve(&texture),
+            (
+                0..3,
+                Extent2d {
+                    width: 32,
+                    height: 16,
+                },
+            ),
+        );
+        assert_eq!(
+            panic_message(|| {
+                depth.resolve(&self::texture());
+            }),
+            "texture \"albedo\" has no DEPTH_ATTACHMENT usage, so it can't be a depth attachment",
         );
     }
 
