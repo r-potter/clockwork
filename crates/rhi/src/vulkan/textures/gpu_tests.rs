@@ -7,8 +7,9 @@ use clockwork_diagnostics::capture::TestSession;
 
 use crate::vulkan::test_support::VulkanTestBackend;
 use crate::{
-    DescriptorIndex, Extent3d, Format, HeapKind, RenderHardwareInterface, RhiError, Subresource,
-    Texture, TextureDesc, TextureDimension, TextureUsage, TextureView,
+    ColorAttachment, CommandList, DescriptorIndex, Extent3d, Format, HeapKind, LoadOp, QueueKind,
+    RenderHardwareInterface, Rendering, RhiError, StoreOp, Subresource, Texture, TextureDesc,
+    TextureDimension, TextureUsage, TextureView,
 };
 
 /// A sampled 2D texture of `width` × `height` texels, with one mip.
@@ -184,6 +185,59 @@ fn views_are_cached_slots() {
     assert_eq!(heap.slots_in_use(), slots + 2);
     resources.collect_garbage();
     assert_eq!(heap.slots_in_use(), slots);
+}
+
+/// Each attachment's view is created once, the first time a translation
+/// renders to it, and reused by later translations, however they name the
+/// same layers. The views are destroyed with the texture, or validation
+/// would report them when the device is destroyed.
+#[test]
+fn attachment_views_are_cached() {
+    let session = TestSession::new();
+    let backend = VulkanTestBackend::headless(&session);
+    let resources = backend.resources();
+    let texture = resources
+        .create_texture(&TextureDesc {
+            mip_levels: 2,
+            array_layers: 2,
+            usage: TextureUsage::COLOUR_ATTACHMENT,
+            ..desc_2d("target", 8, 8)
+        })
+        .unwrap();
+    let attachment_views = || {
+        backend
+            .core
+            .textures
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(texture.handle())
+            .attachment_views
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .len()
+    };
+    let render = |mip, layers| {
+        let mut list = CommandList::new("render");
+        list.begin_rendering(&Rendering {
+            colour: vec![ColorAttachment {
+                texture,
+                mip,
+                layers,
+                load: LoadOp::DontCare,
+                store: StoreOp::DontCare,
+            }],
+        });
+        list.end_rendering();
+        backend.queue(QueueKind::Graphics).translate(&list).unwrap();
+    };
+    assert_eq!(attachment_views(), 0);
+    render(0, 0..2);
+    render(0, 0..Subresource::REMAINING);
+    assert_eq!(attachment_views(), 1);
+    render(1, 1..2);
+    assert_eq!(attachment_views(), 2);
+    resources.destroy_texture(texture);
+    resources.collect_garbage();
 }
 
 /// Asking for a view with the resource heap full returns

@@ -17,8 +17,8 @@
 use std::ops::Range;
 
 use crate::{
-    Barrier, GpuAddress, MAX_PUSH_DATA_SIZE, Program, Rect2d, RenderState, TextureCopy,
-    TextureDataLayout, Viewport,
+    Barrier, ColorAttachment, GpuAddress, MAX_PUSH_DATA_SIZE, Program, Rect2d, RenderState,
+    Rendering, TextureCopy, TextureDataLayout, Viewport,
 };
 
 /// The alignment, in bytes, of a fill's address and size, as Vulkan
@@ -60,11 +60,16 @@ pub struct CommandList {
     texture_copies: Vec<BufferTextureCopy>,
     /// Every render state set, which commands refer to by index.
     render_states: Vec<RenderState>,
+    /// Every rendering's colour attachments, which commands refer to by
+    /// range.
+    colour_attachments: Vec<ColorAttachment>,
     /// Every push data block, which commands refer to by range. Each
     /// block's size is a multiple of 4, so each starts at a multiple of 4.
     push_data: Vec<u8>,
     /// Whether a program has been bound, so that dispatches can run.
     program_bound: bool,
+    /// Whether rendering is open: begun, and not yet ended.
+    rendering: bool,
     /// How many debug regions are open.
     open_regions: u32,
     /// How many timing scopes are open.
@@ -110,6 +115,14 @@ pub(crate) enum Command {
         /// The copy's index in the arena.
         copy: usize,
     },
+    /// Begins rendering to the colour attachments `colour_attachments` in
+    /// the list's arena.
+    BeginRendering {
+        /// The colour attachments, as a range of the arena.
+        colour: Range<usize>,
+    },
+    /// Ends rendering.
+    EndRendering,
     /// Binds `program`, for later dispatches to run.
     BindProgram {
         /// The program.
@@ -183,8 +196,10 @@ impl CommandList {
             barriers: Vec::new(),
             texture_copies: Vec::new(),
             render_states: Vec::new(),
+            colour_attachments: Vec::new(),
             push_data: Vec::new(),
             program_bound: false,
+            rendering: false,
             open_regions: 0,
             open_timings: 0,
         }
@@ -220,18 +235,29 @@ impl CommandList {
         &self.render_states[index]
     }
 
+    /// The colour attachments at `range` of the arena, for translation.
+    pub(crate) fn colour_attachments(&self, range: &Range<usize>) -> &[ColorAttachment] {
+        &self.colour_attachments[range.clone()]
+    }
+
     /// The push data block at `range` of the arena, for translation.
     pub(crate) fn push_data_block(&self, range: &Range<usize>) -> &[u8] {
         &self.push_data[range.clone()]
     }
 
-    /// Checks that the list can be translated: that every debug region and
-    /// timing scope it opened is closed.
+    /// Checks that the list can be translated: that rendering is ended, and
+    /// every debug region and timing scope it opened is closed.
     ///
     /// # Panics
     ///
-    /// Panics, naming the list, if a region or scope is still open.
+    /// Panics, naming the list, if rendering, a region or a scope is still
+    /// open.
     pub(crate) fn check_complete(&self) {
+        assert!(
+            !self.rendering,
+            "command list \"{}\" is translated with rendering still open",
+            self.label,
+        );
         assert!(
             self.open_regions == 0,
             "command list \"{}\" is translated with {} still open",
@@ -363,6 +389,54 @@ impl CommandList {
             texture,
         });
         self.texture_copies.len() - 1
+    }
+
+    /// Begins rendering to `rendering`'s attachments, which draws render to
+    /// until [`end_rendering`](Self::end_rendering) (design 0002,
+    /// "Subresources and views"). Each attachment is loaded as it says.
+    ///
+    /// The attachments are checked when the list is translated, since that
+    /// needs the textures (see [`Rendering`]). Translation also panics if
+    /// the queue doesn't draw: only the graphics queue does.
+    ///
+    /// # Panics
+    ///
+    /// Panics if rendering is already open, or if `rendering` doesn't have
+    /// exactly one colour attachment.
+    pub fn begin_rendering(&mut self, rendering: &Rendering) {
+        assert!(
+            !self.rendering,
+            "command list \"{}\" begins rendering, but rendering is already open",
+            self.label,
+        );
+        assert!(
+            rendering.colour.len() == 1,
+            "command list \"{}\" begins rendering with {} colour attachments, but rendering has \
+             exactly one",
+            self.label,
+            rendering.colour.len(),
+        );
+        let start = self.colour_attachments.len();
+        self.colour_attachments.extend_from_slice(&rendering.colour);
+        self.commands.push(Command::BeginRendering {
+            colour: start..self.colour_attachments.len(),
+        });
+        self.rendering = true;
+    }
+
+    /// Ends rendering, storing each attachment as it says.
+    ///
+    /// # Panics
+    ///
+    /// Panics if rendering isn't open.
+    pub fn end_rendering(&mut self) {
+        assert!(
+            self.rendering,
+            "command list \"{}\" ends rendering, but rendering isn't open",
+            self.label,
+        );
+        self.rendering = false;
+        self.commands.push(Command::EndRendering);
     }
 
     /// Binds `program`, for later dispatches to run, until another is
@@ -671,6 +745,10 @@ pub(crate) struct BufferTextureCopy {
 pub(crate) enum RecordedCommand<'a> {
     /// See [`CommandList::barrier`].
     Barrier(&'a [Barrier]),
+    /// See [`CommandList::begin_rendering`]: the colour attachments.
+    BeginRendering(&'a [ColorAttachment]),
+    /// See [`CommandList::end_rendering`].
+    EndRendering,
     /// See [`CommandList::copy_buffer_to_texture`].
     CopyBufferToTexture(&'a BufferTextureCopy),
     /// See [`CommandList::copy_texture_to_buffer`].
@@ -758,6 +836,10 @@ impl CommandList {
                 Command::CopyTextureToBuffer { copy } => {
                     RecordedCommand::CopyTextureToBuffer(&self.texture_copies[copy])
                 }
+                Command::BeginRendering { ref colour } => {
+                    RecordedCommand::BeginRendering(&self.colour_attachments[colour.clone()])
+                }
+                Command::EndRendering => RecordedCommand::EndRendering,
                 Command::BindProgram { program } => RecordedCommand::BindProgram(program),
                 Command::SetRenderState { state } => {
                     RecordedCommand::SetRenderState(&self.render_states[state])
@@ -806,7 +888,7 @@ mod tests {
 
     use super::*;
     use crate::handle::HandleTable;
-    use crate::{Access, Buffer, Extent3d, Format, Texture};
+    use crate::{Access, Buffer, Extent3d, Format, LoadOp, StoreOp, Texture};
 
     /// A program, for recording, which nothing looks up without a backend.
     fn program() -> Program {
@@ -1292,6 +1374,94 @@ mod tests {
         let mut list = CommandList::new("offset");
         list.set_viewport(&viewport);
         assert_eq!(list.recorded(), [RecordedCommand::SetViewport(viewport)]);
+    }
+
+    /// A rendering of a texture called `label`, with `count` colour
+    /// attachments of mip 0 of layer 0, each cleared to black.
+    fn rendering(label: &str, count: usize) -> Rendering {
+        let texture = Texture::from_handle(HandleTable::new("texture").insert(label, ()));
+        Rendering {
+            colour: vec![
+                Rendering::colour(texture, LoadOp::Clear([0.0; 4])).colour[0].clone();
+                count
+            ],
+        }
+    }
+
+    /// Renderings are recorded in order, each with its attachments as they
+    /// were given, and a list whose rendering is ended can be translated.
+    #[test]
+    fn renderings_are_recorded() {
+        let shadows = rendering("shadow map", 1);
+        let mut gbuffer = rendering("albedo", 1);
+        gbuffer.colour[0].mip = 1;
+        gbuffer.colour[0].layers = 2..4;
+        gbuffer.colour[0].load = LoadOp::Load;
+        gbuffer.colour[0].store = StoreOp::DontCare;
+        let mut list = CommandList::new("frame");
+        list.begin_rendering(&shadows);
+        list.end_rendering();
+        list.begin_rendering(&gbuffer);
+        list.end_rendering();
+        list.check_complete();
+        assert_eq!(
+            list.recorded(),
+            [
+                RecordedCommand::BeginRendering(&shadows.colour),
+                RecordedCommand::EndRendering,
+                RecordedCommand::BeginRendering(&gbuffer.colour),
+                RecordedCommand::EndRendering,
+            ],
+        );
+    }
+
+    /// Beginning rendering while it's open panics, naming the list.
+    #[test]
+    #[should_panic(
+        expected = "command list \"frame\" begins rendering, but rendering is already open"
+    )]
+    fn rendering_begun_twice_panics() {
+        let mut list = CommandList::new("frame");
+        list.begin_rendering(&rendering("albedo", 1));
+        list.begin_rendering(&rendering("albedo", 1));
+    }
+
+    /// Ending rendering that isn't open panics, naming the list.
+    #[test]
+    #[should_panic(expected = "command list \"frame\" ends rendering, but rendering isn't open")]
+    fn ending_unopened_rendering_panics() {
+        let mut list = CommandList::new("frame");
+        list.begin_rendering(&rendering("albedo", 1));
+        list.end_rendering();
+        list.end_rendering();
+    }
+
+    /// Translating a list with rendering still open panics, naming the
+    /// list.
+    #[test]
+    #[should_panic(expected = "command list \"frame\" is translated with rendering still open")]
+    fn open_rendering_is_incomplete() {
+        let mut list = CommandList::new("frame");
+        list.begin_rendering(&rendering("albedo", 1));
+        list.check_complete();
+    }
+
+    /// Rendering needs exactly one colour attachment.
+    #[test]
+    fn renderings_need_one_colour_attachment() {
+        for count in [0, 2] {
+            let panic = std::panic::catch_unwind(|| {
+                CommandList::new("frame").begin_rendering(&rendering("albedo", count));
+            })
+            .expect_err("the rendering should panic");
+            assert_eq!(
+                panic.downcast_ref::<String>().unwrap(),
+                &format!(
+                    "command list \"frame\" begins rendering with {count} colour attachments, \
+                     but rendering has exactly one"
+                ),
+            );
+        }
     }
 
     /// An empty viewport panics, naming its size.

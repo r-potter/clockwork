@@ -6,8 +6,9 @@
 //! removal (design 0002, "Keeping the recording model reversible"). It
 //! looks up every handle the list names, holding each table's read lock
 //! once for the whole list, and panics on a stale one, on a subresource
-//! outside its texture, on a program the queue can't run, and on render
-//! state for a queue that doesn't draw.
+//! outside its texture, on a program the queue can't run, on render state
+//! or rendering for a queue that doesn't draw, and on an attachment its
+//! texture can't be.
 //!
 //! Every command buffer for a queue that runs programs, the graphics or
 //! compute queue, starts by binding both descriptor heaps, so each
@@ -181,10 +182,11 @@ impl VulkanDevice {
     ///
     /// # Panics
     ///
-    /// Panics if `list` has a debug region or timing scope open, names a
-    /// stale handle, binds a program the queue can't run, or sets render
-    /// state on a queue that doesn't draw, or if a dispatch's program isn't
-    /// a compute program.
+    /// Panics if `list` has rendering, a debug region or a timing scope
+    /// open, names a stale handle, binds a program the queue can't run,
+    /// renders or sets render state on a queue that doesn't draw, or
+    /// renders to an attachment its texture can't be, or if a dispatch's
+    /// program isn't a compute program.
     pub(super) fn translate(
         self: &Arc<Self>,
         id: QueueId,
@@ -243,8 +245,9 @@ impl VulkanDevice {
     ///
     /// Panics if `list` names a stale handle, has a queue transfer neither
     /// from nor to that queue, binds a program or pushes data the queue
-    /// can't use, sets render state on a queue that doesn't draw, or
-    /// dispatches with a program that isn't a compute program.
+    /// can't use, renders or sets render state on a queue that doesn't
+    /// draw, renders to an attachment its texture can't be, or dispatches
+    /// with a program that isn't a compute program.
     unsafe fn record(
         &self,
         buffer: vk::CommandBuffer,
@@ -537,6 +540,23 @@ impl VulkanDevice {
                         );
                     }
                     program_bound = Some((label, entry.is_compute()));
+                }
+                Command::BeginRendering { colour } => {
+                    check_draws(list, kind, "begins rendering");
+                    let [attachment] = list.colour_attachments(colour) else {
+                        unreachable!("recording checked that rendering has one colour attachment");
+                    };
+                    // SAFETY: Guaranteed by the caller, the queue's family
+                    // supports graphics, recording checked that rendering
+                    // isn't already open, and `textures` is this device's
+                    // table, locked until recording ends.
+                    unsafe { self.begin_rendering(buffer, attachment, &textures) }?;
+                }
+                Command::EndRendering => {
+                    // SAFETY: Guaranteed by the caller, and recording checked
+                    // that rendering is open, so it began on this queue,
+                    // which draws.
+                    unsafe { device.cmd_end_rendering(buffer) };
                 }
                 &Command::SetRenderState { state } => {
                     check_draws(list, kind, "sets render state");

@@ -31,6 +31,7 @@ mod programs;
 mod query_pools;
 mod queues;
 mod render_state;
+mod rendering;
 mod samplers;
 mod shaders;
 mod surface;

@@ -14,12 +14,13 @@ use clockwork_diagnostics::capture::TestSession;
 use crate::test_shaders;
 use crate::vulkan::test_support::{Capability, VulkanTestBackend, require_capabilities};
 use crate::{
-    Access, AddressMode, Barrier, Blend, Buffer, BufferDesc, BufferUsage, ColourMask, ColourWrite,
-    CommandList, CompareOp, CullMode, DepthTest, DescriptorIndex, Extent2d, Extent3d, Filter,
-    Format, FrontFace, GpuAddress, GpuResources, MemoryLocation, Offset2d, QueueId, QueueKind,
-    Rect2d, RenderHardwareInterface, RenderState, SamplerDesc, SubmitDesc, Subresource, Texture,
-    TextureCopy, TextureDataLayout, TextureDesc, TextureDimension, TextureUsage, TextureView,
-    Topology, Viewport,
+    Access, AddressMode, Barrier, Blend, Buffer, BufferDesc, BufferUsage, ColorAttachment,
+    ColourMask, ColourWrite, CommandList, CompareOp, CullMode, DepthTest, DescriptorIndex,
+    Extent2d, Extent3d, Filter, Format, FrontFace, GpuAddress, GpuResources, LoadOp,
+    MemoryLocation, Offset2d, QueueId, QueueKind, Rect2d, RenderHardwareInterface, RenderState,
+    Rendering, SamplerDesc, StoreOp, SubmitDesc, Subresource, Texture, TextureCopy,
+    TextureDataLayout, TextureDesc, TextureDimension, TextureUsage, TextureView, Topology,
+    Viewport,
 };
 
 /// A buffer of `size` bytes in `location`, for copies.
@@ -620,7 +621,8 @@ fn render_state_is_set_on_the_graphics_queue() {
 }
 
 /// Only the graphics queue draws, so setting render state, a viewport or a
-/// scissor panics when translated for a compute queue of its own.
+/// scissor, or beginning rendering, panics when translated for a compute
+/// queue of its own.
 #[test]
 fn only_the_graphics_queue_sets_render_state() {
     let session = TestSession::new();
@@ -651,6 +653,114 @@ fn only_the_graphics_queue_sets_render_state() {
     check("sets a scissor", &|list| {
         list.set_scissor(Rect2d::from_extent(extent));
     });
+    let resources = backend.resources();
+    let texture = create_texture(
+        &**resources,
+        "colour",
+        Format::Rgba8Unorm,
+        TextureUsage::COLOUR_ATTACHMENT,
+    );
+    check("begins rendering", &|list| {
+        list.begin_rendering(&Rendering::colour(texture, LoadOp::DontCare));
+        list.end_rendering();
+    });
+    resources.destroy_texture(texture);
+}
+
+/// Rendering clears its colour attachment to its clear value, a float
+/// format's to its floats and an integer format's to its integers, in the
+/// mip and layer it names, and stores it, so that copying that subresource
+/// out reads the clear value in every texel.
+#[test]
+fn rendering_clears_its_attachments() {
+    let session = TestSession::new();
+    let backend = VulkanTestBackend::headless(&session);
+    let resources = backend.resources();
+    let usage = TextureUsage::COLOUR_ATTACHMENT | TextureUsage::COPY_SOURCE;
+    let float = create_texture(&**resources, "float", Format::Rgba32Float, usage);
+    let integer = create_texture(&**resources, "integer", Format::R32Uint, usage);
+    // Mip 1 of the 4×4 textures, in their second layer.
+    let mip = Extent3d::new_2d(2, 2);
+    let subresource = Subresource::mip_layer(1, 1);
+    let float_size = 2 * 2 * 16;
+    let integer_size = 2 * 2 * 4;
+    let float_readback = create(
+        &**resources,
+        "float texels",
+        float_size,
+        MemoryLocation::Readback,
+    );
+    let integer_readback = create(
+        &**resources,
+        "integer texels",
+        integer_size,
+        MemoryLocation::Readback,
+    );
+    let colour = [0.25, 0.5, 0.75, 1.0];
+    let attachment = |texture, load| ColorAttachment {
+        texture,
+        mip: 1,
+        layers: 1..2,
+        load,
+        store: StoreOp::Store,
+    };
+    let renderings = [
+        attachment(float, LoadOp::Clear(colour)),
+        attachment(integer, LoadOp::Clear([7.0, 0.0, 0.0, 0.0])),
+    ]
+    .map(|attachment| Rendering {
+        colour: vec![attachment],
+    });
+    let region = |texture| TextureCopy {
+        texture,
+        mip: 1,
+        layers: 1..2,
+        origin: [0; 3],
+        extent: mip,
+    };
+    let barriers = |before, after| {
+        [float, integer]
+            .map(|texture| Barrier::subresource(texture, subresource.clone(), before, after))
+    };
+
+    let mut list = CommandList::new("clear");
+    list.barrier(&barriers(Access::None, Access::ColorAttachmentWrite));
+    for rendering in &renderings {
+        list.begin_rendering(rendering);
+        list.end_rendering();
+    }
+    list.barrier(&barriers(Access::ColorAttachmentWrite, Access::CopyRead));
+    list.copy_texture_to_buffer(
+        region(float),
+        resources.buffer_address(float_readback),
+        TextureDataLayout::tightly_packed(Format::Rgba32Float, mip),
+    );
+    list.copy_texture_to_buffer(
+        region(integer),
+        resources.buffer_address(integer_readback),
+        TextureDataLayout::tightly_packed(Format::R32Uint, mip),
+    );
+    list.barrier(&[
+        Barrier::buffer(float_readback, Access::CopyWrite, Access::HostRead),
+        Barrier::buffer(integer_readback, Access::CopyWrite, Access::HostRead),
+    ]);
+    run(&backend, QueueKind::Graphics, &list);
+
+    assert_eq!(
+        read_texels(&**resources, float_readback, float_size),
+        colour.repeat(4),
+    );
+    let mut bytes = vec![0; integer_size as usize];
+    resources
+        .read_buffer(integer_readback, 0, &mut bytes)
+        .unwrap();
+    assert_eq!(bytes, 7_u32.to_le_bytes().repeat(4));
+    for buffer in [float_readback, integer_readback] {
+        resources.destroy_buffer(buffer);
+    }
+    for texture in [float, integer] {
+        resources.destroy_texture(texture);
+    }
 }
 
 /// Bytes written to an upload buffer, copied on the GPU to a GPU-only
