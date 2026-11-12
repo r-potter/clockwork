@@ -46,13 +46,15 @@ use super::queues::Queues;
 use super::render_state::colour_attachments;
 use super::timings::RecordedTimings;
 use crate::barrier::BarrierTarget;
-use crate::command_list::{Command, DISPATCH_ARGUMENTS_SIZE};
+use crate::command_list::{
+    Command, DISPATCH_ARGUMENTS_SIZE, DRAW_ARGUMENTS_SIZE, indirect_draws_size,
+};
 use crate::copy::check_texture_copy;
 use crate::deferred::Translation;
 use crate::ffi::truncate_to_cstring;
 use crate::{
-    Access, AccessSet, CommandBuffer, CommandList, GpuTimepoint, IndexFormat, QueueId, QueueKind,
-    RhiResult,
+    Access, AccessSet, CommandBuffer, CommandList, GpuAddress, GpuTimepoint, IndexFormat, QueueId,
+    QueueKind, RhiResult,
 };
 
 /// The flags every address command passes for its ranges: possibly in a
@@ -73,6 +75,31 @@ impl From<IndexFormat> for vk::IndexType {
             IndexFormat::Uint32 => Self::UINT32,
         }
     }
+}
+
+/// The range `draws` indirect draws read their arguments from, each
+/// `arguments_size` bytes, the first at `arguments` and each next `stride`
+/// bytes after.
+///
+/// Vulkan requires a stride no larger than the range, and ignores it for a
+/// single draw, whose range is only its arguments, so the stride is 0 for
+/// fewer than two draws.
+///
+/// # Panics
+///
+/// Panics if the range's size overflows, which recording checks against.
+fn indirect_draws_range(
+    arguments: GpuAddress,
+    draws: u32,
+    stride: u64,
+    arguments_size: u64,
+) -> vk::StridedDeviceAddressRangeKHR {
+    let size = indirect_draws_size(draws, stride, arguments_size)
+        .expect("recording checked that the arguments end within the address space");
+    vk::StridedDeviceAddressRangeKHR::default()
+        .address(arguments.0)
+        .size(size)
+        .stride(if draws > 1 { stride } else { 0 })
 }
 
 /// A command list translated for one queue, holding the command pool its
@@ -664,6 +691,34 @@ impl VulkanDevice {
                     // bound.
                     unsafe { device.cmd_draw_indexed(buffer, indices, instances, 0, 0, 0) };
                 }
+                &Command::DrawIndirect {
+                    arguments,
+                    draws,
+                    stride,
+                } => {
+                    bound.check_draw(list);
+                    let draw_info = vk::DrawIndirect2InfoKHR::default()
+                        .address_range(indirect_draws_range(
+                            arguments,
+                            draws,
+                            stride,
+                            DRAW_ARGUMENTS_SIZE,
+                        ))
+                        .address_flags(ADDRESS_FLAGS)
+                        .draw_count(draws);
+                    // SAFETY: Guaranteed by the caller, a render pass is open,
+                    // so the queue draws, a vertex and fragment program is
+                    // bound, with the heaps, recording checked that render
+                    // state, a viewport and a scissor are set, that the draw
+                    // count is within the limit device selection requires,
+                    // and the arguments' address and stride, and
+                    // `draw_info` is valid for the call.
+                    unsafe {
+                        self.device
+                            .device_address_commands()
+                            .cmd_draw_indirect2(buffer, &draw_info);
+                    }
+                }
                 &Command::Draw {
                     vertices,
                     instances,
@@ -995,6 +1050,26 @@ mod tests {
             assert_eq!(
                 queue_transfer(&DEDICATED, queue, None, "upload"),
                 Transfer::None
+            );
+        }
+    }
+
+    /// Indirect draws read from the first draw's arguments to the end of
+    /// the last's, with their stride only for two draws or more, since
+    /// Vulkan requires it to be no larger than the range.
+    #[test]
+    fn indirect_draw_ranges_span_every_draw() {
+        for (draws, stride, size, range_stride) in [
+            (0, 32, 0, 0),
+            (1, 32, 16, 0),
+            (2, 32, 48, 32),
+            (3, 16, 48, 16),
+        ] {
+            let range = indirect_draws_range(GpuAddress(0x1000), draws, stride, 16);
+            assert_eq!(
+                (range.address, range.size, range.stride),
+                (0x1000, size, range_stride),
+                "{draws} draws {stride} bytes apart",
             );
         }
     }
