@@ -73,7 +73,10 @@ use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
 
 pub use barrier::{Access, AccessSet, Barrier, Subresource};
 pub use buffer::{Buffer, BufferDesc, BufferUsage, GpuAddress, IndexFormat};
-pub use capabilities::{Capabilities, Limits, MAX_PUSH_DATA_SIZE, PresentCapabilities, QueueKind};
+pub use capabilities::{
+    Capabilities, Limits, MAX_DRAW_INDIRECT_COUNT, MAX_PUSH_DATA_SIZE, PresentCapabilities,
+    QueueKind,
+};
 pub use command_list::CommandList;
 pub use copy::{TextureCopy, TextureDataLayout};
 pub use descriptor::{DescriptorIndex, HeapKind};

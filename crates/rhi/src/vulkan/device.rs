@@ -48,6 +48,7 @@ impl LogicalDevice {
     /// - `VK_EXT_shader_object`, `VK_EXT_descriptor_heap`,
     ///   `VK_KHR_device_address_commands` and
     ///   `VK_KHR_shader_untyped_pointers`, each with its main feature
+    /// - Vulkan 1.0's `multi_draw_indirect`
     /// - Vulkan 1.1's `shader_draw_parameters`
     /// - Vulkan 1.2's `buffer_device_address`, `timeline_semaphore` and
     ///   `host_query_reset`
@@ -124,9 +125,12 @@ impl LogicalDevice {
         let mut shader_untyped_pointers_features =
             vk::PhysicalDeviceShaderUntypedPointersFeaturesKHR::default()
                 .shader_untyped_pointers(true);
-        let core_features = vk::PhysicalDeviceFeatures::default().texture_compression_bc(
-            physical_device.features.core.texture_compression_bc == vk::TRUE,
-        );
+        // An indirect draw can run more than one draw.
+        let core_features = vk::PhysicalDeviceFeatures::default()
+            .multi_draw_indirect(true)
+            .texture_compression_bc(
+                physical_device.features.core.texture_compression_bc == vk::TRUE,
+            );
         let create_info = vk::DeviceCreateInfo::default()
             .queue_create_infos(&queue_create_infos)
             .enabled_extension_names(&extensions)
