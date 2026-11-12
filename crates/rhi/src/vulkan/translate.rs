@@ -7,9 +7,10 @@
 //! looks up every handle the list names, holding each table's read lock
 //! once for the whole list, and panics on a stale one, on a subresource
 //! outside its texture, on a program the queue can't run, on a draw or
-//! dispatch with no program of its kind bound, on render state or a render
-//! pass for a queue that doesn't draw, and on attachments their textures
-//! can't be, or that can't be rendered to together.
+//! dispatch with no program of its kind bound, on render state, an index
+//! buffer or a render pass for a queue that doesn't draw, and on
+//! attachments their textures can't be, or that can't be rendered to
+//! together.
 //!
 //! Every command buffer for a queue that runs programs, the graphics or
 //! compute queue, starts by binding both descriptor heaps, so each
@@ -50,7 +51,8 @@ use crate::copy::check_texture_copy;
 use crate::deferred::Translation;
 use crate::ffi::truncate_to_cstring;
 use crate::{
-    Access, AccessSet, CommandBuffer, CommandList, GpuTimepoint, QueueId, QueueKind, RhiResult,
+    Access, AccessSet, CommandBuffer, CommandList, GpuTimepoint, IndexFormat, QueueId, QueueKind,
+    RhiResult,
 };
 
 /// The flags every address command passes for its ranges: possibly in a
@@ -63,6 +65,15 @@ use crate::{
 /// has shown the exact one to be faster.
 const ADDRESS_FLAGS: vk::AddressCommandFlagsKHR =
     vk::AddressCommandFlagsKHR::UNKNOWN_STORAGE_BUFFER_USAGE;
+
+impl From<IndexFormat> for vk::IndexType {
+    fn from(format: IndexFormat) -> Self {
+        match format {
+            IndexFormat::Uint16 => Self::UINT16,
+            IndexFormat::Uint32 => Self::UINT32,
+        }
+    }
+}
 
 /// A command list translated for one queue, holding the command pool its
 /// command buffer was recorded from, and holding back the destruction of
@@ -185,10 +196,11 @@ impl VulkanDevice {
     ///
     /// Panics if `list` has a render pass, a debug region or a timing scope
     /// open, names a stale handle, binds a program the queue can't run,
-    /// renders or sets render state on a queue that doesn't draw, or
-    /// renders to attachments their textures can't be, or that can't be
-    /// rendered to together, or if it draws with no vertex and fragment
-    /// program bound, or dispatches with no compute program bound.
+    /// renders, or sets render state or an index buffer, on a queue that
+    /// doesn't draw, or renders to attachments their textures can't be, or
+    /// that can't be rendered to together, or if it draws with no vertex
+    /// and fragment program bound, or dispatches with no compute program
+    /// bound.
     pub(super) fn translate(
         self: &Arc<Self>,
         id: QueueId,
@@ -247,10 +259,11 @@ impl VulkanDevice {
     ///
     /// Panics if `list` names a stale handle, has a queue transfer neither
     /// from nor to that queue, binds a program or pushes data the queue
-    /// can't use, renders or sets render state on a queue that doesn't
-    /// draw, renders to attachments their textures can't be, or that can't
-    /// be rendered to together, or draws with no vertex and fragment
-    /// program bound, or dispatches with no compute program bound.
+    /// can't use, renders, or sets render state or an index buffer, on a
+    /// queue that doesn't draw, renders to attachments their textures
+    /// can't be, or that can't be rendered to together, or draws with no
+    /// vertex and fragment program bound, or dispatches with no compute
+    /// program bound.
     unsafe fn record(
         &self,
         buffer: vk::CommandBuffer,
@@ -617,6 +630,40 @@ impl VulkanDevice {
                             .cmd_push_data(buffer, &push_data_info);
                     }
                 }
+                &Command::BindIndexBuffer {
+                    address,
+                    size,
+                    format,
+                } => {
+                    check_draws(list, kind, "binds an index buffer");
+                    let bind_info = vk::BindIndexBuffer3InfoKHR::default()
+                        .address_range(
+                            vk::DeviceAddressRangeKHR::default()
+                                .address(address.0)
+                                .size(size),
+                        )
+                        .address_flags(ADDRESS_FLAGS)
+                        .index_type(vk::IndexType::from(format));
+                    // SAFETY: Guaranteed by the caller, the queue's family
+                    // supports graphics, recording checked that the address
+                    // and size are multiples of the index size, and
+                    // `bind_info` is valid for the call.
+                    unsafe {
+                        self.device
+                            .device_address_commands()
+                            .cmd_bind_index_buffer3(buffer, &bind_info);
+                    }
+                }
+                &Command::DrawIndexed { indices, instances } => {
+                    bound.check_draw(list);
+                    // SAFETY: Guaranteed by the caller, a render pass is open,
+                    // so the queue draws, a vertex and fragment program is
+                    // bound, with the heaps, and recording checked that
+                    // render state, a viewport and a scissor are set, and
+                    // that an index buffer holding `indices` indices is
+                    // bound.
+                    unsafe { device.cmd_draw_indexed(buffer, indices, instances, 0, 0, 0) };
+                }
                 &Command::Draw {
                     vertices,
                     instances,
@@ -949,6 +996,17 @@ mod tests {
                 queue_transfer(&DEDICATED, queue, None, "upload"),
                 Transfer::None
             );
+        }
+    }
+
+    /// Each index format maps to the Vulkan index type of its size.
+    #[test]
+    fn index_formats_map_to_vulkan_index_types() {
+        for (format, index_type) in [
+            (IndexFormat::Uint16, vk::IndexType::UINT16),
+            (IndexFormat::Uint32, vk::IndexType::UINT32),
+        ] {
+            assert_eq!(vk::IndexType::from(format), index_type, "{format:?}");
         }
     }
 

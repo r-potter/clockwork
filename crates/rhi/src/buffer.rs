@@ -131,6 +131,26 @@ impl BitOrAssign for BufferUsage {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct GpuAddress(pub u64);
 
+/// The type of each index in an index buffer, for indexed draws.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum IndexFormat {
+    /// 16-bit unsigned indices, for meshes of up to 65,536 vertices.
+    Uint16,
+    /// 32-bit unsigned indices.
+    Uint32,
+}
+
+impl IndexFormat {
+    /// The size of one index, in bytes, which an index buffer's address
+    /// must be a multiple of.
+    pub const fn size(self) -> u64 {
+        match self {
+            Self::Uint16 => 2,
+            Self::Uint32 => 4,
+        }
+    }
+}
+
 // Handles and descriptions are plain data, shared between threads (design
 // 0002, "Threading", R15).
 const _: () = {
@@ -139,6 +159,7 @@ const _: () = {
     assert_send_sync::<Buffer>();
     assert_send_sync::<BufferDesc<'_>>();
     assert_send_sync::<GpuAddress>();
+    assert_send_sync::<IndexFormat>();
 };
 
 #[cfg(test)]
