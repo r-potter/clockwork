@@ -17,8 +17,8 @@ use crate::{
     Access, AddressMode, Barrier, Blend, Buffer, BufferDesc, BufferUsage, ColorAttachment,
     ColourMask, ColourWrite, CommandList, CompareOp, CullMode, DepthTest, DescriptorIndex,
     Extent2d, Extent3d, Filter, Format, FrontFace, GpuAddress, GpuResources, LoadOp,
-    MemoryLocation, Offset2d, QueueId, QueueKind, Rect2d, RenderHardwareInterface, RenderState,
-    Rendering, SamplerDesc, StoreOp, SubmitDesc, Subresource, Texture, TextureCopy,
+    MemoryLocation, Offset2d, QueueId, QueueKind, Rect2d, RenderHardwareInterface, RenderPassDesc,
+    RenderState, SamplerDesc, StoreOp, SubmitDesc, Subresource, Texture, TextureCopy,
     TextureDataLayout, TextureDesc, TextureDimension, TextureUsage, TextureView, Topology,
     Viewport,
 };
@@ -621,7 +621,7 @@ fn render_state_is_set_on_the_graphics_queue() {
 }
 
 /// Only the graphics queue draws, so setting render state, a viewport or a
-/// scissor, or beginning rendering, panics when translated for a compute
+/// scissor, or beginning a render pass, panics when translated for a compute
 /// queue of its own.
 #[test]
 fn only_the_graphics_queue_sets_render_state() {
@@ -660,19 +660,19 @@ fn only_the_graphics_queue_sets_render_state() {
         Format::Rgba8Unorm,
         TextureUsage::COLOUR_ATTACHMENT,
     );
-    check("begins rendering", &|list| {
-        list.begin_rendering(&Rendering::colour(texture, LoadOp::DontCare));
-        list.end_rendering();
+    check("begins a render pass", &|list| {
+        list.begin_render_pass(&RenderPassDesc::colour(texture, LoadOp::DontCare));
+        list.end_render_pass();
     });
     resources.destroy_texture(texture);
 }
 
-/// Rendering clears each colour attachment to its own clear value, a
+/// A render pass clears each colour attachment to its own clear value, a
 /// float format's to its floats and an integer format's to its integers,
 /// in the mip and layer each names, and stores it, so that copying that
 /// subresource out reads the clear value in every texel.
 #[test]
-fn rendering_clears_its_attachments() {
+fn render_passes_clear_their_attachments() {
     let session = TestSession::new();
     let backend = VulkanTestBackend::headless(&session);
     let resources = backend.resources();
@@ -704,7 +704,7 @@ fn rendering_clears_its_attachments() {
         load,
         store: StoreOp::Store,
     };
-    let rendering = Rendering {
+    let render_pass = RenderPassDesc {
         colour: vec![
             attachment(float, LoadOp::Clear(colour)),
             attachment(integer, LoadOp::Clear([7.0, 0.0, 0.0, 0.0])),
@@ -724,8 +724,8 @@ fn rendering_clears_its_attachments() {
 
     let mut list = CommandList::new("clear");
     list.barrier(&barriers(Access::None, Access::ColorAttachmentWrite));
-    list.begin_rendering(&rendering);
-    list.end_rendering();
+    list.begin_render_pass(&render_pass);
+    list.end_render_pass();
     list.barrier(&barriers(Access::ColorAttachmentWrite, Access::CopyRead));
     list.copy_texture_to_buffer(
         region(float),
@@ -770,15 +770,15 @@ fn mismatched_attachments_panic_when_translated() {
     let usage = TextureUsage::COLOUR_ATTACHMENT;
     let albedo = create_texture(&**resources, "albedo", Format::Rgba8Unorm, usage);
     let normals = create_texture(&**resources, "normals", Format::Rgba8Unorm, usage);
-    let mut rendering = Rendering::colour(albedo, LoadOp::DontCare);
-    rendering.colour.push(ColorAttachment {
+    let mut render_pass = RenderPassDesc::colour(albedo, LoadOp::DontCare);
+    render_pass.colour.push(ColorAttachment {
         texture: normals,
         mip: 1,
-        ..rendering.colour[0].clone()
+        ..render_pass.colour[0].clone()
     });
     let mut list = CommandList::new("gbuffer");
-    list.begin_rendering(&rendering);
-    list.end_rendering();
+    list.begin_render_pass(&render_pass);
+    list.end_render_pass();
     assert_eq!(
         translation_panic(&backend, QueueKind::Graphics, &list),
         "command list \"gbuffer\" renders to attachments of different sizes: \"albedo\" is 4x4 \

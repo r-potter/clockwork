@@ -7,7 +7,7 @@
 //! looks up every handle the list names, holding each table's read lock
 //! once for the whole list, and panics on a stale one, on a subresource
 //! outside its texture, on a program the queue can't run, on render state
-//! or rendering for a queue that doesn't draw, and on attachments their
+//! or a render pass for a queue that doesn't draw, and on attachments their
 //! textures can't be, or that can't be rendered to together.
 //!
 //! Every command buffer for a queue that runs programs, the graphics or
@@ -182,7 +182,7 @@ impl VulkanDevice {
     ///
     /// # Panics
     ///
-    /// Panics if `list` has rendering, a debug region or a timing scope
+    /// Panics if `list` has a render pass, a debug region or a timing scope
     /// open, names a stale handle, binds a program the queue can't run,
     /// renders or sets render state on a queue that doesn't draw, or
     /// renders to attachments their textures can't be, or that can't be
@@ -543,14 +543,14 @@ impl VulkanDevice {
                     }
                     program_bound = Some((label, entry.is_compute()));
                 }
-                Command::BeginRendering { colour } => {
-                    check_draws(list, kind, "begins rendering");
+                Command::BeginRenderPass { colour } => {
+                    check_draws(list, kind, "begins a render pass");
                     // SAFETY: Guaranteed by the caller, the queue's family
-                    // supports graphics, recording checked that rendering
+                    // supports graphics, recording checked that a render pass
                     // isn't already open, and `textures` is this device's
                     // table, locked until recording ends.
                     unsafe {
-                        self.begin_rendering(
+                        self.begin_render_pass(
                             buffer,
                             list,
                             list.colour_attachments(colour),
@@ -558,9 +558,9 @@ impl VulkanDevice {
                         )
                     }?;
                 }
-                Command::EndRendering => {
+                Command::EndRenderPass => {
                     // SAFETY: Guaranteed by the caller, and recording checked
-                    // that rendering is open, so it began on this queue,
+                    // that a render pass is open, so it began on this queue,
                     // which draws.
                     unsafe { device.cmd_end_rendering(buffer) };
                 }

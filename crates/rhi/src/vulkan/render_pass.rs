@@ -7,7 +7,7 @@ use ash::vk;
 use super::VulkanDevice;
 use super::textures::TextureEntry;
 use crate::handle::HandleTable;
-use crate::rendering::render_area;
+use crate::render_pass::render_area;
 use crate::{Access, ColorAttachment, CommandList, Format, LoadOp, RhiResult, StoreOp};
 
 impl<T> From<LoadOp<T>> for vk::AttachmentLoadOp {
@@ -50,8 +50,8 @@ fn clear_colour(format: Format, colour: [f32; 4]) -> vk::ClearColorValue {
 }
 
 impl VulkanDevice {
-    /// Records a command into `buffer` that begins rendering to `colour`,
-    /// the colour attachments of a rendering in `list`, whose textures are
+    /// Records a command into `buffer` that begins a render pass to `colour`,
+    /// the colour attachments of a render pass in `list`, whose textures are
     /// in `textures`.
     ///
     /// # Errors
@@ -61,7 +61,7 @@ impl VulkanDevice {
     /// # Safety
     ///
     /// `buffer` must be recording, on this device, for a family that
-    /// supports graphics, outside rendering, and no other thread may use
+    /// supports graphics, outside a render pass, and no other thread may use
     /// it. `textures` must be this device's texture table, locked for as
     /// long as `buffer` is recording.
     ///
@@ -71,7 +71,7 @@ impl VulkanDevice {
     /// attachment, if an attachment is out of range, if the attachments
     /// differ in size or layer count, or if there are more than the device
     /// renders to.
-    pub(super) unsafe fn begin_rendering(
+    pub(super) unsafe fn begin_render_pass(
         &self,
         buffer: vk::CommandBuffer,
         list: &CommandList,
@@ -104,7 +104,7 @@ impl VulkanDevice {
                 .map(|(label, _, layers, extent)| (*label, layers.clone(), *extent)),
         );
         // The attachments are in the layout writing them needs, as the
-        // barriers before rendering put them.
+        // barriers before the render pass put them.
         let layout = vk::ImageLayout::from(
             Access::ColorAttachmentWrite
                 .layout()

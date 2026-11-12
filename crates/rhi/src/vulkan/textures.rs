@@ -14,7 +14,7 @@
 //! image descriptor from a `VkImageViewCreateInfo`, so no `VkImageView` is
 //! created. The slots are freed with the texture.
 //!
-//! Rendering needs a `VkImageView` of each attachment, so those are
+//! A render pass needs a `VkImageView` of each attachment, so those are
 //! created the first time a translation renders to one, and cached in the
 //! entry in the same way, behind a `Mutex` of their own. They use no heap
 //! slot, and are destroyed with the texture.
@@ -43,7 +43,7 @@ use super::error::{error, error_from_chain};
 use super::memory::{MemoryAllocation, MemoryRequest, Resource, image_memory_requirements};
 use crate::copy::CopiedTexture;
 use crate::handle::HandleTable;
-use crate::rendering::AttachedTexture;
+use crate::render_pass::AttachedTexture;
 use crate::view::{ViewType, ViewedTexture};
 use crate::{
     Access, DescriptorIndex, Extent3d, Format, FormatInfo, HeapKind, MemoryLocation, RhiError,

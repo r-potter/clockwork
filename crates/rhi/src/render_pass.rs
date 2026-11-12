@@ -1,29 +1,29 @@
-//! Rendering: the attachments draws render to, between
-//! [`CommandList::begin_rendering`](crate::CommandList::begin_rendering) and
-//! [`end_rendering`](crate::CommandList::end_rendering) (design 0002,
+//! Render passes: the attachments draws render to, between
+//! [`CommandList::begin_render_pass`](crate::CommandList::begin_render_pass) and
+//! [`end_render_pass`](crate::CommandList::end_render_pass) (design 0002,
 //! "Subresources and views").
 //!
 //! Each attachment names one mip of a texture and a range of its layers.
-//! Whether a texture can be one, and the region rendering covers, are pure
-//! functions of the textures, checked when the list is translated and
+//! Whether a texture can be one, and the region a render pass covers, are
+//! pure functions of the textures, checked when the list is translated and
 //! tested without a device: [`ColorAttachment::resolve`] checks an
-//! attachment against its texture, and [`render_area`] checks that a
-//! rendering's attachments agree.
+//! attachment against its texture, and [`render_area`] checks that a render
+//! pass's attachments agree.
 
 use std::ops::Range;
 
 use crate::{Extent2d, Extent3d, Subresource, Texture, TextureDimension, TextureUsage};
 
-/// The attachments draws render to, from
-/// [`CommandList::begin_rendering`](crate::CommandList::begin_rendering)
-/// until [`end_rendering`](crate::CommandList::end_rendering).
+/// A render pass: the attachments draws render to, from
+/// [`CommandList::begin_render_pass`](crate::CommandList::begin_render_pass)
+/// until [`end_render_pass`](crate::CommandList::end_render_pass).
 ///
 /// Every attachment is the same size, at the mip it names, and names the
 /// same number of layers. Rendering to several layers at once is layered
 /// rendering, with the layer chosen in the shader
 /// (`SV_RenderTargetArrayIndex`).
 #[derive(Debug, Clone, PartialEq)]
-pub struct Rendering {
+pub struct RenderPassDesc {
     /// The colour attachments, by number, which a fragment shader's
     /// outputs (`SV_Target0` to `SV_Target7`) and a
     /// [`RenderState`](crate::RenderState)'s colour writes refer to. At
@@ -32,8 +32,8 @@ pub struct Rendering {
     pub colour: Vec<ColorAttachment>,
 }
 
-impl Rendering {
-    /// Rendering to mip 0 of layer 0 of `texture`, a single colour
+impl RenderPassDesc {
+    /// A render pass to mip 0 of layer 0 of `texture`, a single colour
     /// attachment, loaded as `load` says and stored.
     pub fn colour(texture: Texture, load: LoadOp<[f32; 4]>) -> Self {
         Self {
@@ -53,7 +53,7 @@ impl Rendering {
 /// The texture must have [`TextureUsage::COLOUR_ATTACHMENT`], can't be a 3D
 /// texture, and must be in the layout of
 /// [`Access::ColorAttachmentWrite`](crate::Access::ColorAttachmentWrite)
-/// while rendering.
+/// during the render pass.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ColorAttachment {
     /// The texture.
@@ -63,11 +63,11 @@ pub struct ColorAttachment {
     /// The layers rendered to. A range ending at
     /// [`Subresource::REMAINING`] reaches the texture's last layer.
     pub layers: Range<u32>,
-    /// What the attachment holds when rendering begins. A clear value is
+    /// What the attachment holds when the render pass begins. A clear value is
     /// red, green, blue and alpha, converted to an integer format's
     /// integers.
     pub load: LoadOp<[f32; 4]>,
-    /// What happens to what's rendered when rendering ends.
+    /// What happens to what's rendered when the render pass ends.
     pub store: StoreOp,
 }
 
@@ -93,23 +93,23 @@ impl ColorAttachment {
     }
 }
 
-/// What an attachment holds when rendering begins.
+/// What an attachment holds when the render pass begins.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum LoadOp<T> {
-    /// What it held before, so that rendering adds to it.
+    /// What it held before, so that the render pass adds to it.
     Load,
     /// Every texel set to the value, which is faster than loading.
     Clear(T),
-    /// Anything: rendering will cover every texel it reads. The fastest.
+    /// Anything: the render pass will cover every texel it reads. The fastest.
     DontCare,
 }
 
-/// What happens to what's rendered to an attachment when rendering ends.
+/// What happens to what's rendered to an attachment when the render pass ends.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum StoreOp {
     /// It's kept, for later passes to read.
     Store,
-    /// It may be discarded, as for a depth attachment only this rendering
+    /// It may be discarded, as for a depth attachment only this render pass
     /// tests against, which saves writing it to memory on some GPUs.
     DontCare,
 }
@@ -169,11 +169,11 @@ fn resolve_attachment(
     (subresource.layers, extent)
 }
 
-/// One attachment of a rendering, resolved: its texture's label, the layers
+/// One attachment of a render pass, resolved: its texture's label, the layers
 /// it names, and the size of its mip.
 pub(crate) type ResolvedAttachment<'a> = (&'a str, Range<u32>, Extent2d);
 
-/// The size of the region a rendering in the list `list` covers, and the
+/// The size of the region a render pass in the list `list` covers, and the
 /// number of layers it renders to, from its `attachments`.
 ///
 /// # Panics
@@ -188,7 +188,7 @@ pub(crate) fn render_area<'a>(
     let mut attachments = attachments.into_iter();
     let (first, first_layers, extent) = attachments
         .next()
-        .expect("recording checked that rendering has an attachment");
+        .expect("recording checked that a render pass has an attachment");
     let layer_count = first_layers.len() as u32;
     for (label, layers, other_extent) in attachments {
         assert!(
@@ -210,12 +210,12 @@ pub(crate) fn render_area<'a>(
     (extent, layer_count)
 }
 
-// Rendering is plain data, recorded on any thread (design 0002,
+// A render pass is plain data, recorded on any thread (design 0002,
 // "Threading", R15).
 const _: () = {
     /// Compiles only for types that are `Send` and `Sync`.
     const fn assert_send_sync<T: Send + Sync>() {}
-    assert_send_sync::<Rendering>();
+    assert_send_sync::<RenderPassDesc>();
 };
 
 #[cfg(test)]
@@ -293,13 +293,13 @@ mod tests {
         );
     }
 
-    /// The `Rendering::colour` shorthand renders to mip 0 of layer 0, and
+    /// The `RenderPassDesc::colour` shorthand renders to mip 0 of layer 0, and
     /// stores it.
     #[test]
-    fn single_colour_renderings_use_the_first_mip_and_layer() {
+    fn single_colour_render_passes_use_the_first_mip_and_layer() {
         let expected = attachment(0, 0..1);
         assert_eq!(
-            Rendering::colour(expected.texture, LoadOp::Clear([0.0; 4])).colour,
+            RenderPassDesc::colour(expected.texture, LoadOp::Clear([0.0; 4])).colour,
             [expected],
         );
     }

@@ -18,7 +18,7 @@ use std::ops::Range;
 
 use crate::{
     Barrier, ColorAttachment, GpuAddress, MAX_COLOUR_ATTACHMENTS, MAX_PUSH_DATA_SIZE, Program,
-    Rect2d, RenderState, Rendering, TextureCopy, TextureDataLayout, Viewport,
+    Rect2d, RenderPassDesc, RenderState, TextureCopy, TextureDataLayout, Viewport,
 };
 
 /// The alignment, in bytes, of a fill's address and size, as Vulkan
@@ -60,7 +60,7 @@ pub struct CommandList {
     texture_copies: Vec<BufferTextureCopy>,
     /// Every render state set, which commands refer to by index.
     render_states: Vec<RenderState>,
-    /// Every rendering's colour attachments, which commands refer to by
+    /// Every render pass's colour attachments, which commands refer to by
     /// range.
     colour_attachments: Vec<ColorAttachment>,
     /// Every push data block, which commands refer to by range. Each
@@ -68,8 +68,8 @@ pub struct CommandList {
     push_data: Vec<u8>,
     /// Whether a program has been bound, so that dispatches can run.
     program_bound: bool,
-    /// Whether rendering is open: begun, and not yet ended.
-    rendering: bool,
+    /// Whether a render pass is open: begun, and not yet ended.
+    in_render_pass: bool,
     /// How many debug regions are open.
     open_regions: u32,
     /// How many timing scopes are open.
@@ -115,14 +115,14 @@ pub(crate) enum Command {
         /// The copy's index in the arena.
         copy: usize,
     },
-    /// Begins rendering to the colour attachments `colour_attachments` in
+    /// Begins a render pass to the colour attachments `colour_attachments` in
     /// the list's arena.
-    BeginRendering {
+    BeginRenderPass {
         /// The colour attachments, as a range of the arena.
         colour: Range<usize>,
     },
-    /// Ends rendering.
-    EndRendering,
+    /// Ends the render pass.
+    EndRenderPass,
     /// Binds `program`, for later dispatches to run.
     BindProgram {
         /// The program.
@@ -199,7 +199,7 @@ impl CommandList {
             colour_attachments: Vec::new(),
             push_data: Vec::new(),
             program_bound: false,
-            rendering: false,
+            in_render_pass: false,
             open_regions: 0,
             open_timings: 0,
         }
@@ -245,17 +245,17 @@ impl CommandList {
         &self.push_data[range.clone()]
     }
 
-    /// Checks that the list can be translated: that rendering is ended, and
+    /// Checks that the list can be translated: that no render pass is open, and
     /// every debug region and timing scope it opened is closed.
     ///
     /// # Panics
     ///
-    /// Panics, naming the list, if rendering, a region or a scope is still
+    /// Panics, naming the list, if a render pass, a region or a scope is still
     /// open.
     pub(crate) fn check_complete(&self) {
         assert!(
-            !self.rendering,
-            "command list \"{}\" is translated with rendering still open",
+            !self.in_render_pass,
+            "command list \"{}\" is translated with a render pass still open",
             self.label,
         );
         assert!(
@@ -391,58 +391,59 @@ impl CommandList {
         self.texture_copies.len() - 1
     }
 
-    /// Begins rendering to `rendering`'s attachments, which draws render to
-    /// until [`end_rendering`](Self::end_rendering) (design 0002,
+    /// Begins a render pass to `render_pass`'s attachments, which draws render to
+    /// until [`end_render_pass`](Self::end_render_pass) (design 0002,
     /// "Subresources and views"). Each attachment is loaded as it says.
     ///
     /// The attachments are checked when the list is translated, since that
-    /// needs the textures (see [`Rendering`]). Translation also panics if
+    /// needs the textures (see [`RenderPassDesc`]). Translation also panics if
     /// the queue doesn't draw: only the graphics queue does.
     ///
     /// # Panics
     ///
-    /// Panics if rendering is already open, or if `rendering` has no
+    /// Panics if a render pass is already open, or if `render_pass` has no
     /// attachments, or more than [`MAX_COLOUR_ATTACHMENTS`] colour
     /// attachments.
-    pub fn begin_rendering(&mut self, rendering: &Rendering) {
+    pub fn begin_render_pass(&mut self, render_pass: &RenderPassDesc) {
         assert!(
-            !self.rendering,
-            "command list \"{}\" begins rendering, but rendering is already open",
+            !self.in_render_pass,
+            "command list \"{}\" begins a render pass, but one is already open",
             self.label,
         );
         assert!(
-            !rendering.colour.is_empty(),
-            "command list \"{}\" begins rendering with no attachments",
+            !render_pass.colour.is_empty(),
+            "command list \"{}\" begins a render pass with no attachments",
             self.label,
         );
         assert!(
-            rendering.colour.len() <= MAX_COLOUR_ATTACHMENTS,
-            "command list \"{}\" begins rendering with {} colour attachments, but rendering has \
+            render_pass.colour.len() <= MAX_COLOUR_ATTACHMENTS,
+            "command list \"{}\" begins a render pass with {} colour attachments, but a render pass has \
              at most {MAX_COLOUR_ATTACHMENTS}",
             self.label,
-            rendering.colour.len(),
+            render_pass.colour.len(),
         );
         let start = self.colour_attachments.len();
-        self.colour_attachments.extend_from_slice(&rendering.colour);
-        self.commands.push(Command::BeginRendering {
+        self.colour_attachments
+            .extend_from_slice(&render_pass.colour);
+        self.commands.push(Command::BeginRenderPass {
             colour: start..self.colour_attachments.len(),
         });
-        self.rendering = true;
+        self.in_render_pass = true;
     }
 
-    /// Ends rendering, storing each attachment as it says.
+    /// Ends the render pass, storing each attachment as it says.
     ///
     /// # Panics
     ///
-    /// Panics if rendering isn't open.
-    pub fn end_rendering(&mut self) {
+    /// Panics if no render pass is open.
+    pub fn end_render_pass(&mut self) {
         assert!(
-            self.rendering,
-            "command list \"{}\" ends rendering, but rendering isn't open",
+            self.in_render_pass,
+            "command list \"{}\" ends a render pass, but none is open",
             self.label,
         );
-        self.rendering = false;
-        self.commands.push(Command::EndRendering);
+        self.in_render_pass = false;
+        self.commands.push(Command::EndRenderPass);
     }
 
     /// Binds `program`, for later dispatches to run, until another is
@@ -751,10 +752,10 @@ pub(crate) struct BufferTextureCopy {
 pub(crate) enum RecordedCommand<'a> {
     /// See [`CommandList::barrier`].
     Barrier(&'a [Barrier]),
-    /// See [`CommandList::begin_rendering`]: the colour attachments.
-    BeginRendering(&'a [ColorAttachment]),
-    /// See [`CommandList::end_rendering`].
-    EndRendering,
+    /// See [`CommandList::begin_render_pass`]: the colour attachments.
+    BeginRenderPass(&'a [ColorAttachment]),
+    /// See [`CommandList::end_render_pass`].
+    EndRenderPass,
     /// See [`CommandList::copy_buffer_to_texture`].
     CopyBufferToTexture(&'a BufferTextureCopy),
     /// See [`CommandList::copy_texture_to_buffer`].
@@ -842,10 +843,10 @@ impl CommandList {
                 Command::CopyTextureToBuffer { copy } => {
                     RecordedCommand::CopyTextureToBuffer(&self.texture_copies[copy])
                 }
-                Command::BeginRendering { ref colour } => {
-                    RecordedCommand::BeginRendering(&self.colour_attachments[colour.clone()])
+                Command::BeginRenderPass { ref colour } => {
+                    RecordedCommand::BeginRenderPass(&self.colour_attachments[colour.clone()])
                 }
-                Command::EndRendering => RecordedCommand::EndRendering,
+                Command::EndRenderPass => RecordedCommand::EndRenderPass,
                 Command::BindProgram { program } => RecordedCommand::BindProgram(program),
                 Command::SetRenderState { state } => {
                     RecordedCommand::SetRenderState(&self.render_states[state])
@@ -1382,97 +1383,97 @@ mod tests {
         assert_eq!(list.recorded(), [RecordedCommand::SetViewport(viewport)]);
     }
 
-    /// A rendering of a texture called `label`, with `count` colour
+    /// A render pass to a texture called `label`, with `count` colour
     /// attachments of mip 0 of layer 0, each cleared to black.
-    fn rendering(label: &str, count: usize) -> Rendering {
+    fn render_pass(label: &str, count: usize) -> RenderPassDesc {
         let texture = Texture::from_handle(HandleTable::new("texture").insert(label, ()));
-        Rendering {
+        RenderPassDesc {
             colour: vec![
-                Rendering::colour(texture, LoadOp::Clear([0.0; 4])).colour[0].clone();
+                RenderPassDesc::colour(texture, LoadOp::Clear([0.0; 4])).colour[0].clone();
                 count
             ],
         }
     }
 
-    /// Renderings are recorded in order, each with its attachments as they
-    /// were given, and a list whose rendering is ended can be translated.
+    /// Render passes are recorded in order, each with its attachments as they
+    /// were given, and a list whose render passes are ended can be translated.
     #[test]
-    fn renderings_are_recorded() {
-        let shadows = rendering("shadow map", 1);
-        let mut gbuffer = rendering("albedo", 2);
+    fn render_passes_are_recorded() {
+        let shadows = render_pass("shadow map", 1);
+        let mut gbuffer = render_pass("albedo", 2);
         gbuffer.colour[1].mip = 1;
         gbuffer.colour[1].layers = 2..4;
         gbuffer.colour[1].load = LoadOp::Load;
         gbuffer.colour[1].store = StoreOp::DontCare;
         let mut list = CommandList::new("frame");
-        list.begin_rendering(&shadows);
-        list.end_rendering();
-        list.begin_rendering(&gbuffer);
-        list.end_rendering();
+        list.begin_render_pass(&shadows);
+        list.end_render_pass();
+        list.begin_render_pass(&gbuffer);
+        list.end_render_pass();
         list.check_complete();
         assert_eq!(
             list.recorded(),
             [
-                RecordedCommand::BeginRendering(&shadows.colour),
-                RecordedCommand::EndRendering,
-                RecordedCommand::BeginRendering(&gbuffer.colour),
-                RecordedCommand::EndRendering,
+                RecordedCommand::BeginRenderPass(&shadows.colour),
+                RecordedCommand::EndRenderPass,
+                RecordedCommand::BeginRenderPass(&gbuffer.colour),
+                RecordedCommand::EndRenderPass,
             ],
         );
     }
 
-    /// Beginning rendering while it's open panics, naming the list.
+    /// Beginning a render pass while one is open panics, naming the list.
     #[test]
     #[should_panic(
-        expected = "command list \"frame\" begins rendering, but rendering is already open"
+        expected = "command list \"frame\" begins a render pass, but one is already open"
     )]
-    fn rendering_begun_twice_panics() {
+    fn render_pass_begun_twice_panics() {
         let mut list = CommandList::new("frame");
-        list.begin_rendering(&rendering("albedo", 1));
-        list.begin_rendering(&rendering("albedo", 1));
+        list.begin_render_pass(&render_pass("albedo", 1));
+        list.begin_render_pass(&render_pass("albedo", 1));
     }
 
-    /// Ending rendering that isn't open panics, naming the list.
+    /// Ending a render pass that isn't open panics, naming the list.
     #[test]
-    #[should_panic(expected = "command list \"frame\" ends rendering, but rendering isn't open")]
-    fn ending_unopened_rendering_panics() {
+    #[should_panic(expected = "command list \"frame\" ends a render pass, but none is open")]
+    fn ending_an_unopened_render_pass_panics() {
         let mut list = CommandList::new("frame");
-        list.begin_rendering(&rendering("albedo", 1));
-        list.end_rendering();
-        list.end_rendering();
+        list.begin_render_pass(&render_pass("albedo", 1));
+        list.end_render_pass();
+        list.end_render_pass();
     }
 
-    /// Translating a list with rendering still open panics, naming the
+    /// Translating a list with a render pass still open panics, naming the
     /// list.
     #[test]
-    #[should_panic(expected = "command list \"frame\" is translated with rendering still open")]
-    fn open_rendering_is_incomplete() {
+    #[should_panic(expected = "command list \"frame\" is translated with a render pass still open")]
+    fn open_render_pass_is_incomplete() {
         let mut list = CommandList::new("frame");
-        list.begin_rendering(&rendering("albedo", 1));
+        list.begin_render_pass(&render_pass("albedo", 1));
         list.check_complete();
     }
 
-    /// Rendering needs an attachment, and at most eight colour attachments.
+    /// A render pass needs an attachment, and at most eight colour attachments.
     #[test]
-    fn renderings_need_one_to_eight_colour_attachments() {
+    fn render_passes_need_one_to_eight_colour_attachments() {
         let mut list = CommandList::new("frame");
-        list.begin_rendering(&rendering("albedo", MAX_COLOUR_ATTACHMENTS));
-        list.end_rendering();
+        list.begin_render_pass(&render_pass("albedo", MAX_COLOUR_ATTACHMENTS));
+        list.end_render_pass();
         for (count, message) in [
             (
                 0,
-                "command list \"frame\" begins rendering with no attachments",
+                "command list \"frame\" begins a render pass with no attachments",
             ),
             (
                 MAX_COLOUR_ATTACHMENTS + 1,
-                "command list \"frame\" begins rendering with 9 colour attachments, but rendering \
+                "command list \"frame\" begins a render pass with 9 colour attachments, but a render pass \
                  has at most 8",
             ),
         ] {
             let panic = std::panic::catch_unwind(|| {
-                CommandList::new("frame").begin_rendering(&rendering("albedo", count));
+                CommandList::new("frame").begin_render_pass(&render_pass("albedo", count));
             })
-            .expect_err("the rendering should panic");
+            .expect_err("the render pass should panic");
             assert_eq!(panic.downcast_ref::<String>().unwrap(), message);
         }
     }

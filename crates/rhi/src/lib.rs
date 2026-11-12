@@ -50,8 +50,8 @@ mod gpu_tests;
 mod handle;
 mod program;
 mod queue;
+mod render_pass;
 mod render_state;
-mod rendering;
 mod sampler;
 #[cfg(test)]
 mod test_shaders;
@@ -80,11 +80,11 @@ pub use descriptor::{DescriptorIndex, HeapKind};
 pub use error::{RhiError, RhiResult};
 pub use program::{Program, ProgramDesc, ShaderStage};
 pub use queue::{CommandBuffer, GpuTimepoint, Queue, QueueId, SubmitDesc};
+pub use render_pass::{ColorAttachment, LoadOp, RenderPassDesc, StoreOp};
 pub use render_state::{
     Blend, BlendComponent, BlendFactor, BlendOp, ColourMask, ColourWrite, CompareOp, CullMode,
     DepthTest, FrontFace, MAX_COLOUR_ATTACHMENTS, RenderState, Topology,
 };
-pub use rendering::{ColorAttachment, LoadOp, Rendering, StoreOp};
 pub use sampler::{AddressMode, Filter, Sampler, SamplerDesc};
 pub use texture::{
     Extent3d, Format, FormatInfo, Texture, TextureDesc, TextureDimension, TextureUsage,

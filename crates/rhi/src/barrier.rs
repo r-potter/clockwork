@@ -48,9 +48,9 @@ pub enum Access {
     /// Read as a colour attachment, to load its contents or blend with
     /// them.
     ColorAttachmentRead,
-    /// Written as a colour attachment. Rendering that loads its contents or
-    /// blends with them is [`ColorAttachmentRead`](Self::ColorAttachmentRead)
-    /// too.
+    /// Written as a colour attachment. A render pass that loads its contents
+    /// or blends with them is
+    /// [`ColorAttachmentRead`](Self::ColorAttachmentRead) too.
     ColorAttachmentWrite,
     /// Depth-tested against as a depth attachment.
     DepthAttachmentRead,

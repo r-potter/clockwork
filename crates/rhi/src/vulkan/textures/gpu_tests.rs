@@ -8,7 +8,7 @@ use clockwork_diagnostics::capture::TestSession;
 use crate::vulkan::test_support::VulkanTestBackend;
 use crate::{
     ColorAttachment, CommandList, DescriptorIndex, Extent3d, Format, HeapKind, LoadOp, QueueKind,
-    RenderHardwareInterface, Rendering, RhiError, StoreOp, Subresource, Texture, TextureDesc,
+    RenderHardwareInterface, RenderPassDesc, RhiError, StoreOp, Subresource, Texture, TextureDesc,
     TextureDimension, TextureUsage, TextureView,
 };
 
@@ -218,7 +218,7 @@ fn attachment_views_are_cached() {
     };
     let render = |mip, layers| {
         let mut list = CommandList::new("render");
-        list.begin_rendering(&Rendering {
+        list.begin_render_pass(&RenderPassDesc {
             colour: vec![ColorAttachment {
                 texture,
                 mip,
@@ -227,7 +227,7 @@ fn attachment_views_are_cached() {
                 store: StoreOp::DontCare,
             }],
         });
-        list.end_rendering();
+        list.end_render_pass();
         backend.queue(QueueKind::Graphics).translate(&list).unwrap();
     };
     assert_eq!(attachment_views(), 0);
