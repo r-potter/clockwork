@@ -23,7 +23,9 @@ use super::capabilities;
 use super::descriptor_heaps::HeapLayout;
 use super::physical_device::PhysicalDevice;
 use super::surface::SurfaceSupport;
-use crate::{Capabilities, MAX_PUSH_DATA_SIZE, PresentCapabilities, QueueKind};
+use crate::{
+    Capabilities, MAX_DRAW_INDIRECT_COUNT, MAX_PUSH_DATA_SIZE, PresentCapabilities, QueueKind,
+};
 
 /// A device being considered for selection.
 pub(super) struct Candidate {
@@ -114,6 +116,16 @@ const REQUIREMENTS: &[Requirement] = &[
         // the base vertex.
         description: "supports shader draw parameters",
         is_met: |candidate| candidate.device.features.vulkan11.shader_draw_parameters == vk::TRUE,
+    },
+    Requirement {
+        // An indirect draw can run more than one draw, which needs
+        // `multiDrawIndirect`, up to a count that recording checks.
+        description: "supports multi-draw indirect",
+        is_met: |candidate| {
+            let limits = &candidate.device.properties.core.limits;
+            candidate.device.features.core.multi_draw_indirect == vk::TRUE
+                && limits.max_draw_indirect_count >= MAX_DRAW_INDIRECT_COUNT
+        },
     },
     Requirement {
         description: "supports dynamic rendering and synchronization2",
@@ -469,6 +481,7 @@ mod tests {
         let mut properties = Properties::default();
         properties.core.device_type = device_type;
         properties.core.api_version = API_VERSION;
+        properties.core.limits.max_draw_indirect_count = u32::MAX;
         for (dst, src) in properties.core.device_name.iter_mut().zip(name.bytes()) {
             *dst = src as _;
         }
@@ -494,6 +507,7 @@ mod tests {
         };
 
         let mut features = Features::default();
+        features.core.multi_draw_indirect = vk::TRUE;
         features.vulkan13.dynamic_rendering = vk::TRUE;
         features.vulkan13.synchronization2 = vk::TRUE;
         features.vulkan11.shader_draw_parameters = vk::TRUE;
@@ -737,6 +751,20 @@ mod tests {
             ),
         ];
         assert_eq!(selected_name(devices), "draw parameters");
+    }
+
+    /// A device must support multi-draw indirect, running at least
+    /// [`MAX_DRAW_INDIRECT_COUNT`] draws from one indirect draw, and
+    /// exactly that many is enough.
+    #[test]
+    fn requires_multi_draw_indirect() {
+        assert_rejected(|device| device.features.core.multi_draw_indirect = vk::FALSE);
+        assert_rejected(|device| {
+            device.properties.core.limits.max_draw_indirect_count = MAX_DRAW_INDIRECT_COUNT - 1;
+        });
+        let mut device = device("device", vk::PhysicalDeviceType::DISCRETE_GPU, 8 * GIB);
+        device.properties.core.limits.max_draw_indirect_count = MAX_DRAW_INDIRECT_COUNT;
+        assert!(select(headless(vec![device]), None).is_ok());
     }
 
     /// Descriptor heaps need both the extension and its feature (ADR 0002).

@@ -19,6 +19,12 @@
 /// recording, which needs no device, can check against it.
 pub const MAX_PUSH_DATA_SIZE: u32 = 128;
 
+/// The most draws that one indirect draw can run (design 0002, "Command
+/// lists and translation"): the least Vulkan allows a device with
+/// multi-draw indirect to support. Device selection requires at least this
+/// many, so recording, which needs no device, can check against it.
+pub const MAX_DRAW_INDIRECT_COUNT: u32 = 65_535;
+
 /// A kind of queue that work is submitted to (design 0002, "Queues and
 /// submission").
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
