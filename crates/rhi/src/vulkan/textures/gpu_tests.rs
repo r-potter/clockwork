@@ -226,6 +226,7 @@ fn attachment_views_are_cached() {
                 load: LoadOp::DontCare,
                 store: StoreOp::DontCare,
             }],
+            depth: None,
         });
         list.end_render_pass();
         backend.queue(QueueKind::Graphics).translate(&list).unwrap();

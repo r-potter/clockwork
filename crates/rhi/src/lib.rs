@@ -80,7 +80,7 @@ pub use descriptor::{DescriptorIndex, HeapKind};
 pub use error::{RhiError, RhiResult};
 pub use program::{Program, ProgramDesc, ShaderStage};
 pub use queue::{CommandBuffer, GpuTimepoint, Queue, QueueId, SubmitDesc};
-pub use render_pass::{ColorAttachment, LoadOp, RenderPassDesc, StoreOp};
+pub use render_pass::{ColorAttachment, DepthAttachment, LoadOp, RenderPassDesc, StoreOp};
 pub use render_state::{
     Blend, BlendComponent, BlendFactor, BlendOp, ColourMask, ColourWrite, CompareOp, CullMode,
     DepthTest, FrontFace, MAX_COLOUR_ATTACHMENTS, RenderState, Topology,

@@ -15,12 +15,12 @@ use crate::test_shaders;
 use crate::vulkan::test_support::{Capability, VulkanTestBackend, require_capabilities};
 use crate::{
     Access, AddressMode, Barrier, Blend, Buffer, BufferDesc, BufferUsage, ColorAttachment,
-    ColourMask, ColourWrite, CommandList, CompareOp, CullMode, DepthTest, DescriptorIndex,
-    Extent2d, Extent3d, Filter, Format, FrontFace, GpuAddress, GpuResources, LoadOp,
-    MemoryLocation, Offset2d, QueueId, QueueKind, Rect2d, RenderHardwareInterface, RenderPassDesc,
-    RenderState, SamplerDesc, StoreOp, SubmitDesc, Subresource, Texture, TextureCopy,
-    TextureDataLayout, TextureDesc, TextureDimension, TextureUsage, TextureView, Topology,
-    Viewport,
+    ColourMask, ColourWrite, CommandList, CompareOp, CullMode, DepthAttachment, DepthTest,
+    DescriptorIndex, Extent2d, Extent3d, Filter, Format, FrontFace, GpuAddress, GpuResources,
+    LoadOp, MemoryLocation, Offset2d, QueueId, QueueKind, Rect2d, RenderHardwareInterface,
+    RenderPassDesc, RenderState, SamplerDesc, StoreOp, SubmitDesc, Subresource, Texture,
+    TextureCopy, TextureDataLayout, TextureDesc, TextureDimension, TextureUsage, TextureView,
+    Topology, Viewport,
 };
 
 /// A buffer of `size` bytes in `location`, for copies.
@@ -669,8 +669,9 @@ fn only_the_graphics_queue_sets_render_state() {
 
 /// A render pass clears each colour attachment to its own clear value, a
 /// float format's to its floats and an integer format's to its integers,
-/// in the mip and layer each names, and stores it, so that copying that
-/// subresource out reads the clear value in every texel.
+/// and its depth attachment to its depth, in the mip and layer each names,
+/// and stores them, so that copying that subresource out reads the clear
+/// value in every texel.
 #[test]
 fn render_passes_clear_their_attachments() {
     let session = TestSession::new();
@@ -679,11 +680,23 @@ fn render_passes_clear_their_attachments() {
     let usage = TextureUsage::COLOUR_ATTACHMENT | TextureUsage::COPY_SOURCE;
     let float = create_texture(&**resources, "float", Format::Rgba32Float, usage);
     let integer = create_texture(&**resources, "integer", Format::R32Uint, usage);
+    let depth = create_texture(
+        &**resources,
+        "depth",
+        Format::Depth32Float,
+        TextureUsage::DEPTH_ATTACHMENT | TextureUsage::COPY_SOURCE,
+    );
     // Mip 1 of the 4×4 textures, in their second layer.
     let mip = Extent3d::new_2d(2, 2);
     let subresource = Subresource::mip_layer(1, 1);
     let float_size = 2 * 2 * 16;
     let integer_size = 2 * 2 * 4;
+    let depth_readback = create(
+        &**resources,
+        "depth texels",
+        integer_size,
+        MemoryLocation::Readback,
+    );
     let float_readback = create(
         &**resources,
         "float texels",
@@ -709,7 +722,15 @@ fn render_passes_clear_their_attachments() {
             attachment(float, LoadOp::Clear(colour)),
             attachment(integer, LoadOp::Clear([7.0, 0.0, 0.0, 0.0])),
         ],
+        depth: Some(DepthAttachment {
+            texture: depth,
+            mip: 1,
+            layers: 1..2,
+            load: LoadOp::Clear(0.5),
+            store: StoreOp::Store,
+        }),
     };
+    let depth_attachment = Access::DepthAttachmentRead | Access::DepthAttachmentWrite;
     let region = |texture| TextureCopy {
         texture,
         mip: 1,
@@ -723,10 +744,19 @@ fn render_passes_clear_their_attachments() {
     };
 
     let mut list = CommandList::new("clear");
+    let depth_barrier =
+        |before, after| Barrier::subresource(depth, subresource.clone(), before, after);
     list.barrier(&barriers(Access::None, Access::ColorAttachmentWrite));
+    list.barrier(&[depth_barrier(Access::None.into(), depth_attachment)]);
     list.begin_render_pass(&render_pass);
     list.end_render_pass();
     list.barrier(&barriers(Access::ColorAttachmentWrite, Access::CopyRead));
+    list.barrier(&[depth_barrier(depth_attachment, Access::CopyRead.into())]);
+    list.copy_texture_to_buffer(
+        region(depth),
+        resources.buffer_address(depth_readback),
+        TextureDataLayout::tightly_packed(Format::Depth32Float, mip),
+    );
     list.copy_texture_to_buffer(
         region(float),
         resources.buffer_address(float_readback),
@@ -740,6 +770,7 @@ fn render_passes_clear_their_attachments() {
     list.barrier(&[
         Barrier::buffer(float_readback, Access::CopyWrite, Access::HostRead),
         Barrier::buffer(integer_readback, Access::CopyWrite, Access::HostRead),
+        Barrier::buffer(depth_readback, Access::CopyWrite, Access::HostRead),
     ]);
     run(&backend, QueueKind::Graphics, &list);
 
@@ -752,10 +783,14 @@ fn render_passes_clear_their_attachments() {
         .read_buffer(integer_readback, 0, &mut bytes)
         .unwrap();
     assert_eq!(bytes, 7_u32.to_le_bytes().repeat(4));
-    for buffer in [float_readback, integer_readback] {
+    assert_eq!(
+        read_texels(&**resources, depth_readback, integer_size),
+        [0.5; 4]
+    );
+    for buffer in [float_readback, integer_readback, depth_readback] {
         resources.destroy_buffer(buffer);
     }
-    for texture in [float, integer] {
+    for texture in [float, integer, depth] {
         resources.destroy_texture(texture);
     }
 }

@@ -8,7 +8,10 @@ use super::VulkanDevice;
 use super::textures::TextureEntry;
 use crate::handle::HandleTable;
 use crate::render_pass::render_area;
-use crate::{Access, ColorAttachment, CommandList, Format, LoadOp, RhiResult, StoreOp};
+use crate::{
+    Access, ColorAttachment, CommandList, DepthAttachment, Format, LoadOp, RhiResult, StoreOp,
+    Texture,
+};
 
 impl<T> From<LoadOp<T>> for vk::AttachmentLoadOp {
     fn from(load: LoadOp<T>) -> Self {
@@ -50,9 +53,9 @@ fn clear_colour(format: Format, colour: [f32; 4]) -> vk::ClearColorValue {
 }
 
 impl VulkanDevice {
-    /// Records a command into `buffer` that begins a render pass to `colour`,
-    /// the colour attachments of a render pass in `list`, whose textures are
-    /// in `textures`.
+    /// Records a command into `buffer` that begins a render pass to `colour`
+    /// and `depth`, the colour and depth attachments of a render pass in
+    /// `list`, whose textures are in `textures`.
     ///
     /// # Errors
     ///
@@ -69,13 +72,14 @@ impl VulkanDevice {
     ///
     /// Panics, naming the list, if a texture is stale or can't be an
     /// attachment, if an attachment is out of range, if the attachments
-    /// differ in size or layer count, or if there are more than the device
-    /// renders to.
+    /// differ in size or layer count, or if there are more colour
+    /// attachments than the device renders to.
     pub(super) unsafe fn begin_render_pass(
         &self,
         buffer: vk::CommandBuffer,
         list: &CommandList,
         colour: &[ColorAttachment],
+        depth: Option<&DepthAttachment>,
         textures: &HandleTable<TextureEntry>,
     ) -> RhiResult<()> {
         let max_colour_attachments = self.physical_device.limits().max_color_attachments;
@@ -87,33 +91,49 @@ impl VulkanDevice {
             colour.len(),
             self.physical_device.name(),
         );
-        let resolved: Vec<_> = colour
+        let lookup = |texture: Texture| {
+            textures
+                .lookup(texture.handle())
+                .unwrap_or_else(|err| panic!("{err}"))
+        };
+        let resolved_colour: Vec<_> = colour
             .iter()
             .map(|attachment| {
-                let (label, entry) = textures
-                    .lookup(attachment.texture.handle())
-                    .unwrap_or_else(|err| panic!("{err}"));
+                let (label, entry) = lookup(attachment.texture);
                 let (layers, extent) = attachment.resolve(&entry.attached(label));
                 (label, entry, layers, extent)
             })
             .collect();
+        let resolved_depth = depth.map(|attachment| {
+            let (label, entry) = lookup(attachment.texture);
+            let (layers, extent) = attachment.resolve(&entry.attached(label));
+            (attachment, label, entry, layers, extent)
+        });
         let (extent, layer_count) = render_area(
             list.label(),
-            resolved
+            resolved_colour
                 .iter()
-                .map(|(label, _, layers, extent)| (*label, layers.clone(), *extent)),
+                .map(|(label, _, layers, extent)| (*label, layers.clone(), *extent))
+                .chain(
+                    resolved_depth
+                        .iter()
+                        .map(|(_, label, _, layers, extent)| (*label, layers.clone(), *extent)),
+                ),
         );
-        // The attachments are in the layout writing them needs, as the
+
+        // The attachments are in the layouts writing them needs, as the
         // barriers before the render pass put them.
-        let layout = vk::ImageLayout::from(
-            Access::ColorAttachmentWrite
-                .layout()
-                .expect("attachment accesses apply to textures"),
-        );
+        let layout = |access: Access| {
+            vk::ImageLayout::from(
+                access
+                    .layout()
+                    .expect("attachment accesses apply to textures"),
+            )
+        };
         let mut colour_infos = Vec::with_capacity(colour.len());
-        for (attachment, (label, entry, layers, _)) in colour.iter().zip(resolved) {
+        for (attachment, (label, entry, layers, _)) in colour.iter().zip(resolved_colour) {
             // SAFETY: The entry is in `textures`, which the caller keeps
-            // locked while the view is used, and the attachment's checks
+            // locked while the view is recorded, and the attachment's checks
             // passed, so its mip and layers are inside a texture that isn't
             // 3D.
             let view = unsafe { self.attachment_view(entry, label, attachment.mip, layers) }?;
@@ -126,13 +146,35 @@ impl VulkanDevice {
             colour_infos.push(
                 vk::RenderingAttachmentInfo::default()
                     .image_view(view)
-                    .image_layout(layout)
+                    .image_layout(layout(Access::ColorAttachmentWrite))
                     .load_op(attachment.load.into())
                     .store_op(attachment.store.into())
                     .clear_value(clear_value),
             );
         }
-        let rendering_info = vk::RenderingInfo::default()
+        let depth_info = match resolved_depth {
+            Some((attachment, label, entry, layers, _)) => {
+                // SAFETY: As above.
+                let view = unsafe { self.attachment_view(entry, label, attachment.mip, layers) }?;
+                let clear_value = match attachment.load {
+                    LoadOp::Clear(depth) => vk::ClearValue {
+                        depth_stencil: vk::ClearDepthStencilValue { depth, stencil: 0 },
+                    },
+                    LoadOp::Load | LoadOp::DontCare => vk::ClearValue::default(),
+                };
+                Some(
+                    vk::RenderingAttachmentInfo::default()
+                        .image_view(view)
+                        .image_layout(layout(Access::DepthAttachmentWrite))
+                        .load_op(attachment.load.into())
+                        .store_op(attachment.store.into())
+                        .clear_value(clear_value),
+                )
+            }
+            None => None,
+        };
+
+        let mut rendering_info = vk::RenderingInfo::default()
             .render_area(vk::Rect2D {
                 offset: vk::Offset2D::default(),
                 extent: vk::Extent2D {
@@ -142,11 +184,15 @@ impl VulkanDevice {
             })
             .layer_count(layer_count)
             .color_attachments(&colour_infos);
+        if let Some(depth_info) = &depth_info {
+            rendering_info = rendering_info.depth_attachment(depth_info);
+        }
         // SAFETY: Guaranteed by the caller, every view is of a live image,
         // since the table is locked, the render area and layer count fit
         // every attachment, as `render_area` checked, there are no more
-        // attachments than the device renders to, and `rendering_info` is
-        // valid for the call.
+        // colour attachments than the device renders to, the depth
+        // attachment's format holds depth, as its usage requires, and
+        // `rendering_info` is valid for the call.
         unsafe {
             self.device
                 .handle()

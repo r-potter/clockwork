@@ -543,7 +543,7 @@ impl VulkanDevice {
                     }
                     program_bound = Some((label, entry.is_compute()));
                 }
-                Command::BeginRenderPass { colour } => {
+                &Command::BeginRenderPass { ref colour, depth } => {
                     check_draws(list, kind, "begins a render pass");
                     // SAFETY: Guaranteed by the caller, the queue's family
                     // supports graphics, recording checked that a render pass
@@ -554,6 +554,7 @@ impl VulkanDevice {
                             buffer,
                             list,
                             list.colour_attachments(colour),
+                            depth.map(|depth| list.depth_attachment(depth)),
                             &textures,
                         )
                     }?;
