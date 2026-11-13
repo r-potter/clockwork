@@ -910,6 +910,166 @@ fn draws_render_to_the_render_pass() {
     resources.destroy_program(compute);
 }
 
+/// The triangle program draws into mip 1 of layer 2 of a 16×16 array
+/// texture with two mips and three layers, and nothing else in the texture
+/// changes (R21's `render_to_mip_and_layer`).
+///
+/// Every layer of each mip is first cleared to a marker colour by a render
+/// pass to all three layers, rather than copied into, since NVIDIA's 617.42
+/// doesn't order a copy out of an image after a copy into it (design 0002,
+/// "Risks"). The draw's render pass then clears mip 1 of layer 2, 8×8, to
+/// transparent black, and draws the triangle. Each mip of each layer is
+/// copied out: that subresource has the triangle at its centre and the
+/// clear value in its corner, and every other is still the marker colour.
+#[test]
+fn render_to_mip_and_layer() {
+    const SIZE: u32 = 16;
+    const MIPS: u32 = 2;
+    const LAYERS: u32 = 3;
+    // The mip and layer drawn into. The mip is 8×8, which
+    // `assert_triangle_centre` expects.
+    const MIP: u32 = 1;
+    const LAYER: u32 = 2;
+    const MARKER: [f32; 4] = [0.5, 0.25, 0.125, 1.0];
+    /// One mip of one layer, copied out to check.
+    struct Copied {
+        /// The mip.
+        mip: u32,
+        /// The layer.
+        layer: u32,
+        /// The mip's width and height.
+        size: u32,
+        /// Where it's copied to in the readback buffer, in bytes.
+        offset: u64,
+    }
+    let session = TestSession::new();
+    let backend = VulkanTestBackend::headless(&session);
+    let resources = backend.resources();
+    let program = resources
+        .create_program(&test_shaders::triangle().desc())
+        .unwrap();
+    let texture = resources
+        .create_texture(&TextureDesc {
+            label: "array",
+            dimension: TextureDimension::D2,
+            format: Format::Rgba32Float,
+            extent: Extent3d::new_2d(SIZE, SIZE),
+            mip_levels: MIPS,
+            array_layers: LAYERS,
+            usage: TextureUsage::COLOUR_ATTACHMENT | TextureUsage::COPY_SOURCE,
+        })
+        .unwrap();
+    // Every mip of a layer, before the next layer's.
+    let mut subresources = Vec::new();
+    let mut offset = 0;
+    for layer in 0..LAYERS {
+        for mip in 0..MIPS {
+            let size = SIZE >> mip;
+            subresources.push(Copied {
+                mip,
+                layer,
+                size,
+                offset,
+            });
+            offset += u64::from(size * size * 16);
+        }
+    }
+    let readback = create(&**resources, "readback", offset, MemoryLocation::Readback);
+    let attachment = |mip, layers, load| RenderPassDesc {
+        colour: vec![ColorAttachment {
+            texture,
+            mip,
+            layers,
+            load,
+            store: StoreOp::Store,
+        }],
+        depth: None,
+    };
+    let drawn = Extent2d {
+        width: SIZE >> MIP,
+        height: SIZE >> MIP,
+    };
+
+    let mut list = CommandList::new("mip and layer");
+    list.barrier(&[Barrier::texture(
+        texture,
+        Access::None,
+        Access::ColorAttachmentWrite,
+    )]);
+    for mip in 0..MIPS {
+        list.begin_render_pass(&attachment(mip, 0..LAYERS, LoadOp::Clear(MARKER)));
+        list.end_render_pass();
+    }
+    list.barrier(&[Barrier::subresource(
+        texture,
+        Subresource::mip_layer(MIP, LAYER),
+        Access::ColorAttachmentWrite,
+        Access::ColorAttachmentWrite,
+    )]);
+    list.bind_program(program);
+    list.set_render_state(&RenderState::default().cull(CullMode::None));
+    list.set_viewport(&Viewport::from_extent(drawn));
+    list.set_scissor(Rect2d::from_extent(drawn));
+    list.begin_render_pass(&attachment(MIP, LAYER..LAYER + 1, LoadOp::Clear([0.0; 4])));
+    list.draw(3, 1);
+    list.end_render_pass();
+    list.barrier(&[Barrier::texture(
+        texture,
+        Access::ColorAttachmentWrite,
+        Access::CopyRead,
+    )]);
+    for &Copied {
+        mip,
+        layer,
+        size,
+        offset,
+    } in &subresources
+    {
+        let extent = Extent3d::new_2d(size, size);
+        list.copy_texture_to_buffer(
+            TextureCopy {
+                texture,
+                mip,
+                layers: layer..layer + 1,
+                origin: [0; 3],
+                extent,
+            },
+            GpuAddress(resources.buffer_address(readback).0 + offset),
+            TextureDataLayout::tightly_packed(Format::Rgba32Float, extent),
+        );
+    }
+    list.barrier(&[Barrier::buffer(
+        readback,
+        Access::CopyWrite,
+        Access::HostRead,
+    )]);
+    run(&backend, QueueKind::Graphics, &list);
+
+    let texels = read_texels(&**resources, readback, offset);
+    for Copied {
+        mip,
+        layer,
+        size,
+        offset,
+    } in subresources
+    {
+        let start = (offset / 4) as usize;
+        let texels = &texels[start..start + (size * size * 4) as usize];
+        if (mip, layer) == (MIP, LAYER) {
+            assert_triangle_centre(texel(texels, size, 4, 4));
+            assert_eq!(texel(texels, size, 0, 0), [0.0; 4]);
+        } else {
+            assert!(
+                texels.chunks(4).all(|texel| texel == MARKER),
+                "mip {mip} of layer {layer} isn't all {MARKER:?}",
+            );
+        }
+    }
+    resources.destroy_buffer(readback);
+    resources.destroy_texture(texture);
+    resources.destroy_program(program);
+}
+
 /// Texel (`x`, `y`) of `Rgba32Float` texels in rows `width` texels wide,
 /// read back tightly packed.
 fn texel(texels: &[f32], width: u32, x: u32, y: u32) -> [f32; 4] {
