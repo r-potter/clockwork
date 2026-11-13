@@ -16,6 +16,7 @@ pub(super) fn derive(device: &PhysicalDevice) -> Capabilities {
         limits: Limits {
             max_texture_dimension_2d: limits.max_image_dimension2_d,
             max_compute_workgroup_size: limits.max_compute_work_group_size,
+            optimal_copy_offset_alignment: limits.optimal_buffer_copy_offset_alignment,
         },
     }
 }
@@ -107,6 +108,7 @@ mod tests {
         let limits = &mut device.properties.core.limits;
         limits.max_image_dimension2_d = 32_768;
         limits.max_compute_work_group_size = [1_024, 1_024, 64];
+        limits.optimal_buffer_copy_offset_alignment = 128;
         assert_eq!(
             derive(&device),
             Capabilities {
@@ -115,6 +117,7 @@ mod tests {
                 limits: Limits {
                     max_texture_dimension_2d: 32_768,
                     max_compute_workgroup_size: [1_024, 1_024, 64],
+                    optimal_copy_offset_alignment: 128,
                 },
             },
         );

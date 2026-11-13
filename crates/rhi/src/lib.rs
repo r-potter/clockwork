@@ -79,7 +79,7 @@ pub use capabilities::{
     QueueKind,
 };
 pub use command_list::CommandList;
-pub use copy::{TextureCopy, TextureDataLayout};
+pub use copy::{TextureCopy, TextureDataLayout, TransferGranularity};
 pub use descriptor::{DescriptorIndex, HeapKind};
 pub use error::{RhiError, RhiResult};
 pub use program::{Program, ProgramDesc, ShaderStage};
