@@ -91,7 +91,7 @@ pub use render_state::{
 };
 pub use sampler::{AddressMode, Filter, Sampler, SamplerDesc};
 pub use texture::{
-    Extent3d, Format, FormatInfo, Texture, TextureDesc, TextureDimension, TextureUsage,
+    Extent3d, Format, FormatInfo, Texture, TextureDesc, TextureDimension, TextureInfo, TextureUsage,
 };
 pub use timing::{CommandBufferTimings, SubmissionTimings, Timing};
 pub use transient::{MAX_TRANSIENT_ALIGNMENT, TransientAllocation, TransientFrame};
@@ -431,6 +431,15 @@ pub trait GpuResources: Debug + Send + Sync {
     ///
     /// Panics if the handle is stale.
     fn destroy_texture(&self, texture: Texture);
+
+    /// What the texture was created as: its shape, format, size, mips,
+    /// layers and usage. The `Uploader` uses it to decide which queue can
+    /// copy a region (design 0002, "Texture copies").
+    ///
+    /// # Panics
+    ///
+    /// Panics if the handle is stale.
+    fn texture_info(&self, texture: Texture) -> TextureInfo;
 
     /// The slot in the resource heap of `view` of the texture, for shaders
     /// to index (design 0002, "Subresources and views"). Its descriptor is

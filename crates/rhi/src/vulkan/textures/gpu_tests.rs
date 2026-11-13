@@ -347,6 +347,60 @@ fn stale_texture_handles_panic() {
     resources.destroy_texture(texture);
 }
 
+/// A texture's info is what it was created as, for each dimension, so the
+/// `Uploader` can look up a texture's format and extent.
+#[test]
+fn textures_report_what_they_were_created_as() {
+    let session = TestSession::new();
+    let backend = VulkanTestBackend::headless(&session);
+    let resources = backend.resources();
+    let descs = [
+        TextureDesc {
+            mip_levels: 3,
+            array_layers: 2,
+            format: Format::Rgba16Float,
+            ..desc_2d("layers", 8, 4)
+        },
+        TextureDesc {
+            dimension: TextureDimension::Cube,
+            array_layers: 6,
+            usage: TextureUsage::SAMPLED,
+            ..desc_2d("sky", 16, 16)
+        },
+        TextureDesc {
+            dimension: TextureDimension::D3,
+            extent: Extent3d {
+                width: 8,
+                height: 4,
+                depth: 2,
+            },
+            ..desc_2d("volume", 8, 4)
+        },
+    ];
+    for desc in descs {
+        let texture = resources.create_texture(&desc).unwrap();
+        assert_eq!(
+            resources.texture_info(texture),
+            desc.info(),
+            "{}",
+            desc.label
+        );
+        resources.destroy_texture(texture);
+    }
+}
+
+/// Looking up a destroyed texture's info panics, naming the texture.
+#[test]
+#[should_panic(expected = "stale texture handle: \"albedo\" was destroyed")]
+fn stale_texture_info_panics() {
+    let session = TestSession::new();
+    let backend = VulkanTestBackend::headless(&session);
+    let resources = backend.resources();
+    let texture = resources.create_texture(&desc_2d("albedo", 4, 4)).unwrap();
+    resources.destroy_texture(texture);
+    resources.texture_info(texture);
+}
+
 /// An invalid description panics before anything is created.
 #[test]
 #[should_panic(expected = "cube texture \"sky\" has 4 layers, not a multiple of 6")]
