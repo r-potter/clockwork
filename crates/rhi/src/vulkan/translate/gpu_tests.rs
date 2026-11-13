@@ -1066,10 +1066,13 @@ fn indexed_draws_read_their_index_buffer() {
 /// The triangle program draws indirectly into two layers of an 8×8 colour
 /// attachment, each cleared to transparent black, from the same arguments,
 /// 4 bytes into a buffer: a draw of no vertices, 16 bytes of zeros, then a
-/// draw of the triangle, 32 bytes after the first.
+/// draw of the triangle, 32 bytes after the first, from a first vertex of
+/// 3 and a first instance of 5.
 ///
 /// - layer 0: two draws 32 bytes apart, so the triangle is drawn only if
-///   the second draw's arguments are read a stride after the first's
+///   the second draw's arguments are read a stride after the first's, and
+///   `SV_VertexID` counts from 0, without the first vertex, which would
+///   name vertices past the triangle's three
 /// - layer 1: one draw, so only the first draw's arguments are read, and
 ///   nothing is drawn
 #[test]
@@ -1094,7 +1097,7 @@ fn indirect_draws_read_their_arguments() {
         .unwrap();
     // Each draw's vertex count, instance count, first vertex and first
     // instance, after 4 bytes that aren't read.
-    let arguments: Vec<u8> = [0_u32, 0, 1, 0, 0, 0, 0, 0, 0, 3, 1, 0, 0]
+    let arguments: Vec<u8> = [0_u32, 0, 1, 0, 0, 0, 0, 0, 0, 3, 1, 3, 5]
         .iter()
         .flat_map(|word| word.to_le_bytes())
         .collect();
