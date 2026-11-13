@@ -35,6 +35,26 @@ fn graphics_and_compute_queues_copy_any_region() {
     }
 }
 
+/// Each kind's queue reports the granularity of the family it was created
+/// on, including a dedicated transfer queue's, so no queue reports another
+/// family's.
+#[test]
+fn queues_report_their_familys_granularity() {
+    let session = TestSession::new();
+    let backend = VulkanTestBackend::headless(&session);
+    let core = &backend.core;
+    for kind in QueueKind::ALL {
+        let queue = backend.queue(kind);
+        let family = core.queues.family(queue.id());
+        let properties = &core.physical_device.queue_families[family as usize];
+        assert_eq!(
+            queue.transfer_granularity(),
+            super::transfer_granularity(properties.min_image_transfer_granularity),
+            "{kind:?}, on family {family}",
+        );
+    }
+}
+
 /// A submission held back by a gate, a timeline semaphore only the host
 /// signals, so the timepoint it reaches isn't reached until the gate opens.
 ///
