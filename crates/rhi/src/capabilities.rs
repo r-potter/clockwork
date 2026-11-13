@@ -14,6 +14,9 @@
 //! and whether it can write timestamps is
 //! [`Queue::timestamp_period_ns`](crate::Queue::timestamp_period_ns).
 
+use crate::Format;
+use crate::copy::required_offset_alignment;
+
 /// The most push data, in bytes, that one draw or dispatch can carry (design
 /// 0002, "Binding model"). Device selection requires at least this much, so
 /// recording, which needs no device, can check against it.
@@ -76,6 +79,7 @@ impl Capabilities {
             limits: Limits {
                 max_texture_dimension_2d: 16_384,
                 max_compute_workgroup_size: [1_024, 1_024, 64],
+                optimal_copy_offset_alignment: 64,
             },
         }
     }
@@ -88,6 +92,35 @@ pub struct Limits {
     pub max_texture_dimension_2d: u32,
     /// The largest compute workgroup, in invocations along each axis.
     pub max_compute_workgroup_size: [u32; 3],
+    /// The buffer offset alignment, in bytes, at which copies to and from
+    /// textures are fastest: a power of two, and a hint rather than a
+    /// requirement. [`copy_offset_alignment`](Self::copy_offset_alignment)
+    /// combines it with what a format needs.
+    pub optimal_copy_offset_alignment: u64,
+}
+
+impl Limits {
+    /// The alignment, in bytes, to place texture data of `format` at in a
+    /// buffer, for copies to and from textures: the least multiple of both
+    /// what every copy of the format needs and
+    /// [`optimal_copy_offset_alignment`](Self::optimal_copy_offset_alignment)
+    /// (design 0002, "Texture copies").
+    pub const fn copy_offset_alignment(&self, format: Format) -> u64 {
+        lcm(
+            required_offset_alignment(format.info()),
+            self.optimal_copy_offset_alignment,
+        )
+    }
+}
+
+/// The least common multiple of `a` and `b`, which aren't 0, in a
+/// `const fn`.
+const fn lcm(a: u64, b: u64) -> u64 {
+    let (mut x, mut y) = (a, b);
+    while y != 0 {
+        (x, y) = (y, x % y);
+    }
+    a / x * b
 }
 
 /// What presenting to a window can do on the selected device. It describes
@@ -132,7 +165,7 @@ pub(crate) fn summary(capabilities: &Capabilities, present: &PresentCapabilities
 
 #[cfg(test)]
 mod tests {
-    //! T0 tests of the capability summary.
+    //! T0 tests of the capability summary and copy offset alignments.
 
     use super::*;
 
@@ -186,5 +219,37 @@ mod tests {
             summary(&none(), &present),
             "lacks present timing, swapchain maintenance, BC compression",
         );
+    }
+
+    /// The limits of a device whose optimal copy offset alignment is
+    /// `optimal` bytes.
+    fn limits(optimal: u64) -> Limits {
+        Limits {
+            optimal_copy_offset_alignment: optimal,
+            ..Capabilities::for_tests(true).limits
+        }
+    }
+
+    /// A copy's offset alignment is the optimal one where that's a multiple
+    /// of what the format needs, and what the format needs where the
+    /// optimal one is finer.
+    #[test]
+    fn copy_offset_alignments_suit_the_device_and_format() {
+        assert_eq!(limits(64).copy_offset_alignment(Format::Rgba8Unorm), 64);
+        assert_eq!(limits(64).copy_offset_alignment(Format::Bc7Unorm), 64);
+        assert_eq!(limits(1).copy_offset_alignment(Format::Rgba32Float), 16);
+        assert_eq!(limits(1).copy_offset_alignment(Format::Depth32Float), 4);
+        assert_eq!(limits(4).copy_offset_alignment(Format::Bc1RgbaSrgb), 8);
+    }
+
+    /// The alignment is a multiple of both when neither divides the other,
+    /// which Vulkan's powers of two never cause, but a format of three
+    /// 32-bit channels would.
+    #[test]
+    fn copy_offset_alignments_are_common_multiples() {
+        assert_eq!(lcm(12, 8), 24);
+        assert_eq!(lcm(8, 12), 24);
+        assert_eq!(lcm(16, 64), 64);
+        assert_eq!(lcm(1, 1), 1);
     }
 }

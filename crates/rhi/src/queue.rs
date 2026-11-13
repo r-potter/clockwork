@@ -15,7 +15,7 @@ use std::fmt::{self, Debug};
 use std::sync::Arc;
 
 use crate::vulkan::VulkanCommandBuffer;
-use crate::{CommandList, QueueKind, RhiResult, SubmissionTimings};
+use crate::{CommandList, QueueKind, RhiResult, SubmissionTimings, TransferGranularity};
 
 /// Which of the backend's queues something is on, as [`Queue::id`] returns.
 /// Kinds that share a queue share its ID.
@@ -115,6 +115,11 @@ pub trait Queue: Debug + Send + Sync {
     /// `None` if it can't write timestamps (design 0002, "Timestamps").
     /// Device selection requires the graphics queue to write them.
     fn timestamp_period_ns(&self) -> Option<f32>;
+
+    /// The texture regions this queue can copy (design 0002, "Texture
+    /// copies"). Graphics and compute queues can copy any region, but a
+    /// dedicated transfer queue may only copy coarser ones.
+    fn transfer_granularity(&self) -> TransferGranularity;
 
     /// Translates `commands` into a command buffer for this queue. May be
     /// called on any thread, any number at once.

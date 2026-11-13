@@ -16,7 +16,24 @@ use super::lock;
 use crate::vulkan::test_support::VulkanTestBackend;
 use crate::{
     GpuTimepoint, QueueId, QueueKind, RenderHardwareInterface, SubmissionTimings, SubmitDesc,
+    TransferGranularity,
 };
+
+/// The graphics and compute queues copy any region, as Vulkan requires of
+/// families that can draw or dispatch, so only a dedicated transfer queue
+/// sends uploads of partial regions to the graphics queue.
+#[test]
+fn graphics_and_compute_queues_copy_any_region() {
+    let session = TestSession::new();
+    let backend = VulkanTestBackend::headless(&session);
+    for kind in [QueueKind::Graphics, QueueKind::Compute] {
+        assert_eq!(
+            backend.queue(kind).transfer_granularity(),
+            TransferGranularity::ANY,
+            "{kind:?}",
+        );
+    }
+}
 
 /// A submission held back by a gate, a timeline semaphore only the host
 /// signals, so the timepoint it reaches isn't reached until the gate opens.
