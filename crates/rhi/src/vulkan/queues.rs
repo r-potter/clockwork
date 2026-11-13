@@ -45,7 +45,7 @@ use super::translate::VulkanCommandBuffer;
 use crate::timing::{RetainedTimings, TimestampClock};
 use crate::{
     CommandBuffer, CommandList, GpuTimepoint, Queue, QueueId, QueueKind, RhiResult,
-    SubmissionTimings, SubmitDesc,
+    SubmissionTimings, SubmitDesc, TransferGranularity,
 };
 
 /// What a queue is used for: one kind's work, or presenting.
@@ -246,6 +246,8 @@ struct DeviceQueue {
     /// Its family's timestamp counter, or `None` if the family can't write
     /// timestamps.
     clock: Option<TimestampClock>,
+    /// The texture regions its family can copy.
+    granularity: TransferGranularity,
     /// A timeline semaphore, signalled with the number of each submission.
     timeline: vk::Semaphore,
     /// The number of the last submission, so the value its completion
@@ -276,9 +278,10 @@ impl Queues {
         };
         let period_ns = physical_device.limits().timestamp_period;
         for &(family, role) in &layout.queues {
-            let valid_bits = physical_device.queue_families[family as usize].timestamp_valid_bits;
-            let clock = TimestampClock::new(valid_bits, period_ns);
-            if let Err(err) = queues.add(device, role, family, clock) {
+            let properties = &physical_device.queue_families[family as usize];
+            let clock = TimestampClock::new(properties.timestamp_valid_bits, period_ns);
+            let granularity = transfer_granularity(properties.min_image_transfer_granularity);
+            if let Err(err) = queues.add(device, role, family, clock, granularity) {
                 // SAFETY: Nothing has been submitted to wait on or signal
                 // the timelines created so far.
                 unsafe { queues.destroy(device.handle()) };
@@ -289,7 +292,8 @@ impl Queues {
     }
 
     /// Adds the next queue, of `family`, which `role` owns, with a timeline
-    /// named after it, and the family's timestamp counter, `clock`.
+    /// named after it, and the family's timestamp counter, `clock`, and
+    /// transfer granularity, `granularity`.
     ///
     /// # Errors
     ///
@@ -300,6 +304,7 @@ impl Queues {
         role: QueueRole,
         family: u32,
         clock: Option<TimestampClock>,
+        granularity: TransferGranularity,
     ) -> Result<()> {
         let mut type_create_info = vk::SemaphoreTypeCreateInfo::default()
             .semaphore_type(vk::SemaphoreType::TIMELINE)
@@ -314,6 +319,7 @@ impl Queues {
             role,
             family,
             clock,
+            granularity,
             timeline,
             submitted: AtomicU64::new(0),
             pools: CommandPools::new(family),
@@ -349,6 +355,11 @@ impl Queues {
     /// timestamps.
     pub(super) fn clock(&self, id: QueueId) -> Option<TimestampClock> {
         self.queue(id).clock
+    }
+
+    /// The texture regions the queue `id` can copy.
+    pub(super) fn granularity(&self, id: QueueId) -> TransferGranularity {
+        self.queue(id).granularity
     }
 
     /// The queue `id`.
@@ -679,6 +690,24 @@ fn lock(queue: &Mutex<vk::Queue>) -> MutexGuard<'_, vk::Queue> {
     queue.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
+/// The texture regions a family with `minImageTransferGranularity`
+/// `granularity` can copy: Vulkan reports `(0, 0, 0)` for a family that
+/// copies only whole mips, and otherwise a power of two in each dimension,
+/// counted in texel blocks for block-compressed formats. Pure, so it's
+/// tested without a GPU.
+fn transfer_granularity(granularity: vk::Extent3D) -> TransferGranularity {
+    let vk::Extent3D {
+        width,
+        height,
+        depth,
+    } = granularity;
+    if width == 0 || height == 0 || depth == 0 {
+        TransferGranularity::WholeMips
+    } else {
+        TransferGranularity::Blocks([width, height, depth])
+    }
+}
+
 /// Locks a queue's kept timings, recovering them if a thread panicked while
 /// holding them: each call leaves them consistent before it can panic.
 fn lock_timings(
@@ -716,6 +745,10 @@ impl Queue for VulkanQueue {
             .queues
             .clock(self.id)
             .map(TimestampClock::period_ns)
+    }
+
+    fn transfer_granularity(&self) -> TransferGranularity {
+        self.core.queues.granularity(self.id)
     }
 
     fn translate(&self, commands: &CommandList) -> RhiResult<CommandBuffer> {
@@ -771,6 +804,29 @@ mod tests {
         transfer: 0,
         present: None,
     };
+
+    /// A family that reports a granularity of zero copies only whole mips,
+    /// and any other granularity is kept as it is, in blocks.
+    #[test]
+    fn granularities_come_from_the_family() {
+        let extent = |width, height, depth| vk::Extent3D {
+            width,
+            height,
+            depth,
+        };
+        assert_eq!(
+            transfer_granularity(extent(0, 0, 0)),
+            TransferGranularity::WholeMips
+        );
+        assert_eq!(
+            transfer_granularity(extent(1, 1, 1)),
+            TransferGranularity::ANY
+        );
+        assert_eq!(
+            transfer_granularity(extent(8, 8, 4)),
+            TransferGranularity::Blocks([8, 8, 4])
+        );
+    }
 
     /// The queue `role` uses in `layout`, as its family and the role it's
     /// named after.
