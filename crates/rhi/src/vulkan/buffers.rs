@@ -29,7 +29,9 @@ use ash::vk;
 use super::VulkanDevice;
 use super::destruction::Retired;
 use super::error::{error, error_from_chain};
-use super::memory::{MemoryAllocation, MemoryRequest, Resource, buffer_memory_requirements};
+use super::memory::{
+    MappedPointer, MemoryAllocation, MemoryRequest, Resource, buffer_memory_requirements,
+};
 use crate::handle::HandleTable;
 use crate::{Buffer, BufferDesc, BufferUsage, GpuAddress, MemoryLocation, RhiError, RhiResult};
 
@@ -54,6 +56,22 @@ impl BufferEntry {
     /// The buffer itself, for commands that name it.
     pub(super) fn buffer(&self) -> vk::Buffer {
         self.buffer
+    }
+
+    /// The buffer's address on the GPU.
+    pub(super) fn address(&self) -> GpuAddress {
+        self.address
+    }
+
+    /// The buffer's size, as created, in bytes.
+    pub(super) fn size(&self) -> u64 {
+        self.size
+    }
+
+    /// Where the buffer's memory is mapped, if it's in upload or readback
+    /// memory. The mapping lasts as long as the buffer.
+    pub(super) fn mapped(&self) -> Option<MappedPointer> {
+        self.allocation.mapped()
     }
 }
 
@@ -89,7 +107,32 @@ impl VulkanDevice {
     ///
     /// Panics if the description is invalid (see [`BufferDesc::validate`]).
     pub(super) fn create_buffer_entry(&self, desc: &BufferDesc<'_>) -> RhiResult<Buffer> {
+        let entry = self.create_buffer_object(desc, 1)?;
+        Ok(Buffer::from_handle(
+            self.lock_buffers_for_writing().insert(desc.label, entry),
+        ))
+    }
+
+    /// Creates a buffer for `desc`, at an address that's a multiple of
+    /// `alignment` as well as of what the driver requires, and binds it to
+    /// memory in its location, without adding it to the buffer table, as
+    /// transient chunks are kept.
+    ///
+    /// # Errors
+    ///
+    /// As [`create_buffer_entry`](Self::create_buffer_entry).
+    ///
+    /// # Panics
+    ///
+    /// Panics if the description is invalid (see [`BufferDesc::validate`]),
+    /// or `alignment` isn't a power of two.
+    pub(super) fn create_buffer_object(
+        &self,
+        desc: &BufferDesc<'_>,
+        alignment: u64,
+    ) -> RhiResult<BufferEntry> {
         desc.validate();
+        assert!(alignment.is_power_of_two());
         let device = self.device.handle();
         let buffer_create_info = vk::BufferCreateInfo::default()
             .size(desc.size)
@@ -103,7 +146,9 @@ impl VulkanDevice {
         self.device.set_object_name(buffer, desc.label);
 
         // SAFETY: `buffer` was just created on `device`.
-        let (requirements, dedication) = unsafe { buffer_memory_requirements(device, buffer) };
+        let (mut requirements, dedication) = unsafe { buffer_memory_requirements(device, buffer) };
+        // Both are powers of two, so the larger is a multiple of the other.
+        requirements.alignment = requirements.alignment.max(alignment);
         let allocation = match self.allocator.allocate(&MemoryRequest {
             label: desc.label,
             resource: Resource::Buffer(buffer),
@@ -135,17 +180,14 @@ impl VulkanDevice {
         // and is bound to memory allocated with `DEVICE_ADDRESS`.
         let address = GpuAddress(unsafe { device.get_buffer_device_address(&address_info) });
 
-        let entry = BufferEntry {
+        Ok(BufferEntry {
             buffer,
             allocation,
             address,
             size: desc.size,
             location: desc.location,
             mapping: Mutex::new(()),
-        };
-        Ok(Buffer::from_handle(
-            self.lock_buffers_for_writing().insert(desc.label, entry),
-        ))
+        })
     }
 
     /// Removes `buffer` from the table, and retires it, to be destroyed and

@@ -1,9 +1,9 @@
 //! The pool of transient chunks a backend keeps for reuse, and how large it
 //! may grow (design 0002, "Transient memory", R23).
 //!
-//! Frames take chunks of [`CHUNK_SIZE`] from the pool, which creates them
-//! through the backend when it has none free, and the chunks come back to
-//! it once nothing can use them. The pool counts the chunks taken and not
+//! Frames take chunks of [`CHUNK_SIZE`] from the pool, or from the backend,
+//! which creates them when the pool has none free, outside the pool's lock,
+//! and the chunks come back to the pool once nothing can use them. The pool counts the chunks taken and not
 //! yet back as in use: those of the frame being recorded, and of the frames
 //! still in flight.
 //!
@@ -41,13 +41,6 @@ pub(crate) struct ChunkPool<C> {
     next: usize,
 }
 
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "the Vulkan backend keeps its chunks in a pool in a later PR"
-    )
-)]
 impl<C> ChunkPool<C> {
     /// An empty pool, as though the last [`RECENT_FRAMES`] frames used
     /// nothing.
@@ -60,20 +53,21 @@ impl<C> ChunkPool<C> {
         }
     }
 
-    /// A free chunk, the one most recently recycled, or a new one from
-    /// `create` if none is free. Either way, the chunk is in use until it's
-    /// recycled.
-    ///
-    /// # Errors
-    ///
-    /// Returns `create`'s error, with nothing taken.
-    pub(crate) fn take<E>(&mut self, create: impl FnOnce() -> Result<C, E>) -> Result<C, E> {
-        let chunk = match self.free.pop() {
-            Some(chunk) => chunk,
-            None => create()?,
-        };
+    /// A free chunk, the one most recently recycled, in use until it's
+    /// recycled, or `None` if none is free, for the backend to create one,
+    /// without holding the pool meanwhile, and count it with
+    /// [`created`](Self::created).
+    pub(crate) fn take(&mut self) -> Option<C> {
+        let chunk = self.free.pop()?;
         self.in_use += 1;
-        Ok(chunk)
+        Some(chunk)
+    }
+
+    /// Counts a chunk the backend created, after [`take`](Self::take) found
+    /// none free, as in use until it's recycled. A chunk that couldn't be
+    /// created isn't counted.
+    pub(crate) fn created(&mut self) {
+        self.in_use += 1;
     }
 
     /// Records that a frame ended, with the chunks in use then. Returns the
@@ -111,6 +105,7 @@ impl<C> ChunkPool<C> {
     }
 
     /// How many chunks are free.
+    #[cfg(test)]
     pub(crate) fn free_len(&self) -> usize {
         self.free.len()
     }
@@ -135,8 +130,6 @@ impl<C> ChunkPool<C> {
 mod tests {
     //! T0 tests of the chunk pool's reuse and size (design 0002, R23).
 
-    use std::convert::Infallible;
-
     use super::*;
 
     /// The frame loop the tests model, numbering the chunks it creates from
@@ -160,13 +153,11 @@ mod tests {
         /// Takes a chunk from the pool, creating the next one if it has
         /// none free.
         fn take(&mut self) -> u32 {
-            let created = &mut self.created;
-            self.pool
-                .take(|| {
-                    *created += 1;
-                    Ok::<_, Infallible>(*created)
-                })
-                .unwrap()
+            self.pool.take().unwrap_or_else(|| {
+                self.created += 1;
+                self.pool.created();
+                self.created
+            })
         }
 
         /// Runs a frame that takes `used` chunks and ends. Returns its
@@ -195,12 +186,12 @@ mod tests {
         assert_eq!(frames.take(), 3);
     }
 
-    /// A chunk that can't be created is an error, with nothing counted as
-    /// in use.
+    /// Finding no free chunk counts nothing as in use, so a chunk the
+    /// backend then fails to create isn't counted.
     #[test]
-    fn creation_errors_take_nothing() {
+    fn failed_creations_count_nothing() {
         let mut pool = ChunkPool::<u32>::new();
-        assert_eq!(pool.take(|| Err("out of memory")), Err("out of memory"));
+        assert_eq!(pool.take(), None);
         assert_eq!(pool.frame_ended(), NONE);
         assert_eq!(pool.limit(), 0);
     }

@@ -505,6 +505,22 @@ pub trait GpuResources: Debug + Send + Sync {
     /// does this too, so call it once a frame to free objects while nothing
     /// is being submitted.
     fn collect_garbage(&self);
+
+    /// Starts a frame's transient allocations: memory that every thread
+    /// recording the frame can allocate from and write, for the GPU to read
+    /// in that frame (design 0002, "Transient memory").
+    fn begin_transient_frame(&self) -> TransientFrame;
+
+    /// Ends the frame. Its memory is reused once nothing translated before
+    /// now is outstanding, so every list that uses its allocations must
+    /// already be translated: memory a list translated later reads may
+    /// have been overwritten by another frame. Dropping a frame ends it the
+    /// same way.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the frame was begun on another device.
+    fn end_transient_frame(&self, frame: TransientFrame);
 }
 
 // The resources are shared between threads, as an `Arc<dyn GpuResources>`

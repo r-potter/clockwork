@@ -108,13 +108,6 @@ pub(crate) unsafe trait ChunkSource: Debug + Send + Sync {
 
 /// The chunks a frame took, given back to its source when it ends.
 #[derive(Debug)]
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "the Vulkan backend's source reads the chunks in a later PR"
-    )
-)]
 pub(crate) struct RetiredChunks {
     /// Its chunks of [`CHUNK_SIZE`], in the order it took them, for the
     /// source's pool to reuse. How many there are is how many the frame
@@ -203,13 +196,6 @@ pub struct TransientFrame {
 
 impl TransientFrame {
     /// A frame with no chunks yet, taking them from `source`.
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "`GpuResources::begin_transient_frame` begins frames in a later PR"
-        )
-    )]
     pub(crate) fn new(source: Arc<dyn ChunkSource>) -> Self {
         Self {
             source,
@@ -326,6 +312,12 @@ impl TransientFrame {
     /// The chunk of [`CHUNK_SIZE`] at `index`, if the frame has taken it.
     fn chunk(&self, index: usize) -> Option<&CurrentChunk> {
         self.segments.get(index / SEGMENT_LEN)?.get()?[index % SEGMENT_LEN].get()
+    }
+
+    /// Whether the frame takes its chunks from `source`, so that a backend
+    /// can check a frame ended on it was begun on it.
+    pub(crate) fn is_from(&self, source: &dyn ChunkSource) -> bool {
+        std::ptr::addr_eq(Arc::as_ptr(&self.source), source)
     }
 
     /// How many chunks of [`CHUNK_SIZE`] the frame has taken.
@@ -640,6 +632,16 @@ mod tests {
         let state = source.state();
         assert_eq!(state.retired, [(vec![1 << 32, 2 << 32], vec![3 << 32])]);
         assert!(state.memory.is_empty());
+    }
+
+    /// A frame knows the source it takes chunks from, and no other.
+    #[test]
+    fn frames_know_their_source() {
+        let source = FakeSource::new();
+        let other = FakeSource::new();
+        let frame = TransientFrame::new(source.clone());
+        assert!(frame.is_from(&*source));
+        assert!(!frame.is_from(&*other));
     }
 
     /// Writes through an allocation reach the chunk's memory at its offset.
