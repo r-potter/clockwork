@@ -12,10 +12,15 @@
 //! never becomes current.
 //!
 //! When the frame ends, or is dropped, its chunks go back to the source,
-//! which retires them until nothing translated in the frame is outstanding.
+//! which retires them until nothing translated in the frame is outstanding,
+//! then keeps those of [`CHUNK_SIZE`] in its [`ChunkPool`](pool::ChunkPool)
+//! for later frames. A frame that used no chunks ends too, so that the pool
+//! sees every frame.
 //!
 //! The frame is pure logic over chunks the source describes, so it's tested
 //! with a fake source over host memory.
+
+pub(crate) mod pool;
 
 use std::fmt::{self, Debug};
 use std::marker::PhantomData;
@@ -91,7 +96,33 @@ pub(crate) unsafe trait ChunkSource: Debug + Send + Sync {
 
     /// Takes back the chunks of a frame that has ended, to reuse once
     /// nothing translated before now is outstanding.
-    fn retire_chunks(&self, chunks: Vec<TransientChunk>);
+    ///
+    /// Called once for every frame, even one that took no chunks, so that
+    /// the source can record the frame's end with its pool's
+    /// [`frame_ended`](pool::ChunkPool::frame_ended) at once. Only the
+    /// chunks wait for the deferred-destruction queue, and a frame with
+    /// none needs nothing retired there, where each retirement ends an
+    /// epoch.
+    fn retire_chunks(&self, retired: RetiredChunks);
+}
+
+/// The chunks a frame took, given back to its source when it ends.
+#[derive(Debug)]
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "the Vulkan backend's source reads the chunks in a later PR"
+    )
+)]
+pub(crate) struct RetiredChunks {
+    /// Its chunks of [`CHUNK_SIZE`], in the order it took them, for the
+    /// source's pool to reuse. How many there are is how many the frame
+    /// used.
+    pub(crate) chunks: Vec<TransientChunk>,
+    /// The chunks of its allocations larger than [`CHUNK_SIZE`], for the
+    /// source to free.
+    pub(crate) large: Vec<TransientChunk>,
 }
 
 /// Checks that a chunk taken for `size` bytes is as large and as aligned as
@@ -274,7 +305,7 @@ impl TransientFrame {
     }
 
     /// Gives the frame's chunks back to its source, as ending or dropping it
-    /// does.
+    /// does, even if it took none.
     fn retire(&mut self) {
         let large = mem::take(
             self.taking
@@ -283,16 +314,13 @@ impl TransientFrame {
         );
         // Only the segments the frame used are allocated, so this walks
         // only their slots.
-        let chunks: Vec<TransientChunk> = mem::take(&mut self.segments)
+        let chunks = mem::take(&mut self.segments)
             .into_iter()
             .filter_map(OnceLock::into_inner)
             .flat_map(|segment| *segment)
             .filter_map(|slot| slot.into_inner().map(|current| current.chunk))
-            .chain(large)
             .collect();
-        if !chunks.is_empty() {
-            self.source.retire_chunks(chunks);
-        }
+        self.source.retire_chunks(RetiredChunks { chunks, large });
     }
 
     /// The chunk of [`CHUNK_SIZE`] at `index`, if the frame has taken it.
@@ -436,8 +464,9 @@ mod tests {
         memory: HashMap<u64, Box<[u8]>>,
         /// The size of each chunk ever handed out, in order.
         taken: Vec<u64>,
-        /// The addresses of the chunks taken back, in each retirement.
-        retired: Vec<Vec<u64>>,
+        /// The addresses of the chunks of [`CHUNK_SIZE`] and the large
+        /// chunks taken back, in each retirement.
+        retired: Vec<(Vec<u64>, Vec<u64>)>,
         /// Fail every take after this many, if set.
         fail_after: Option<usize>,
         /// Hand out chunks with no memory behind them, for tests that take
@@ -510,13 +539,16 @@ mod tests {
         /// Records the chunks' addresses as one retirement, and frees their
         /// memory, so a later write through them would be caught by Miri or
         /// a sanitizer rather than passing.
-        fn retire_chunks(&self, chunks: Vec<TransientChunk>) {
+        fn retire_chunks(&self, retired: RetiredChunks) {
             let mut state = self.state();
-            let addresses = chunks.iter().map(|chunk| chunk.address.0).collect();
-            for chunk in &chunks {
+            let addresses = |chunks: &[TransientChunk]| -> Vec<u64> {
+                chunks.iter().map(|chunk| chunk.address.0).collect()
+            };
+            let entry = (addresses(&retired.chunks), addresses(&retired.large));
+            for chunk in retired.chunks.iter().chain(&retired.large) {
                 state.memory.remove(&chunk.address.0);
             }
-            state.retired.push(addresses);
+            state.retired.push(entry);
         }
     }
 
@@ -544,14 +576,15 @@ mod tests {
         assert_eq!(source.state().taken, [CHUNK_SIZE]);
     }
 
-    /// A frame takes no chunk until its first allocation.
+    /// A frame takes no chunk until its first allocation, and one that took
+    /// none still ends, so that the source's pool counts it.
     #[test]
     fn frames_take_chunks_when_first_used() {
         let source = FakeSource::new();
         let frame = TransientFrame::new(source.clone());
         assert!(source.state().taken.is_empty());
         drop(frame);
-        assert!(source.state().retired.is_empty());
+        assert_eq!(source.state().retired, [(vec![], vec![])]);
     }
 
     /// An allocation that doesn't fit in what's left of the chunk moves to a
@@ -593,8 +626,9 @@ mod tests {
         assert_eq!(source.state().taken, [CHUNK_SIZE, CHUNK_SIZE + 1]);
     }
 
-    /// Ending a frame, by dropping it, gives back every chunk it took, large
-    /// ones included, once.
+    /// Ending a frame, by dropping it, gives back every chunk it took, once,
+    /// with large ones apart, since the source frees them rather than
+    /// keeping them.
     #[test]
     fn ending_a_frame_retires_its_chunks() {
         let source = FakeSource::new();
@@ -604,7 +638,7 @@ mod tests {
         frame.allocate(2 * CHUNK_SIZE, 1).unwrap();
         drop(frame);
         let state = source.state();
-        assert_eq!(state.retired, [vec![1 << 32, 2 << 32, 3 << 32]]);
+        assert_eq!(state.retired, [(vec![1 << 32, 2 << 32], vec![3 << 32])]);
         assert!(state.memory.is_empty());
     }
 
