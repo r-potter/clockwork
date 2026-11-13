@@ -337,7 +337,39 @@ pub struct TextureDesc<'a> {
     pub usage: TextureUsage,
 }
 
+/// What a texture was created as: its description without the label, which
+/// [`GpuResources::texture_info`] returns.
+///
+/// [`GpuResources::texture_info`]: crate::GpuResources::texture_info
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct TextureInfo {
+    /// Its shape.
+    pub dimension: TextureDimension,
+    /// Its texel format.
+    pub format: Format,
+    /// Its size, in texels, at mip 0.
+    pub extent: Extent3d,
+    /// The number of mips.
+    pub mip_levels: u32,
+    /// The number of layers.
+    pub array_layers: u32,
+    /// How it's used.
+    pub usage: TextureUsage,
+}
+
 impl TextureDesc<'_> {
+    /// The description without its label.
+    pub const fn info(&self) -> TextureInfo {
+        TextureInfo {
+            dimension: self.dimension,
+            format: self.format,
+            extent: self.extent,
+            mip_levels: self.mip_levels,
+            array_layers: self.array_layers,
+            usage: self.usage,
+        }
+    }
+
     /// Checks that the description is valid on a device with
     /// `capabilities`, as [`GpuResources::create_texture`] requires.
     ///
@@ -434,6 +466,7 @@ const _: () = {
     const fn assert_send_sync<T: Send + Sync>() {}
     assert_send_sync::<Texture>();
     assert_send_sync::<TextureDesc<'_>>();
+    assert_send_sync::<TextureInfo>();
 };
 
 #[cfg(test)]
@@ -606,6 +639,27 @@ mod tests {
                 "texture \"albedo\" has the block-compressed format Bc1RgbaSrgb with usage",
             );
         }
+    }
+
+    /// A description's info is every field but the label.
+    #[test]
+    fn infos_keep_all_but_the_label() {
+        let desc = TextureDesc {
+            dimension: TextureDimension::Cube,
+            array_layers: 12,
+            ..test_desc()
+        };
+        assert_eq!(
+            desc.info(),
+            TextureInfo {
+                dimension: TextureDimension::Cube,
+                format: Format::Rgba8Srgb,
+                extent: Extent3d::new_2d(256, 256),
+                mip_levels: 9,
+                array_layers: 12,
+                usage: TextureUsage::SAMPLED | TextureUsage::COPY_DESTINATION,
+            },
+        );
     }
 
     /// Valid descriptions of each dimension pass.
