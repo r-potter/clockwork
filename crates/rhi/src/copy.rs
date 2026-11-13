@@ -139,11 +139,13 @@ pub(crate) fn check_texture_copy(
         );
     }
     for axis in 0..2 {
-        let block = format.block_extent[axis];
-        let reaches_edge = copy.origin[axis] + extents[axis] == sizes[axis];
         assert!(
-            copy.origin[axis].is_multiple_of(block)
-                && (extents[axis].is_multiple_of(block) || reaches_edge),
+            aligned_or_reaches_edge(
+                copy.origin[axis],
+                extents[axis],
+                sizes[axis],
+                u64::from(format.block_extent[axis]),
+            ),
             "a copy of texture \"{label}\" at {:?}, of {:?}, isn't aligned to its {}×{} blocks",
             copy.origin,
             copy.extent,
@@ -195,6 +197,16 @@ pub(crate) fn check_texture_copy(
     })
 }
 
+/// Whether a region along one axis of a mip of `size` texels, from `origin`
+/// for `extent` texels, starts at a multiple of `unit` texels, and either
+/// is a multiple of it long or reaches the mip's edge: the rule Vulkan
+/// gives both block-compressed copies and transfer granularities.
+fn aligned_or_reaches_edge(origin: u32, extent: u32, size: u32, unit: u64) -> bool {
+    let (origin, extent) = (u64::from(origin), u64::from(extent));
+    origin.is_multiple_of(unit)
+        && (extent.is_multiple_of(unit) || origin + extent == u64::from(size))
+}
+
 /// The alignment every copy's buffer offset needs for `format`: its block
 /// size in bytes, and at least 4 for a depth format.
 pub(crate) const fn required_offset_alignment(format: FormatInfo) -> u64 {
@@ -215,6 +227,8 @@ pub enum TransferGranularity {
     /// Regions whose origin, along each axis, is a multiple of this many
     /// texel blocks, and whose extent is too, or reaches the edge of the
     /// mip. Each is a power of two, and `[1, 1, 1]` allows any region.
+    /// Vulkan's `(0, 0, 0)` is [`WholeMips`](Self::WholeMips), not
+    /// `Blocks`.
     Blocks([u32; 3]),
     /// Only whole mips.
     WholeMips,
@@ -229,23 +243,34 @@ impl TransferGranularity {
     ///
     /// A region it can't copy can still be copied on a queue that allows
     /// any region, such as the graphics queue. A whole mip is always
-    /// allowed.
+    /// allowed. The rest of the copy, such as its layers and whether it
+    /// stays inside the mip, is checked when it's translated.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `copy.mip` is past the last mip a texture of `extent` can
+    /// have, or if a granularity in `Blocks` isn't a power of two.
     pub fn allows(self, format: Format, extent: Extent3d, copy: &TextureCopy) -> bool {
+        assert!(
+            copy.mip < extent.max_mip_count(),
+            "a copy of mip {} can't be of a texture whose largest mip is {extent:?}",
+            copy.mip,
+        );
         let mip = mip_extent(extent, copy.mip);
-        let sizes = [mip.width, mip.height, mip.depth].map(u64::from);
-        let origin = copy.origin.map(u64::from);
-        let extents = [copy.extent.width, copy.extent.height, copy.extent.depth].map(u64::from);
+        let sizes = [mip.width, mip.height, mip.depth];
+        let extents = [copy.extent.width, copy.extent.height, copy.extent.depth];
         let [block_width, block_height] = format.info().block_extent;
-        let block = [block_width, block_height, 1].map(u64::from);
-        (0..3).all(|axis| {
-            let reaches_edge = origin[axis] + extents[axis] == sizes[axis];
-            match self {
-                Self::WholeMips => origin[axis] == 0 && reaches_edge,
-                Self::Blocks(granularity) => {
-                    let texels = u64::from(granularity[axis]) * block[axis];
-                    origin[axis].is_multiple_of(texels)
-                        && (extents[axis].is_multiple_of(texels) || reaches_edge)
-                }
+        let block = [block_width, block_height, 1];
+        (0..3).all(|axis| match self {
+            Self::WholeMips => copy.origin[axis] == 0 && extents[axis] == sizes[axis],
+            Self::Blocks(granularity) => {
+                assert!(
+                    granularity[axis].is_power_of_two(),
+                    "the transfer granularity {granularity:?} isn't a power of two on each \
+                     axis; whole mips are `TransferGranularity::WholeMips`",
+                );
+                let unit = u64::from(granularity[axis]) * u64::from(block[axis]);
+                aligned_or_reaches_edge(copy.origin[axis], extents[axis], sizes[axis], unit)
             }
         })
     }
@@ -736,6 +761,42 @@ mod tests {
         assert!(allows(copy(2, [0, 0], Extent3d::new_2d(16, 8))));
         assert!(!allows(copy(2, [0, 0], Extent3d::new_2d(16, 4))));
         assert!(!allows(copy(2, [8, 0], Extent3d::new_2d(8, 8))));
+    }
+
+    /// A mip past the last a texture of the extent can have panics, rather
+    /// than being judged as a 1×1 mip.
+    #[test]
+    #[should_panic(
+        expected = "a copy of mip 7 can't be of a texture whose largest mip is Extent3d { width: 64, height: 32, depth: 1 }"
+    )]
+    fn granularities_of_missing_mips_panic() {
+        TransferGranularity::WholeMips.allows(
+            Format::Rgba8Unorm,
+            Extent3d::new_2d(64, 32),
+            &copy(7, [0, 0], Extent3d::new_2d(1, 1)),
+        );
+    }
+
+    /// A granularity that isn't a power of two on each axis panics, naming
+    /// `WholeMips` for Vulkan's `(0, 0, 0)`.
+    #[test]
+    fn granularities_must_be_powers_of_two() {
+        for granularity in [[0, 0, 0], [3, 1, 1]] {
+            let panic = std::panic::catch_unwind(|| {
+                TransferGranularity::Blocks(granularity).allows(
+                    Format::Rgba8Unorm,
+                    Extent3d::new_2d(64, 32),
+                    &copy(0, [0, 0], Extent3d::new_2d(64, 32)),
+                )
+            })
+            .expect_err("the granularity was accepted");
+            let message = panic.downcast_ref::<String>().cloned().unwrap_or_default();
+            assert!(
+                message.contains("isn't a power of two on each axis")
+                    && message.contains("TransferGranularity::WholeMips"),
+                "{granularity:?}: {message:?}",
+            );
+        }
     }
 
     /// Every copy's offset is aligned to its format's block size, and to 4
