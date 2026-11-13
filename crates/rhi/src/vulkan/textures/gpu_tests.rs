@@ -5,7 +5,7 @@ use std::sync::PoisonError;
 
 use clockwork_diagnostics::capture::TestSession;
 
-use crate::vulkan::test_support::VulkanTestBackend;
+use crate::vulkan::test_support::{Capability, VulkanTestBackend, require_capabilities};
 use crate::{
     ColorAttachment, CommandList, DescriptorIndex, Extent3d, Format, HeapKind, LoadOp, QueueKind,
     RenderHardwareInterface, RenderPassDesc, RhiError, StoreOp, Subresource, Texture, TextureDesc,
@@ -134,6 +134,50 @@ fn textures_of_every_dimension_are_created() {
             (before.pool.allocated, before.dedicated_count),
             "memory type {memory_type}",
         );
+    }
+}
+
+/// Textures of each BC format, with mips down to 1×1, smaller than a
+/// block, can be created for sampling and copying, as a 2D texture, an
+/// array and a cube map, each with a sampled view in the heap, as the
+/// importers will load them (part of R26).
+#[test]
+fn bc_textures_are_created() {
+    let session = TestSession::new();
+    let backend = VulkanTestBackend::headless(&session);
+    require_capabilities!(backend, Capability::BcCompression);
+    let resources = backend.resources();
+    for format in Format::ALL
+        .into_iter()
+        .filter(|format| format.is_block_compressed())
+    {
+        let base = TextureDesc {
+            format,
+            mip_levels: 7,
+            usage: TextureUsage::SAMPLED
+                | TextureUsage::COPY_SOURCE
+                | TextureUsage::COPY_DESTINATION,
+            ..desc_2d("compressed", 64, 64)
+        };
+        let descs = [
+            base,
+            TextureDesc {
+                array_layers: 4,
+                ..base
+            },
+            TextureDesc {
+                dimension: TextureDimension::Cube,
+                array_layers: 6,
+                ..base
+            },
+        ];
+        for desc in descs {
+            let texture = resources.create_texture(&desc).unwrap();
+            resources
+                .texture_index(texture, TextureView::sampled())
+                .unwrap();
+            resources.destroy_texture(texture);
+        }
     }
 }
 

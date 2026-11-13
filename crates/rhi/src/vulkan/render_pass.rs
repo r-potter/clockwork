@@ -37,6 +37,11 @@ impl From<StoreOp> for vk::AttachmentStoreOp {
 /// holds floats or normalized values, and converted to integers, rounding
 /// toward zero, for one that holds integers. Pure, so it's tested without a
 /// GPU.
+///
+/// # Panics
+///
+/// Panics for a format no colour attachment can have: depth, and the
+/// block-compressed formats.
 fn clear_colour(format: Format, colour: [f32; 4]) -> vk::ClearColorValue {
     match format {
         Format::R32Uint => vk::ClearColorValue {
@@ -47,8 +52,21 @@ fn clear_colour(format: Format, colour: [f32; 4]) -> vk::ClearColorValue {
         | Format::Bgra8Unorm
         | Format::Bgra8Srgb
         | Format::Rgba16Float
-        | Format::Rgba32Float
-        | Format::Depth32Float => vk::ClearColorValue { float32: colour },
+        | Format::Rgba32Float => vk::ClearColorValue { float32: colour },
+        // `TextureDesc::validate` rejects colour attachments of these.
+        Format::Depth32Float
+        | Format::Bc1RgbaUnorm
+        | Format::Bc1RgbaSrgb
+        | Format::Bc3Unorm
+        | Format::Bc3Srgb
+        | Format::Bc4Unorm
+        | Format::Bc4Snorm
+        | Format::Bc5Unorm
+        | Format::Bc5Snorm
+        | Format::Bc6hUfloat
+        | Format::Bc6hSfloat
+        | Format::Bc7Unorm
+        | Format::Bc7Srgb => unreachable!("{format:?} textures can't be colour attachments"),
     }
 }
 
@@ -244,5 +262,12 @@ mod tests {
             assert_eq!(clear_colour(Format::Rgba16Float, colour).float32, colour);
             assert_eq!(clear_colour(Format::R32Uint, colour).uint32, [0, 1, 7, 255]);
         }
+    }
+
+    /// A format no colour attachment can have has no clear colour.
+    #[test]
+    #[should_panic(expected = "Bc7Unorm textures can't be colour attachments")]
+    fn bc_formats_have_no_clear_colour() {
+        clear_colour(Format::Bc7Unorm, [0.0; 4]);
     }
 }

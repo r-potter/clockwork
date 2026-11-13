@@ -7,6 +7,7 @@
 
 use std::ops::{BitOr, BitOrAssign};
 
+use crate::Capabilities;
 use crate::handle::Handle;
 
 /// A texture. Refers to an entry in the backend's texture table, and is
@@ -85,9 +86,12 @@ const fn max(a: u32, b: u32) -> u32 {
 
 /// A texel format.
 ///
-/// Only the formats in use are listed. Block-compressed formats and the
-/// window surface's format are added by the slices that use them (design
-/// 0002, "Data structures and layout").
+/// Only the formats in use are listed. The window surface's formats are
+/// added by the slice that uses them (design 0002, "Data structures and
+/// layout").
+///
+/// The block-compressed formats, BC1 to BC7 without BC2, which BC3
+/// replaces, need [`Capabilities::bc_compression`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Format {
     /// Four 8-bit channels, normalized to `0..=1`.
@@ -106,12 +110,36 @@ pub enum Format {
     R32Uint,
     /// 32-bit floating-point depth, with no stencil.
     Depth32Float,
+    /// BC1: RGB with 1-bit alpha, normalized to `0..=1`, in 8-byte blocks.
+    Bc1RgbaUnorm,
+    /// BC1: RGB with 1-bit alpha, with colour in sRGB, in 8-byte blocks.
+    Bc1RgbaSrgb,
+    /// BC3: RGBA, normalized to `0..=1`, in 16-byte blocks.
+    Bc3Unorm,
+    /// BC3: RGBA, with colour in sRGB, in 16-byte blocks.
+    Bc3Srgb,
+    /// BC4: one channel, normalized to `0..=1`, in 8-byte blocks.
+    Bc4Unorm,
+    /// BC4: one channel, normalized to `-1..=1`, in 8-byte blocks.
+    Bc4Snorm,
+    /// BC5: two channels, normalized to `0..=1`, in 16-byte blocks.
+    Bc5Unorm,
+    /// BC5: two channels, normalized to `-1..=1`, in 16-byte blocks.
+    Bc5Snorm,
+    /// BC6H: RGB in unsigned half floats, in 16-byte blocks.
+    Bc6hUfloat,
+    /// BC6H: RGB in signed half floats, in 16-byte blocks.
+    Bc6hSfloat,
+    /// BC7: RGBA, normalized to `0..=1`, in 16-byte blocks.
+    Bc7Unorm,
+    /// BC7: RGBA, with colour in sRGB, in 16-byte blocks.
+    Bc7Srgb,
 }
 
 impl Format {
     /// Every format, for tests.
     #[cfg(test)]
-    pub(crate) const ALL: [Self; 8] = [
+    pub(crate) const ALL: [Self; 20] = [
         Self::Rgba8Unorm,
         Self::Rgba8Srgb,
         Self::Bgra8Unorm,
@@ -120,6 +148,18 @@ impl Format {
         Self::Rgba32Float,
         Self::R32Uint,
         Self::Depth32Float,
+        Self::Bc1RgbaUnorm,
+        Self::Bc1RgbaSrgb,
+        Self::Bc3Unorm,
+        Self::Bc3Srgb,
+        Self::Bc4Unorm,
+        Self::Bc4Snorm,
+        Self::Bc5Unorm,
+        Self::Bc5Snorm,
+        Self::Bc6hUfloat,
+        Self::Bc6hSfloat,
+        Self::Bc7Unorm,
+        Self::Bc7Srgb,
     ];
 
     /// Whether the format holds depth, rather than colour.
@@ -127,22 +167,37 @@ impl Format {
         matches!(self, Self::Depth32Float)
     }
 
+    /// Whether the format is block-compressed, which needs
+    /// [`Capabilities::bc_compression`].
+    pub const fn is_block_compressed(self) -> bool {
+        self.info().block_extent[0] > 1
+    }
+
     /// The format's block layout, and what it holds (design 0002, "Texture
     /// copies"): the one table of format information that copies, views and
     /// barriers use.
     pub const fn info(self) -> FormatInfo {
-        let block_bytes = match self {
+        let (block_extent, block_bytes) = match self {
             Self::Rgba8Unorm
             | Self::Rgba8Srgb
             | Self::Bgra8Unorm
             | Self::Bgra8Srgb
             | Self::R32Uint
-            | Self::Depth32Float => 4,
-            Self::Rgba16Float => 8,
-            Self::Rgba32Float => 16,
+            | Self::Depth32Float => ([1, 1], 4),
+            Self::Rgba16Float => ([1, 1], 8),
+            Self::Rgba32Float => ([1, 1], 16),
+            Self::Bc1RgbaUnorm | Self::Bc1RgbaSrgb | Self::Bc4Unorm | Self::Bc4Snorm => ([4, 4], 8),
+            Self::Bc3Unorm
+            | Self::Bc3Srgb
+            | Self::Bc5Unorm
+            | Self::Bc5Snorm
+            | Self::Bc6hUfloat
+            | Self::Bc6hSfloat
+            | Self::Bc7Unorm
+            | Self::Bc7Srgb => ([4, 4], 16),
         };
         FormatInfo {
-            block_extent: [1, 1],
+            block_extent,
             block_bytes,
             depth: self.is_depth(),
         }
@@ -283,15 +338,15 @@ pub struct TextureDesc<'a> {
 }
 
 impl TextureDesc<'_> {
-    /// Checks that the description is valid, as
-    /// [`GpuResources::create_texture`] requires.
+    /// Checks that the description is valid on a device with
+    /// `capabilities`, as [`GpuResources::create_texture`] requires.
     ///
     /// [`GpuResources::create_texture`]: crate::GpuResources::create_texture
     ///
     /// # Panics
     ///
     /// Panics on the first problem, naming the texture.
-    pub(crate) fn validate(&self) {
+    pub(crate) fn validate(&self, capabilities: &Capabilities) {
         let label = self.label;
         let Extent3d {
             width,
@@ -345,6 +400,30 @@ impl TextureDesc<'_> {
             "texture \"{label}\" is a depth attachment with the colour format {:?}",
             self.format,
         );
+        assert!(
+            !self.format.is_block_compressed() || capabilities.bc_compression,
+            "texture \"{label}\" has the block-compressed format {:?}, but {} lacks BC compression",
+            self.format,
+            capabilities.device_name,
+        );
+        if self.format.is_block_compressed() {
+            // BC compression guarantees 2D images, which cube maps are,
+            // sampled and copied. Devices may support 3D, but none
+            // renders to or stores into a BC format.
+            assert!(
+                self.dimension != TextureDimension::D3,
+                "texture \"{label}\" is 3D, with the block-compressed format {:?}, which only 2D and cube textures have",
+                self.format,
+            );
+            let allowed =
+                TextureUsage::SAMPLED | TextureUsage::COPY_SOURCE | TextureUsage::COPY_DESTINATION;
+            assert!(
+                allowed.contains(self.usage),
+                "texture \"{label}\" has the block-compressed format {:?} with usage {:?}, but it can only be sampled and copied",
+                self.format,
+                self.usage,
+            );
+        }
     }
 }
 
@@ -362,6 +441,13 @@ mod tests {
     //! T0 tests of extents, usage sets and texture descriptions.
 
     use super::*;
+
+    /// The capabilities descriptions are checked against: a device with
+    /// every optional capability, so only the tests of a missing one fail
+    /// for lack of it.
+    fn capabilities() -> Capabilities {
+        Capabilities::for_tests(true)
+    }
 
     /// The description tests start from, changing a field or two: a valid
     /// 256×256 2D texture with a full mip chain.
@@ -428,22 +514,116 @@ mod tests {
         }
     }
 
+    /// The BC formats' blocks are the sizes their specifications give:
+    /// BC1 and BC4 pack a 4×4 block into 64 bits, the others into 128, so
+    /// a 256×256 mip is 32 KiB or 64 KiB. Each format's size in both
+    /// variants is listed, so a mistake in one shows.
+    #[test]
+    fn bc_formats_have_their_block_sizes() {
+        const MIP_BYTES: [(Format, u32); 12] = [
+            (Format::Bc1RgbaUnorm, 32_768),
+            (Format::Bc1RgbaSrgb, 32_768),
+            (Format::Bc3Unorm, 65_536),
+            (Format::Bc3Srgb, 65_536),
+            (Format::Bc4Unorm, 32_768),
+            (Format::Bc4Snorm, 32_768),
+            (Format::Bc5Unorm, 65_536),
+            (Format::Bc5Snorm, 65_536),
+            (Format::Bc6hUfloat, 65_536),
+            (Format::Bc6hSfloat, 65_536),
+            (Format::Bc7Unorm, 65_536),
+            (Format::Bc7Srgb, 65_536),
+        ];
+        for (format, bytes) in MIP_BYTES {
+            let info = format.info();
+            let blocks = (256 / info.block_extent[0]) * (256 / info.block_extent[1]);
+            assert_eq!(blocks * info.block_bytes, bytes, "{format:?}");
+            assert_eq!(info.block_extent, [4, 4], "{format:?}");
+            assert!(format.is_block_compressed(), "{format:?}");
+            assert!(!info.depth, "{format:?}");
+        }
+        let compressed = Format::ALL
+            .iter()
+            .filter(|format| format.is_block_compressed());
+        assert_eq!(compressed.count(), MIP_BYTES.len());
+    }
+
+    /// A BC texture is valid on a device with BC compression, and panics,
+    /// naming the texture and the device, on one without it.
+    #[test]
+    fn bc_textures_need_bc_compression() {
+        let desc = TextureDesc {
+            format: Format::Bc7Srgb,
+            ..test_desc()
+        };
+        desc.validate(&capabilities());
+        assert_rejected_on(
+            desc,
+            &Capabilities::for_tests(false),
+            "texture \"albedo\" has the block-compressed format Bc7Srgb, but device lacks BC compression",
+        );
+    }
+
+    /// BC textures are 2D or cube textures, copied and sampled: cube maps
+    /// and arrays pass, and 3D textures, attachments and storage panic,
+    /// naming the texture.
+    #[test]
+    fn bc_textures_are_2d_and_only_sampled_and_copied() {
+        let bc = TextureDesc {
+            format: Format::Bc1RgbaSrgb,
+            usage: TextureUsage::SAMPLED
+                | TextureUsage::COPY_SOURCE
+                | TextureUsage::COPY_DESTINATION,
+            ..test_desc()
+        };
+        bc.validate(&capabilities());
+        TextureDesc {
+            dimension: TextureDimension::Cube,
+            array_layers: 12,
+            ..bc
+        }
+        .validate(&capabilities());
+        assert_rejected(
+            TextureDesc {
+                dimension: TextureDimension::D3,
+                extent: Extent3d {
+                    width: 16,
+                    height: 16,
+                    depth: 16,
+                },
+                mip_levels: 1,
+                ..bc
+            },
+            "texture \"albedo\" is 3D, with the block-compressed format Bc1RgbaSrgb",
+        );
+        // A depth attachment of a colour format panics already.
+        for usage in [TextureUsage::STORAGE, TextureUsage::COLOUR_ATTACHMENT] {
+            assert_rejected(
+                TextureDesc {
+                    usage: TextureUsage::SAMPLED | usage,
+                    ..bc
+                },
+                "texture \"albedo\" has the block-compressed format Bc1RgbaSrgb with usage",
+            );
+        }
+    }
+
     /// Valid descriptions of each dimension pass.
     #[test]
     fn valid_descriptions_pass() {
-        test_desc().validate();
+        test_desc().validate(&capabilities());
         TextureDesc {
             array_layers: 4,
             mip_levels: 1,
             ..test_desc()
         }
-        .validate();
+        .validate(&capabilities());
         TextureDesc {
             dimension: TextureDimension::Cube,
             array_layers: 12,
             ..test_desc()
         }
-        .validate();
+        .validate(&capabilities());
         TextureDesc {
             dimension: TextureDimension::D3,
             extent: Extent3d {
@@ -454,20 +634,26 @@ mod tests {
             mip_levels: 6,
             ..test_desc()
         }
-        .validate();
+        .validate(&capabilities());
         TextureDesc {
             format: Format::Depth32Float,
             mip_levels: 1,
             usage: TextureUsage::DEPTH_ATTACHMENT | TextureUsage::SAMPLED,
             ..test_desc()
         }
-        .validate();
+        .validate(&capabilities());
     }
 
     /// Checks that `desc` panics with a message containing `expected`.
     fn assert_rejected(desc: TextureDesc<'_>, expected: &str) {
-        let message =
-            std::panic::catch_unwind(|| desc.validate()).expect_err("the description was accepted");
+        assert_rejected_on(desc, &capabilities(), expected);
+    }
+
+    /// Checks that `desc` panics on a device with `capabilities`, with a
+    /// message containing `expected`.
+    fn assert_rejected_on(desc: TextureDesc<'_>, capabilities: &Capabilities, expected: &str) {
+        let message = std::panic::catch_unwind(|| desc.validate(capabilities))
+            .expect_err("the description was accepted");
         let message = message
             .downcast_ref::<String>()
             .map(String::as_str)

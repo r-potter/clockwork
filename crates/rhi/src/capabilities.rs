@@ -65,6 +65,22 @@ pub struct Capabilities {
     pub limits: Limits,
 }
 
+impl Capabilities {
+    /// Capabilities for T0 tests: a device named `device`, with the limits
+    /// of a typical desktop GPU, and every optional capability set to `has`.
+    #[cfg(test)]
+    pub(crate) fn for_tests(has: bool) -> Self {
+        Self {
+            device_name: "device".to_owned(),
+            bc_compression: has,
+            limits: Limits {
+                max_texture_dimension_2d: 16_384,
+                max_compute_workgroup_size: [1_024, 1_024, 64],
+            },
+        }
+    }
+}
+
 /// Limits of the selected device that the RHI's users need to know.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Limits {
@@ -122,14 +138,7 @@ mod tests {
 
     /// Capabilities with nothing optional.
     fn none() -> Capabilities {
-        Capabilities {
-            device_name: "device".to_owned(),
-            bc_compression: false,
-            limits: Limits {
-                max_texture_dimension_2d: 16_384,
-                max_compute_workgroup_size: [1_024, 1_024, 64],
-            },
-        }
+        Capabilities::for_tests(false)
     }
 
     /// The summary lists every optional capability a device has.
