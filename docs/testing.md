@@ -350,7 +350,7 @@ session.expect(Level::ERROR, VALIDATION_TARGET, |event| {
 });
 ```
 
-Synchronization validation doesn't see copies and fills by address (`VK_KHR_device_address_commands`), which is how the RHI copies and fills, on either the buffer side or the texture side. A missing barrier between them isn't reported, so a test that copies or fills still records the barriers the RHI's users would, and checks the result, such as `buffer_round_trip` in `crates/rhi/src/vulkan/translate/gpu_tests.rs`.
+Synchronization validation doesn't see copies and fills by address (`VK_KHR_device_address_commands`), which is how the RHI copies and fills, on either the buffer side or the texture side. A missing barrier between them isn't reported. In the SDK the engine requires, nor is one between two render passes that write the same attachment. So a test that copies, fills or renders still records the barriers the RHI's users would, and checks the result, such as `buffer_round_trip` in `crates/rhi/src/vulkan/translate/gpu_tests.rs`.
 
 A test that a driver bug breaks on one vendor's drivers skips there with `test_support::skip_for_driver_bug`, which prints a banner like a missing capability's, and names the bug, which `TODO.md` tracks. On NVIDIA's driver, which device selection keeps off its transfer-only queue family, tests that need a dedicated transfer queue skip this way, even when `CLOCKWORK_REQUIRED_CAPABILITIES` requires one.
 
