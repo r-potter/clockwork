@@ -65,8 +65,13 @@ Outstanding tasks and future work.
       queue keeps until `take_timings` reads them back. `rhi-shaders`
       added programs, render state, push data, shader access to the
       descriptor heaps, views and attachments of any subresource, render
-      passes, and draws, direct, indexed and indirect, and dispatches. Its
-      later slices add transient memory, streaming and presentation, and
+      passes, and draws, direct, indexed and indirect, and dispatches.
+      `rhi-transient` added per-frame transient memory:
+      `begin_transient_frame` hands out a `TransientFrame`, which any
+      thread allocates from without a lock, in chunks of upload memory
+      that a pool sized by recent frames recycles through deferred
+      destruction. The design's remaining slices add streaming and
+      presentation, and
       `rhi-present` moves the triangle out of the backend, so that the
       application decides what to draw. `TriangleShaders`
       (`crates/rhi/src/vulkan/shaders.rs`) still creates its shader

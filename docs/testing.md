@@ -210,6 +210,7 @@ A property test checks an invariant over many generated inputs, rather than a fe
 
 - **Check against a model.** The clearest property is usually that the code agrees with a simple, obviously correct version of itself, such as a list of live ranges standing in for the allocator's free lists.
 - **Keep generated inputs small,** a few hundred steps of small sizes, so that a run takes well under a second, and failures shrink to cases a person can read.
+- **Check concurrent code from several threads at once,** each writing a byte of its own into what it was given, so that an overlap shows in memory as well as in the ranges. `concurrent_allocations_never_overlap`, in `crates/rhi/src/transient.rs`, does this for transient allocations.
 - **Make sure it can fail.** Break the code on purpose, once, and check that the test catches it, then undo the change.
 - **Commit `proptest-regressions/`.** When a property fails, `proptest` shrinks the input to a minimal case and records it in a file there, named for the test's source file. Every later run replays the recorded cases first, so a fixed bug stays fixed. Review the file like any other test change.
 - **Run more cases** with `PROPTEST_CASES`, for example `PROPTEST_CASES=10000 cargo test allocations_match_a_simulated_model`, when changing the code a property covers. The default is 256.
@@ -359,6 +360,15 @@ Break the code on purpose once, as for property tests, and check the test fails.
 Fill a texture that's later copied out by rendering or a dispatch, not by copying into it: NVIDIA's 617.42 doesn't order a copy out of an image after a copy into it (design 0002, "Risks"). Shaders see `SV_VertexID` and `SV_InstanceID` from 0 in each draw, as Slang subtracts the base vertex and instance, so a test that needs a draw's first vertex or instance reads `SV_StartVertexLocation` or `SV_StartInstanceLocation`.
 
 Core validation can't see accesses through descriptor heaps. Design 0002 asks for tests of them, such as `fragment_samples_heap_texture`, to run with `CLOCKWORK_VALIDATION=sync,gpu` too before review. That fails on GPU-assisted validation's own start-up warnings until `TODO.md`'s entry is fixed, so read the report for anything else.
+
+### Transient memory
+
+A test that draws with transient data, such as those in `crates/rhi/src/vulkan/transient/gpu_tests.rs`, uses frames as the engine's frame loop will:
+- **Translate every list that uses a frame's allocations before ending the frame,** since its chunks may be reused once nothing translated in it is outstanding. Validation can't see a list that reads a chunk after that.
+- **Call `collect_garbage` before checking the pool,** which recycles the chunks of frames whose lists have completed. `transient_counts`, on the backend's core, says how many chunks are free, in use and were ever created, so a test can check that frames reuse chunks rather than creating more.
+- **Make the result depend on the frame,** writing different data in each, so a draw that reads an earlier frame's chunk renders the wrong colour.
+
+Some paths can't be reached on a given device. The padding that aligns an allocation larger than a chunk, which has memory of its own, is needed only when the driver places that memory at an unaligned address, and the reference GPU doesn't. Cover a path like that with a T0 test of its pure part, as `padding_reaches_the_next_aligned_address` does in `crates/rhi/src/vulkan/transient.rs`, and say in the PR that the T1 test doesn't reach it.
 
 ### Validation is required
 
