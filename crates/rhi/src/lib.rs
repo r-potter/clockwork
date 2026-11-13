@@ -59,6 +59,7 @@ mod test_shaders;
 mod test_support;
 mod texture;
 mod timing;
+mod transient;
 mod view;
 mod viewport;
 mod vulkan;
@@ -93,6 +94,7 @@ pub use texture::{
     Extent3d, Format, FormatInfo, Texture, TextureDesc, TextureDimension, TextureUsage,
 };
 pub use timing::{CommandBufferTimings, SubmissionTimings, Timing};
+pub use transient::{MAX_TRANSIENT_ALIGNMENT, TransientAllocation, TransientFrame};
 pub use view::TextureView;
 pub use viewport::{Extent2d, Offset2d, Rect2d, Viewport};
 use vulkan::VulkanRenderHardwareInterface;
