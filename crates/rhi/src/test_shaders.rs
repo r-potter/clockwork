@@ -1,5 +1,6 @@
 //! The shaders T1 tests create programs from (design 0002, "Test plan"),
-//! compiled by `build.rs` from `shaders/`.
+//! compiled by `build.rs` from `shaders/tests/`, and the triangle, from
+//! `shaders/`, which they share with the engine.
 //!
 //! Each is a [`TestProgram`] holding its SPIR-V as words, since
 //! `include_bytes!` doesn't align the bytes for `u32`s, from which
@@ -52,7 +53,7 @@ impl TestProgram {
 }
 
 /// A compute program that writes `0xC10CC0DE` through the address in its
-/// push data (`shaders/write_value.slang`).
+/// push data (`shaders/tests/write_value.slang`).
 pub(crate) fn write_value() -> TestProgram {
     TestProgram::new(
         "write value",
@@ -63,7 +64,7 @@ pub(crate) fn write_value() -> TestProgram {
 
 /// A compute program that adds one, atomically, to the `u32` counter at the
 /// address in its push data for each workgroup it runs
-/// (`shaders/count_groups.slang`).
+/// (`shaders/tests/count_groups.slang`).
 pub(crate) fn count_groups() -> TestProgram {
     TestProgram::new(
         "count groups",
@@ -74,7 +75,7 @@ pub(crate) fn count_groups() -> TestProgram {
 
 /// A compute program that writes each texel's coordinates, `(x, y, x + y,
 /// 1)`, into a 2D storage view, through its slot in the resource heap
-/// (`shaders/fill_texels.slang`). Its push data is the view's
+/// (`shaders/tests/fill_texels.slang`). Its push data is the view's
 /// [`DescriptorIndex`](crate::DescriptorIndex), and it runs in 8×8
 /// workgroups.
 pub(crate) fn fill_texels() -> TestProgram {
@@ -87,7 +88,7 @@ pub(crate) fn fill_texels() -> TestProgram {
 
 /// A compute program that samples a 2D sampled view at each texel's
 /// centre, and writes the result into a 2D storage view of the same size
-/// (`shaders/copy_texels.slang`). Its push data is the sampled view's,
+/// (`shaders/tests/copy_texels.slang`). Its push data is the sampled view's,
 /// the sampler's and the storage view's
 /// [`DescriptorIndex`](crate::DescriptorIndex), in that order, and it runs
 /// in 8×8 workgroups.
@@ -102,7 +103,7 @@ pub(crate) fn copy_texels() -> TestProgram {
 /// A compute program that writes each texel of a 2D storage view as the
 /// average of the 2×2 block under it in a 2D sampled view twice its size,
 /// one pass of generating a mip chain with a box filter
-/// (`shaders/downsample.slang`). Each view should cover one mip. Its push
+/// (`shaders/tests/downsample.slang`). Each view should cover one mip. Its push
 /// data is the sampled view's and the storage view's
 /// [`DescriptorIndex`](crate::DescriptorIndex), in that order, and it runs
 /// in 8×8 workgroups.
@@ -116,7 +117,7 @@ pub(crate) fn downsample() -> TestProgram {
 
 /// A vertex and fragment program that draws a triangle covering the whole
 /// attachment, sampling a 2D sampled view at each fragment's lower-right
-/// corner (`shaders/sample_texture.slang`). With a view the attachment's
+/// corner (`shaders/tests/sample_texture.slang`). With a view the attachment's
 /// size, that's where four texels meet, so a linear sampler renders their
 /// average, and a nearest one picks one. Its push data is the sampled
 /// view's and the sampler's

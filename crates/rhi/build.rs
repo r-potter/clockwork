@@ -1,6 +1,7 @@
-//! Compiles the Slang shaders in `shaders/` to SPIR-V with `slangc`, writing
-//! `<name>.spv` files to `OUT_DIR` for the Vulkan backend to embed, with
-//! heap access through `SPV_EXT_descriptor_heap`.
+//! Compiles the Slang shaders in `shaders/`, and the test shaders in
+//! `shaders/tests/`, to SPIR-V with `slangc`, writing `<name>.spv` files to
+//! `OUT_DIR` for the Vulkan backend and the tests to embed, with heap
+//! access through `SPV_EXT_descriptor_heap`.
 //!
 //! `slangc` is found by [`slangc::find`]: from the `SLANGC` environment
 //! variable, then the Vulkan SDK, then `PATH`.
@@ -9,14 +10,17 @@
 mod slangc;
 
 use std::env;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
-/// The shaders to compile, as file names in `shaders/` without the `.slang`
-/// extension. All but `triangle` are used only by tests (see
-/// `src/test_shaders.rs`).
-const SHADERS: &[&str] = &[
-    "triangle",
+/// The engine's shaders, as file names in `shaders/` without the `.slang`
+/// extension.
+const SHADERS: &[&str] = &["triangle"];
+
+/// The shaders only tests use (design 0002, "Test plan"), as file names in
+/// `shaders/tests/` without the `.slang` extension. The tests describe them
+/// in `src/test_shaders.rs`, and share the engine's `triangle`.
+const TEST_SHADERS: &[&str] = &[
     "write_value",
     "count_groups",
     "fill_texels",
@@ -28,9 +32,11 @@ const SHADERS: &[&str] = &[
 /// The Slang modules shaders import, as file names in `shaders/` without
 /// the `.slang` extension. They're compiled as part of each shader that
 /// imports them, so they only need to rebuild the shaders when they change.
+/// `shaders/` is on the include path, so the test shaders find them too.
 const MODULES: &[&str] = &["heap"];
 
-/// Finds `slangc`, then compiles each shader in [`SHADERS`].
+/// Finds `slangc`, then compiles each shader in [`SHADERS`] and
+/// [`TEST_SHADERS`].
 ///
 /// # Panics
 ///
@@ -55,8 +61,14 @@ fn main() {
         let source = PathBuf::from_iter(["shaders", &format!("{name}.slang")]);
         println!("cargo::rerun-if-changed={}", source.display());
     }
-    for name in SHADERS {
-        let source = PathBuf::from_iter(["shaders", &format!("{name}.slang")]);
+    let shaders = Path::new("shaders");
+    let tests = shaders.join("tests");
+    let sources = SHADERS
+        .iter()
+        .map(|name| (shaders, name))
+        .chain(TEST_SHADERS.iter().map(|name| (tests.as_path(), name)));
+    for (directory, name) in sources {
+        let source = directory.join(format!("{name}.slang"));
         println!("cargo::rerun-if-changed={}", source.display());
         let output = out_dir.join(format!("{name}.spv"));
 
@@ -68,6 +80,8 @@ fn main() {
         // capability changes nothing in a shader that doesn't read them.
         let status = Command::new(&slangc)
             .arg(&source)
+            .arg("-I")
+            .arg(shaders)
             .args([
                 "-target",
                 "spirv",
