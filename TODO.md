@@ -62,14 +62,17 @@ Outstanding tasks and future work.
       translated on any thread and submitted to queues with timelines,
       barriers described by accesses, copies, and deferred destruction.
       `rhi-timing` added nested timing scopes, whose GPU durations each
-      queue keeps until `take_timings` reads them back. Its later slices
-      add programs and draws, transient memory, streaming and presentation,
-      and `rhi-present` moves the triangle out of the backend, so that the
+      queue keeps until `take_timings` reads them back. `rhi-shaders`
+      added programs, render state, push data, shader access to the
+      descriptor heaps, views and attachments of any subresource, render
+      passes, and draws, direct, indexed and indirect, and dispatches. Its
+      later slices add transient memory, streaming and presentation, and
+      `rhi-present` moves the triangle out of the backend, so that the
       application decides what to draw. `TriangleShaders`
-      (`crates/rhi/src/vulkan/shaders.rs`) still creates its shader objects
-      itself, the way `create_program` now does; make the triangle a
-      `Program` once draws arrive, and remove `TriangleShaders` and its
-      second copy of `triangle.spv`.
+      (`crates/rhi/src/vulkan/shaders.rs`) still creates its shader
+      objects itself, the way `create_program` does: when `rhi-present`
+      draws the triangle through the RHI, make it a `Program`, and remove
+      `TriangleShaders` and its second copy of `triangle.spv`.
 - [ ] **Profile command list recording and translation.** Recording
       appends each command's data to the list's arenas without removing
       duplicates, so a list that sets the same `RenderState` before every
@@ -297,9 +300,11 @@ Outstanding tasks and future work.
       some of the device's limits. Neither is a problem in the engine, so
       either suppress them when GPU-AV is requested, or have
       `test_support` turn core validation off with it. Design 0002 relies
-      on GPU-AV for binding tests ("Risks"), and `rhi-shaders` is where
-      they start. Found while prototyping heap access, where GPU-AV
-      reported nothing else.
+      on GPU-AV for binding tests ("Risks"), such as
+      `fragment_samples_heap_texture`, which its test plan asks to run
+      with GPU-AV before review. Found while prototyping heap access, and
+      seen again running that test, where in both GPU-AV reported nothing
+      else.
 - [ ] **Move CI off actions that run on Node.js 20.** GitHub warns that
       `actions/cache@v4` targets Node.js 20, which is deprecated, and runs
       it on Node.js 24 instead. Move to a version that targets Node.js 24
