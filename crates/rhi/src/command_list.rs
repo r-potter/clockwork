@@ -817,6 +817,12 @@ impl CommandList {
     /// tightly, with a stride of 16, or be part of larger records. A draw
     /// count of 0 draws nothing, as does a vertex or instance count of 0.
     ///
+    /// Each vertex's index, as the vertex shader sees it in `SV_VertexID`,
+    /// counts from 0 in each draw, as for [`draw`](Self::draw): Slang
+    /// subtracts the first vertex that Vulkan adds, and `SV_InstanceID`
+    /// doesn't include the first instance either. A shader that needs them
+    /// reads `SV_StartVertexLocation` and `SV_StartInstanceLocation`.
+    ///
     /// The arguments must be in a buffer with [`BufferUsage::INDIRECT`],
     /// and be read with [`Access::IndirectRead`], so a barrier is needed
     /// after the GPU writes them.
