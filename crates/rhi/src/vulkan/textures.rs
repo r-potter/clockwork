@@ -178,6 +178,18 @@ impl From<Format> for vk::Format {
             Format::Rgba32Float => Self::R32G32B32A32_SFLOAT,
             Format::R32Uint => Self::R32_UINT,
             Format::Depth32Float => Self::D32_SFLOAT,
+            Format::Bc1RgbaUnorm => Self::BC1_RGBA_UNORM_BLOCK,
+            Format::Bc1RgbaSrgb => Self::BC1_RGBA_SRGB_BLOCK,
+            Format::Bc3Unorm => Self::BC3_UNORM_BLOCK,
+            Format::Bc3Srgb => Self::BC3_SRGB_BLOCK,
+            Format::Bc4Unorm => Self::BC4_UNORM_BLOCK,
+            Format::Bc4Snorm => Self::BC4_SNORM_BLOCK,
+            Format::Bc5Unorm => Self::BC5_UNORM_BLOCK,
+            Format::Bc5Snorm => Self::BC5_SNORM_BLOCK,
+            Format::Bc6hUfloat => Self::BC6H_UFLOAT_BLOCK,
+            Format::Bc6hSfloat => Self::BC6H_SFLOAT_BLOCK,
+            Format::Bc7Unorm => Self::BC7_UNORM_BLOCK,
+            Format::Bc7Srgb => Self::BC7_SRGB_BLOCK,
         }
     }
 }
@@ -291,7 +303,7 @@ impl VulkanDevice {
     /// [`TextureDesc::validate`]), or the device doesn't support its format for
     /// its usage.
     pub(super) fn create_texture_entry(&self, desc: &TextureDesc<'_>) -> RhiResult<Texture> {
-        desc.validate();
+        desc.validate(&self.capabilities);
         let format = vk::Format::from(desc.format);
         let (usage, features) = usage_flags(desc.usage);
         // SAFETY: The physical device was enumerated from this instance.

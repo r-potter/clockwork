@@ -224,20 +224,12 @@ const _: () = {
 mod tests {
     //! T0 tests of copy layouts and their checks (design 0002, R25), for an
     //! uncompressed, a block-compressed and a depth format.
-    //!
-    //! `Format` has no block-compressed format until `rhi-streaming` adds
-    //! BC1 to BC7, so the block-compressed cases describe one with a
-    //! [`FormatInfo`]: 4×4 blocks of 16 bytes, as BC7's are.
 
     use super::*;
     use crate::handle::HandleTable;
 
-    /// 4×4 blocks of 16 bytes, as BC7's are.
-    const BC7: FormatInfo = FormatInfo {
-        block_extent: [4, 4],
-        block_bytes: 16,
-        depth: false,
-    };
+    /// BC7's 4×4 blocks of 16 bytes.
+    const BC7: FormatInfo = Format::Bc7Unorm.info();
 
     /// A texture of `format`, `extent` at mip 0, with four mips and two
     /// layers, labelled `albedo`.
@@ -289,13 +281,15 @@ mod tests {
         );
     }
 
-    /// The format table gives each format's block size, and says which are
-    /// depth.
+    /// The format table gives each format's block size, one texel unless
+    /// it's block-compressed, and says which are depth.
     #[test]
     fn formats_describe_their_blocks() {
         for format in Format::ALL {
             let info = format.info();
-            assert_eq!(info.block_extent, [1, 1], "{format:?}");
+            if !format.is_block_compressed() {
+                assert_eq!(info.block_extent, [1, 1], "{format:?}");
+            }
             assert_eq!(info.depth, format.is_depth(), "{format:?}");
         }
         assert_eq!(Format::Rgba32Float.info().block_bytes, 16);

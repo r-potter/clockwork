@@ -239,7 +239,6 @@ mod tests {
     use std::cell::RefCell;
 
     use super::*;
-    use crate::Limits;
 
     /// Every capability has a distinct name, so none can be required by
     /// mistake in place of another.
@@ -254,14 +253,7 @@ mod tests {
     /// Capabilities, present capabilities and dedicated queue kinds, with
     /// every optional one set to `has`.
     fn capabilities(has: bool) -> (Capabilities, PresentCapabilities, Vec<QueueKind>) {
-        let capabilities = Capabilities {
-            device_name: "device".to_owned(),
-            bc_compression: has,
-            limits: Limits {
-                max_texture_dimension_2d: 16_384,
-                max_compute_workgroup_size: [1_024, 1_024, 64],
-            },
-        };
+        let capabilities = Capabilities::for_tests(has);
         let present = PresentCapabilities {
             present_timing: has,
             swapchain_maintenance: has,
