@@ -1,5 +1,5 @@
 //! T1 tests of translating and submitting command lists on a real device
-//! (design 0002, R4, R7, R9, R16 and R25).
+//! (design 0002, R4, R5, R6, R7, R9, R16, R21 and R25).
 //!
 //! Synchronization validation doesn't track copies and fills by address
 //! (`VK_KHR_device_address_commands`), on either side, so a missing
@@ -307,18 +307,10 @@ fn compute_reads_and_writes_heap_textures() {
     )]);
     run(&backend, QueueKind::Graphics, &list);
 
-    let mut bytes = vec![0; size as usize];
-    resources.read_buffer(readback, 0, &mut bytes).unwrap();
-    let (chunks, rest) = bytes.as_chunks::<4>();
-    assert!(rest.is_empty());
-    let texels: Vec<f32> = chunks
-        .iter()
-        .map(|&chunk| f32::from_le_bytes(chunk))
-        .collect();
-    let expected: Vec<f32> = (0..4)
-        .flat_map(|y| (0..4).flat_map(move |x| [x as f32, y as f32, (x + y) as f32, 1.0]))
-        .collect();
-    assert_eq!(texels, expected);
+    assert_eq!(
+        read_texels(&**resources, readback, size),
+        coordinate_texels(4)
+    );
 
     resources.destroy_program(fill);
     resources.destroy_program(copy);
@@ -1302,6 +1294,181 @@ fn indexed_indirect_draws_read_their_arguments() {
     resources.destroy_buffer(index_buffer);
     resources.destroy_texture(texture);
     resources.destroy_program(program);
+}
+
+/// A draw samples a texture through its slot in the resource heap, with a
+/// sampler through its slot in the sampler heap, and renders what it
+/// samples (R6's `fragment_samples_heap_texture`).
+///
+/// The texture's texels, each `(x, y, x + y, 1)`, are copied in from a
+/// buffer. The draw covers a colour attachment of the same size, sampling
+/// at each fragment's lower-right corner with a linear sampler that clamps
+/// to the edge, so each texel rendered is the average of the texture's at
+/// the same coordinates and the three after it, clamped to the edge.
+///
+/// A decoy texture and a nearest sampler take the first slot in each heap,
+/// so the texture's and the sampler's slots aren't 0, and the result is
+/// right only if the draw uses the slots in its push data.
+#[test]
+fn fragment_samples_heap_texture() {
+    const SIZE: u32 = 4;
+    let session = TestSession::new();
+    let backend = VulkanTestBackend::headless(&session);
+    let resources = backend.resources();
+    let texture = |label, usage| {
+        resources
+            .create_texture(&TextureDesc {
+                label,
+                dimension: TextureDimension::D2,
+                format: Format::Rgba32Float,
+                extent: Extent3d::new_2d(SIZE, SIZE),
+                mip_levels: 1,
+                array_layers: 1,
+                usage,
+            })
+            .unwrap()
+    };
+    let sampler = |label, filter| {
+        resources
+            .create_sampler(&SamplerDesc {
+                label,
+                mag_filter: filter,
+                min_filter: filter,
+                mip_filter: Filter::Nearest,
+                address_modes: [AddressMode::ClampToEdge; 3],
+            })
+            .unwrap()
+    };
+    let decoy_texture = texture("decoy", TextureUsage::SAMPLED);
+    let decoy_index = resources
+        .texture_index(decoy_texture, TextureView::sampled())
+        .unwrap();
+    let decoy_sampler = sampler("nearest", Filter::Nearest);
+    let source = texture(
+        "source",
+        TextureUsage::SAMPLED | TextureUsage::COPY_DESTINATION,
+    );
+    let source_index = resources
+        .texture_index(source, TextureView::sampled())
+        .unwrap();
+    let linear = sampler("linear", Filter::Linear);
+    assert_ne!(source_index, decoy_index);
+    assert_ne!(
+        resources.sampler_index(linear),
+        resources.sampler_index(decoy_sampler),
+    );
+    let target = texture(
+        "target",
+        TextureUsage::COLOUR_ATTACHMENT | TextureUsage::COPY_SOURCE,
+    );
+    let program = resources
+        .create_program(&test_shaders::sample_texture().desc())
+        .unwrap();
+    let texels = coordinate_texels(SIZE);
+    let bytes: Vec<u8> = texels
+        .iter()
+        .flat_map(|texel| texel.to_le_bytes())
+        .collect();
+    // Each texel's average with the three after it in x and y, clamped to
+    // the edge, as a linear sampler blends them where they meet.
+    let texel = |x: u32, y: u32| {
+        let at = ((y.min(SIZE - 1) * SIZE + x.min(SIZE - 1)) * 4) as usize;
+        &texels[at..at + 4]
+    };
+    let expected: Vec<f32> = (0..SIZE)
+        .flat_map(|y| (0..SIZE).map(move |x| (x, y)))
+        .flat_map(|(x, y)| {
+            let corners = [
+                texel(x, y),
+                texel(x + 1, y),
+                texel(x, y + 1),
+                texel(x + 1, y + 1),
+            ];
+            (0..4)
+                .map(move |channel| corners.iter().map(|corner| corner[channel]).sum::<f32>() / 4.0)
+        })
+        .collect();
+    let extent = Extent3d::new_2d(SIZE, SIZE);
+    let layout = TextureDataLayout::tightly_packed(Format::Rgba32Float, extent);
+    let size = u64::from(layout.bytes_per_row * SIZE);
+    assert_eq!(bytes.len() as u64, size);
+    let upload = create(&**resources, "texels", size, MemoryLocation::Upload);
+    resources.write_buffer(upload, 0, &bytes);
+    let readback = create(&**resources, "readback", size, MemoryLocation::Readback);
+    let attachment = Extent2d {
+        width: SIZE,
+        height: SIZE,
+    };
+
+    let mut list = CommandList::new("sample texture");
+    list.barrier(&[
+        Barrier::texture(source, Access::None, Access::CopyWrite),
+        Barrier::buffer(upload, Access::HostWrite, Access::CopyRead),
+    ]);
+    list.copy_buffer_to_texture(
+        resources.buffer_address(upload),
+        layout,
+        whole(source, extent),
+    );
+    list.barrier(&[
+        Barrier::texture(source, Access::CopyWrite, Access::FragmentShaderSampledRead),
+        Barrier::texture(target, Access::None, Access::ColorAttachmentWrite),
+    ]);
+    list.bind_program(program);
+    list.push_data(
+        0,
+        &index_push_data(&[source_index, resources.sampler_index(linear)]),
+    );
+    list.set_render_state(&RenderState::default().cull(CullMode::None));
+    list.set_viewport(&Viewport::from_extent(attachment));
+    list.set_scissor(Rect2d::from_extent(attachment));
+    list.begin_render_pass(&RenderPassDesc::colour(target, LoadOp::DontCare));
+    list.draw(3, 1);
+    list.end_render_pass();
+    list.barrier(&[Barrier::texture(
+        target,
+        Access::ColorAttachmentWrite,
+        Access::CopyRead,
+    )]);
+    list.copy_texture_to_buffer(
+        whole(target, extent),
+        resources.buffer_address(readback),
+        layout,
+    );
+    list.barrier(&[Barrier::buffer(
+        readback,
+        Access::CopyWrite,
+        Access::HostRead,
+    )]);
+    run(&backend, QueueKind::Graphics, &list);
+
+    // Filtering weights each texel to the precision the device's subtexel
+    // grid allows, so the averages may differ by rounding.
+    let rendered = read_texels(&**resources, readback, size);
+    assert!(
+        rendered
+            .iter()
+            .zip(&expected)
+            .all(|(rendered, expected)| (rendered - expected).abs() < 1e-3),
+        "rendered {rendered:?}, not {expected:?}",
+    );
+    resources.destroy_program(program);
+    resources.destroy_sampler(linear);
+    resources.destroy_sampler(decoy_sampler);
+    resources.destroy_buffer(upload);
+    resources.destroy_buffer(readback);
+    resources.destroy_texture(source);
+    resources.destroy_texture(decoy_texture);
+    resources.destroy_texture(target);
+}
+
+/// The texels of a `size`×`size` `Rgba32Float` texture whose texel at (`x`,
+/// `y`) is `(x, y, x + y, 1)`, tightly packed, so each texel says where it
+/// is.
+fn coordinate_texels(size: u32) -> Vec<f32> {
+    (0..size)
+        .flat_map(|y| (0..size).flat_map(move |x| [x as f32, y as f32, (x + y) as f32, 1.0]))
+        .collect()
 }
 
 /// Drawing, directly or indirectly, indexed or not, with only a compute

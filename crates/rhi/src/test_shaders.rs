@@ -114,6 +114,25 @@ pub(crate) fn downsample() -> TestProgram {
     )
 }
 
+/// A vertex and fragment program that draws a triangle covering the whole
+/// attachment, sampling a 2D sampled view at each fragment's lower-right
+/// corner (`shaders/sample_texture.slang`). With a view the attachment's
+/// size, that's where four texels meet, so a linear sampler renders their
+/// average, and a nearest one picks one. Its push data is the sampled
+/// view's and the sampler's
+/// [`DescriptorIndex`](crate::DescriptorIndex), in that order, and it's
+/// drawn with three vertices.
+pub(crate) fn sample_texture() -> TestProgram {
+    TestProgram::new(
+        "sample texture",
+        include_bytes!(concat!(env!("OUT_DIR"), "/sample_texture.spv")),
+        &[
+            (ShaderStage::Vertex, c"vertexMain"),
+            (ShaderStage::Fragment, c"fragmentMain"),
+        ],
+    )
+}
+
 /// The triangle's vertex and fragment program (`shaders/triangle.slang`).
 pub(crate) fn triangle() -> TestProgram {
     TestProgram::new(
