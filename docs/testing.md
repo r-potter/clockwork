@@ -338,6 +338,28 @@ WARN clockwork::leaks: 2 samplers were never destroyed, and were freed with the 
 
 The report names the first eight objects it finds. `leaked_objects_are_reported` in `crates/rhi/src/vulkan/gpu_tests.rs` is the only test that leaves objects on purpose, and it expects the reports.
 
+### Test shaders
+
+T1 tests that dispatch or draw use the test shaders in `crates/rhi/shaders/tests/`, which `build.rs` compiles to SPIR-V with the engine's own in `crates/rhi/shaders/`, and the engine's triangle. To add one:
+
+1. Write it in Slang in `shaders/tests/`, with a comment saying what it does and how it's driven. Reach texture views and samplers through `ResourceIndex` and `SamplerIndex` from `shaders/heap.slang`, which `import heap;` finds since `shaders/` is on the include path, never `ResourceDescriptorHeap` or a bare `uint`, so that changing how shaders reach the heaps changes only that file.
+2. List it in `TEST_SHADERS` in `crates/rhi/build.rs`.
+3. Describe it with a function in `crates/rhi/src/test_shaders.rs` returning a `TestProgram`, documenting its push data in order and how it's run (its workgroup size, or how many vertices to draw). `TestProgram::desc()` gives the `ProgramDesc` for `create_program`.
+
+`index_push_data` in `crates/rhi/src/vulkan/translate/gpu_tests.rs` lays out heap slots as the shaders declare them, each a 4-byte index.
+
+A test that renders checks what it rendered, by copying the attachment to a readback buffer. The triangle program's helpers there, `assert_triangle_centre` and `texel`, check an 8×8 attachment's centre against the triangle's blended colours, and a corner against the clear value. Make sure the result depends on what's tested:
+- **Heap slots:** a fresh backend hands out slots from 0, which is also what missing push data reads. Create a decoy view or sampler first, so the slots under test aren't 0, as `fragment_samples_heap_texture` does.
+- **Samplers:** sampling at texel centres inside the texture gives the same texel whatever the filter or address mode. Sample where they differ, such as where four texels meet with a linear sampler.
+- **Subresources:** fill the rest of the texture with a marker first, and check it's still there, as `render_to_mip_and_layer` does.
+- **Draw arguments:** give indirect draws non-zero offsets and padding between records, so a stride, count or first index that's ignored changes what's drawn.
+
+Break the code on purpose once, as for property tests, and check the test fails.
+
+Fill a texture that's later copied out by rendering or a dispatch, not by copying into it: NVIDIA's 617.42 doesn't order a copy out of an image after a copy into it (design 0002, "Risks"). Shaders see `SV_VertexID` and `SV_InstanceID` from 0 in each draw, as Slang subtracts the base vertex and instance, so a test that needs a draw's first vertex or instance reads `SV_StartVertexLocation` or `SV_StartInstanceLocation`.
+
+Core validation can't see accesses through descriptor heaps. Design 0002 asks for tests of them, such as `fragment_samples_heap_texture`, to run with `CLOCKWORK_VALIDATION=sync,gpu` too before review. That fails on GPU-assisted validation's own start-up warnings until `TODO.md`'s entry is fixed, so read the report for anything else.
+
 ### Validation is required
 
 Every T1 test runs with the Khronos validation layer, and can't run without it: `VulkanTestBackend::headless` and `backend_options` always ask for `Validation::Required`, so creating the backend fails if the layer, or a requested feature, isn't available. There's no way to turn validation off for tests, because a pass without it would prove less than it claims.
