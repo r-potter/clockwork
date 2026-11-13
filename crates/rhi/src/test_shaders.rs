@@ -134,6 +134,20 @@ pub(crate) fn sample_texture() -> TestProgram {
     )
 }
 
+/// A vertex and fragment program that draws a triangle covering the whole
+/// attachment, in the colour, four `f32`s, at the address in its push data
+/// (`shaders/tests/read_colour.slang`). It's drawn with three vertices.
+pub(crate) fn read_colour() -> TestProgram {
+    TestProgram::new(
+        "read colour",
+        include_bytes!(concat!(env!("OUT_DIR"), "/read_colour.spv")),
+        &[
+            (ShaderStage::Vertex, c"vertexMain"),
+            (ShaderStage::Fragment, c"fragmentMain"),
+        ],
+    )
+}
+
 /// The triangle's vertex and fragment program (`shaders/triangle.slang`).
 pub(crate) fn triangle() -> TestProgram {
     TestProgram::new(

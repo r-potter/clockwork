@@ -27,6 +27,7 @@ const TEST_SHADERS: &[&str] = &[
     "copy_texels",
     "downsample",
     "sample_texture",
+    "read_colour",
 ];
 
 /// The Slang modules shaders import, as file names in `shaders/` without

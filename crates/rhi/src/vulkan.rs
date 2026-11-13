@@ -40,11 +40,12 @@ mod swapchain;
 pub(crate) mod test_support;
 mod textures;
 mod timings;
+mod transient;
 mod translate;
 mod validation;
 
 use std::ffi::CStr;
-use std::sync::{Arc, Mutex, PoisonError, RwLock};
+use std::sync::{Arc, Mutex, PoisonError, RwLock, Weak};
 use std::{fmt, slice};
 
 use anyhow::{Context, Result, bail};
@@ -57,7 +58,7 @@ use super::{
     BackendOptions, Buffer, BufferDesc, Capabilities, DescriptorIndex, GpuAddress, GpuResources,
     GraphicsApi, PresentCapabilities, Program, ProgramDesc, Queue, QueueKind,
     RenderHardwareInterface, RhiResult, Sampler, SamplerDesc, Texture, TextureDesc, TextureView,
-    WindowSize, WindowTarget,
+    TransientFrame, WindowSize, WindowTarget,
 };
 use crate::deferred::DeferredQueue;
 use crate::handle::HandleTable;
@@ -77,6 +78,7 @@ use shaders::TriangleShaders;
 use surface::Surface;
 use swapchain::Swapchain;
 use textures::TextureEntry;
+use transient::TransientChunks;
 pub(crate) use translate::VulkanCommandBuffer;
 use validation::{Availability, LayerSettings, VALIDATION_LAYER};
 
@@ -145,6 +147,9 @@ pub(crate) struct VulkanRenderHardwareInterface {
 /// every resource left in its tables, then drops its fields in declaration
 /// order, so each is declared before the objects it was created from.
 pub(crate) struct VulkanDevice {
+    /// The `Arc` this core is in, which transient frames hold as their
+    /// chunk source.
+    this: Weak<VulkanDevice>,
     /// Destroyed buffers, textures, samplers and programs, until nothing
     /// translated before their destruction can use them (see
     /// [`destruction`]).
@@ -157,6 +162,9 @@ pub(crate) struct VulkanDevice {
     samplers: RwLock<HandleTable<SamplerEntry>>,
     /// Every live program.
     programs: RwLock<HandleTable<ProgramEntry>>,
+    /// The transient chunks frames hold, and the pool of free ones (see
+    /// [`transient`]). Freed in `drop`, once the device is idle.
+    transient: Mutex<TransientChunks>,
     /// The resource and sampler heaps. Destroyed in `drop`, after the
     /// tables, so that no entry's slot outlives its heap.
     heaps: DescriptorHeaps,
@@ -285,12 +293,14 @@ impl VulkanRenderHardwareInterface {
                 return Err(err);
             }
         };
-        let core = Arc::new(VulkanDevice {
+        let core = Arc::new_cyclic(|this| VulkanDevice {
+            this: this.clone(),
             deferred: Mutex::new(DeferredQueue::new()),
             buffers: RwLock::new(HandleTable::new("buffer")),
             textures: RwLock::new(HandleTable::new("texture")),
             samplers: RwLock::new(HandleTable::new("sampler")),
             programs: RwLock::new(HandleTable::new("program")),
+            transient: Mutex::new(TransientChunks::new()),
             heaps,
             queues,
             query_pools: QueryPools::new(),
@@ -805,6 +815,9 @@ impl Drop for VulkanDevice {
         let _ = unsafe { self.device.queue_locks().wait_idle(self.device.handle()) };
         // SAFETY: The device is idle.
         unsafe { self.free_all_retired() };
+        // SAFETY: The device is idle, and the retired chunks are back in the
+        // pool.
+        unsafe { self.free_transient_chunks() };
         // Anything left in the tables is a leak, reported as it's drained.
         let buffers = self
             .buffers
@@ -917,6 +930,22 @@ impl GpuResources for VulkanDevice {
 
     fn destroy_program(&self, program: Program) {
         self.destroy_program_entry(program);
+    }
+
+    fn begin_transient_frame(&self) -> TransientFrame {
+        let this = self
+            .this
+            .upgrade()
+            .expect("the core is in its `Arc` while it's borrowed");
+        TransientFrame::new(this)
+    }
+
+    fn end_transient_frame(&self, frame: TransientFrame) {
+        assert!(
+            frame.is_from(self),
+            "a transient frame is ended on the device it was begun on"
+        );
+        drop(frame);
     }
 
     fn collect_garbage(&self) {

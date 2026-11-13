@@ -10,6 +10,10 @@
 //! [`GpuResources::collect_garbage`](crate::GpuResources::collect_garbage);
 //! or when the core is dropped, once the device is idle.
 //!
+//! A transient frame's chunks are retired the same way when the frame ends,
+//! and come back to the pool, rather than being freed, once nothing
+//! translated in the frame is outstanding (see [`transient`](super::transient)).
+//!
 //! Lock order: the deferred queue's lock is taken on its own, never while
 //! holding a queue's or a table's lock, and what it returns is freed after
 //! it's released.
@@ -40,6 +44,15 @@ pub(super) enum Retired {
     Sampler(SamplerEntry),
     /// A program's shader objects.
     Program(ProgramEntry),
+    /// The chunks of a transient frame that has ended: those of
+    /// [`CHUNK_SIZE`](crate::transient::CHUNK_SIZE), which go back to the
+    /// pool, and those of large allocations, which are freed.
+    TransientChunks {
+        /// The chunks of `CHUNK_SIZE`.
+        chunks: Vec<BufferEntry>,
+        /// The chunks of large allocations.
+        large: Vec<BufferEntry>,
+    },
 }
 
 impl VulkanDevice {
@@ -145,6 +158,10 @@ impl VulkanDevice {
             Retired::Sampler(entry) => self.free_sampler(entry),
             // SAFETY: Guaranteed by the caller.
             Retired::Program(entry) => unsafe { self.free_program(entry) },
+            // SAFETY: Guaranteed by the caller.
+            Retired::TransientChunks { chunks, large } => unsafe {
+                self.recycle_transient_chunks(chunks, large);
+            },
         }
     }
 

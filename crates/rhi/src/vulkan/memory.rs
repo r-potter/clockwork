@@ -46,7 +46,10 @@ const HOST_BLOCK_SIZE: u64 = 64 << 20;
 ///
 /// Raw pointers are neither `Send` nor `Sync`, but the allocator must be
 /// both, since design 0002 shares the device between threads. This wrapper
-/// is the one `unsafe impl` of either in the RHI (design 0002, "Risks").
+/// has the backend's one `unsafe impl` of either (design 0002, "Risks").
+/// The RHI's others are on `TransientChunk` and `TransientAllocation`, which
+/// carry a chunk's mapped address out of the backend, and rest on
+/// `ChunkSource`'s safety contract.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct MappedPointer(NonNull<u8>);
 

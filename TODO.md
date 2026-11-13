@@ -243,6 +243,15 @@ Outstanding tasks and future work.
       range past the end of one is read or written unreported. Translation
       could look the address up in the buffer table in debug builds and
       panic, naming the buffer, if the range doesn't fit inside it.
+- [ ] **Fill recycled transient chunks with a pattern in debug builds, if
+      late reads need catching.** A list translated after its frame ends
+      reads transient data another frame may have overwritten, which
+      validation can't detect (design 0002, "Risks"). The design proposed
+      filling recycled chunks with a pattern in debug builds, so a late
+      read shows as garbage, but `rhi-transient` left it out until such a
+      bug turns up. The frame knows how far it bumped through each chunk,
+      so only that part, and a new chunk once, would need filling, at
+      about the cost of the data written.
 - [ ] **Check copy hazards once synchronization validation sees copies
       and fills by address.** The RHI copies and fills with
       `VK_KHR_device_address_commands`, which synchronization validation
