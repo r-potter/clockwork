@@ -47,7 +47,8 @@ use crate::render_pass::AttachedTexture;
 use crate::view::{ViewType, ViewedTexture};
 use crate::{
     Access, DescriptorIndex, Extent3d, Format, FormatInfo, HeapKind, MemoryLocation, RhiError,
-    RhiResult, Subresource, Texture, TextureDesc, TextureDimension, TextureUsage, TextureView,
+    RhiResult, Subresource, Texture, TextureDesc, TextureDimension, TextureInfo, TextureUsage,
+    TextureView,
 };
 
 /// A texture in the texture table.
@@ -96,6 +97,18 @@ impl TextureEntry {
     /// Its format.
     pub(super) fn texel_format(&self) -> Format {
         self.format
+    }
+
+    /// What it was created as.
+    pub(super) fn info(&self) -> TextureInfo {
+        TextureInfo {
+            dimension: self.dimension,
+            format: self.format,
+            extent: self.extent,
+            mip_levels: self.mip_count,
+            array_layers: self.layer_count,
+            usage: self.usage,
+        }
     }
 
     /// What copy checks need to know about the texture labelled `label`.
@@ -402,6 +415,17 @@ impl VulkanDevice {
     pub(super) fn destroy_texture_entry(&self, texture: Texture) {
         let (_, entry) = self.lock_textures_for_writing().remove(texture.handle());
         self.retire(Retired::Texture(entry));
+    }
+
+    /// What `texture` was created as.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the handle is stale.
+    pub(super) fn texture_entry_info(&self, texture: Texture) -> TextureInfo {
+        self.lock_textures_for_reading()
+            .get(texture.handle())
+            .info()
     }
 
     /// Destroys a texture taken out of the table and its attachment views,
