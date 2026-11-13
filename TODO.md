@@ -247,6 +247,21 @@ Outstanding tasks and future work.
       barrier between copies isn't reported (see "Validation is required"
       in `docs/testing.md`). When a validation layer release tracks them,
       add a copy case to `missing_barrier_is_reported`.
+- [ ] **Write `missing_barrier_is_reported` once synchronization
+      validation reports a hazard between RHI commands.** Design 0002's
+      R8 asks for a T1 test that a missing barrier is reported and that
+      the barrier removes the report. The layer in SDK 1.4.363 reports no
+      hazard between two render passes that write one attachment with no
+      barrier between them, whether they clear, load or draw, and with
+      copies and fills by address untracked (above), no pair of RHI
+      commands produces one. A raw repro needs only a 4×4 colour image in
+      `COLOR_ATTACHMENT_OPTIMAL` and two `vkCmdBeginRendering` and
+      `vkCmdEndRendering` pairs that clear and store it, which report
+      nothing, while two `vkCmdClearColorImage` calls on the same image
+      report `SYNC-HAZARD-WRITE-AFTER-WRITE`. Find out whether the spec
+      orders attachment writes across render pass instances, and if not,
+      report it upstream. When the layer reports either case, write the
+      test, rendering twice, or copying, with and without a barrier.
 - [ ] **Remove the workarounds for NVIDIA's broken copies once they're
       fixed.** NVIDIA's proprietary driver, up to 617.42 at least, breaks
       copies by address, with no validation message:

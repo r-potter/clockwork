@@ -2,10 +2,10 @@
 //! (design 0002, R4, R5, R6, R7, R9, R16, R21 and R25).
 //!
 //! Synchronization validation doesn't track copies and fills by address
-//! (`VK_KHR_device_address_commands`), on either side, so a missing
-//! barrier between them isn't reported, and R8's
-//! `missing_barrier_is_reported`, which renders twice, is still to come in
-//! `rhi-shaders`.
+//! (`VK_KHR_device_address_commands`), on either side, and doesn't report a
+//! missing barrier between render passes that write the same attachment,
+//! so R8's `missing_barrier_is_reported` waits for a layer that reports
+//! one, which `TODO.md` tracks.
 
 use std::panic::{self, AssertUnwindSafe};
 
