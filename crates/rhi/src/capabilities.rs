@@ -95,7 +95,7 @@ pub struct Limits {
     /// The buffer offset alignment, in bytes, at which copies to and from
     /// textures are fastest: a power of two, and a hint rather than a
     /// requirement. [`copy_offset_alignment`](Self::copy_offset_alignment)
-    /// combines it with what a format needs.
+    /// combines it with what a format needs, reading 0 as no preference.
     pub optimal_copy_offset_alignment: u64,
 }
 
@@ -104,12 +104,15 @@ impl Limits {
     /// buffer, for copies to and from textures: the least multiple of both
     /// what every copy of the format needs and
     /// [`optimal_copy_offset_alignment`](Self::optimal_copy_offset_alignment)
-    /// (design 0002, "Texture copies").
+    /// (design 0002, "Texture copies"). An optimal alignment of 0, which no
+    /// device should report, is read as 1, so the result is never 0.
     pub const fn copy_offset_alignment(&self, format: Format) -> u64 {
-        lcm(
-            required_offset_alignment(format.info()),
-            self.optimal_copy_offset_alignment,
-        )
+        let optimal = if self.optimal_copy_offset_alignment == 0 {
+            1
+        } else {
+            self.optimal_copy_offset_alignment
+        };
+        lcm(required_offset_alignment(format.info()), optimal)
     }
 }
 
@@ -240,6 +243,15 @@ mod tests {
         assert_eq!(limits(1).copy_offset_alignment(Format::Rgba32Float), 16);
         assert_eq!(limits(1).copy_offset_alignment(Format::Depth32Float), 4);
         assert_eq!(limits(4).copy_offset_alignment(Format::Bc1RgbaSrgb), 8);
+    }
+
+    /// An optimal alignment of 0 is no preference, so the format's own
+    /// alignment applies, rather than an alignment of 0, which can't be
+    /// rounded up to.
+    #[test]
+    fn zero_optimal_alignments_are_ignored() {
+        assert_eq!(limits(0).copy_offset_alignment(Format::Rgba8Unorm), 4);
+        assert_eq!(limits(0).copy_offset_alignment(Format::Bc7Unorm), 16);
     }
 
     /// The alignment is a multiple of both when neither divides the other,
