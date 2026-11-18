@@ -385,13 +385,17 @@ fn describe_range(range: &Range<u32>) -> String {
     }
 }
 
+/// The range a barrier for a whole buffer applies to: from its start to
+/// its end, whatever its size.
+pub(crate) const WHOLE_BUFFER: Range<u64> = 0..u64::MAX;
+
 /// What a barrier applies to.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) enum BarrierTarget {
     /// All memory, as a global memory barrier.
     Global,
-    /// A buffer, whole.
-    Buffer(Buffer),
+    /// Bytes of a buffer, by offset, with [`WHOLE_BUFFER`] for all of it.
+    Buffer(Buffer, Range<u64>),
     /// Part of a texture.
     Texture(Texture, Subresource),
 }
@@ -429,7 +433,25 @@ impl Barrier {
         after: impl Into<AccessSet>,
     ) -> Self {
         Self {
-            target: BarrierTarget::Buffer(buffer),
+            target: BarrierTarget::Buffer(buffer, WHOLE_BUFFER),
+            before: before.into(),
+            after: after.into(),
+            transfer: None,
+        }
+    }
+
+    /// A barrier for the bytes `range` of `buffer`, by offset. With a queue
+    /// transfer, only those bytes move, so the rest of the buffer keeps its
+    /// owner and contents. The range must be in the buffer, which
+    /// translation checks.
+    pub fn buffer_range(
+        buffer: Buffer,
+        range: Range<u64>,
+        before: impl Into<AccessSet>,
+        after: impl Into<AccessSet>,
+    ) -> Self {
+        Self {
+            target: BarrierTarget::Buffer(buffer, range),
             before: before.into(),
             after: after.into(),
             transfer: None,
@@ -524,7 +546,7 @@ impl Barrier {
             // A global barrier orders memory accesses only, with no layout,
             // so it can't present.
             BarrierTarget::Global => ("all memory", |access| access != Access::Present),
-            BarrierTarget::Buffer(_) => ("a buffer", Access::applies_to_buffers),
+            BarrierTarget::Buffer(..) => ("a buffer", Access::applies_to_buffers),
             BarrierTarget::Texture(..) => ("a texture", Access::applies_to_textures),
         };
         for access in self.before.iter().chain(self.after.iter()) {
@@ -539,6 +561,13 @@ impl Barrier {
                 self.target != BarrierTarget::Global,
                 "command list \"{list}\" has a barrier for all memory with a queue transfer, but \
                  only a buffer or texture can move between queues",
+            );
+        }
+        if let BarrierTarget::Buffer(_, range) = &self.target {
+            assert!(
+                range.start < range.end,
+                "command list \"{list}\" has a barrier for bytes {range:?} of a buffer, but a \
+                 barrier's range must have at least one byte",
             );
         }
         if let BarrierTarget::Texture(..) = self.target {
@@ -827,6 +856,16 @@ mod tests {
         .resolve("albedo", 4, 1);
     }
 
+    /// A buffer barrier for no bytes panics, naming the list.
+    #[test]
+    #[should_panic(
+        expected = "command list \"list\" has a barrier for bytes 8..8 of a buffer, but a \
+                    barrier's range must have at least one byte"
+    )]
+    fn empty_buffer_ranges_panic() {
+        Barrier::buffer_range(buffer(), 8..8, Access::CopyWrite, Access::CopyRead).check("list");
+    }
+
     /// Barriers whose accesses suit what they apply to pass, including
     /// discarding a texture's contents with a barrier from `None`, and sets
     /// with one layout.
@@ -835,6 +874,9 @@ mod tests {
         Barrier::global(Access::CopyWrite, Access::HostRead).check("list");
         Barrier::global(Access::ColorAttachmentWrite, Access::FragmentShaderRead).check("list");
         Barrier::buffer(buffer(), Access::HostWrite, Access::CopyRead).check("list");
+        Barrier::buffer_range(buffer(), 16..32, Access::CopyWrite, Access::CopyRead)
+            .with_queue_transfer(QueueId::new(1), QueueId::new(0))
+            .check("list");
         Barrier::buffer(
             buffer(),
             Access::CopyWrite,

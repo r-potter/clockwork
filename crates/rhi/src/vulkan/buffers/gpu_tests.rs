@@ -102,6 +102,40 @@ fn many_small_buffers() {
     assert!(statistics.pool.blocks <= 1, "{statistics:?}");
 }
 
+/// A buffer reports the size it was created with, in every location,
+/// rather than the size of the memory behind it.
+#[test]
+fn buffers_report_their_size() {
+    let session = TestSession::new();
+    let backend = VulkanTestBackend::headless(&session);
+    let resources = backend.resources();
+    for (size, location) in [
+        (1, MemoryLocation::Device),
+        (1_000, MemoryLocation::Upload),
+        (65_537, MemoryLocation::Readback),
+    ] {
+        let buffer = resources
+            .create_buffer(&desc("sized", size, location))
+            .unwrap();
+        assert_eq!(resources.buffer_size(buffer), size, "{location:?}");
+        resources.destroy_buffer(buffer);
+    }
+}
+
+/// Looking up a destroyed buffer's size panics, naming the buffer.
+#[test]
+#[should_panic(expected = "stale buffer handle: \"sized\" was destroyed")]
+fn stale_buffer_size_panics() {
+    let session = TestSession::new();
+    let backend = VulkanTestBackend::headless(&session);
+    let resources = backend.resources();
+    let buffer = resources
+        .create_buffer(&desc("sized", 64, MemoryLocation::Device))
+        .unwrap();
+    resources.destroy_buffer(buffer);
+    resources.buffer_size(buffer);
+}
+
 /// Using a destroyed buffer's handle panics, naming the buffer (R3's
 /// `stale_handle_panics`).
 #[test]

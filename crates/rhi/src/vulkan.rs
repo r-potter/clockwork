@@ -892,6 +892,10 @@ impl GpuResources for VulkanDevice {
         self.buffer_entry_address(buffer)
     }
 
+    fn buffer_size(&self, buffer: Buffer) -> u64 {
+        self.buffer_entry_size(buffer)
+    }
+
     fn write_buffer(&self, buffer: Buffer, offset: u64, data: &[u8]) {
         self.write_buffer_entry(buffer, offset, data);
     }

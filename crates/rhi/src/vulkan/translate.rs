@@ -33,6 +33,7 @@
 #[cfg(test)]
 mod gpu_tests;
 
+use std::ops::Range;
 use std::sync::Arc;
 use std::{fmt, mem};
 
@@ -45,7 +46,7 @@ use super::error::error;
 use super::queues::Queues;
 use super::render_state::colour_attachments;
 use super::timings::RecordedTimings;
-use crate::barrier::BarrierTarget;
+use crate::barrier::{BarrierTarget, WHOLE_BUFFER};
 use crate::command_list::{
     Command, DISPATCH_ARGUMENTS_SIZE, DRAW_ARGUMENTS_SIZE, DRAW_INDEXED_ARGUMENTS_SIZE,
     indirect_draws_size,
@@ -393,18 +394,25 @@ impl VulkanDevice {
                                     .dst_stage_mask(after.stages)
                                     .dst_access_mask(after.access),
                             ),
-                            BarrierTarget::Buffer(target) => buffer_barriers.push(
-                                vk::BufferMemoryBarrier2::default()
-                                    .src_stage_mask(before.stages)
-                                    .src_access_mask(before.access)
-                                    .dst_stage_mask(after.stages)
-                                    .dst_access_mask(after.access)
-                                    .src_queue_family_index(src_family)
-                                    .dst_queue_family_index(dst_family)
-                                    .buffer(buffers.get(target.handle()).buffer())
-                                    .offset(0)
-                                    .size(vk::WHOLE_SIZE),
-                            ),
+                            BarrierTarget::Buffer(target, range) => {
+                                let (label, entry) = buffers
+                                    .lookup(target.handle())
+                                    .unwrap_or_else(|err| panic!("{err}"));
+                                let (offset, size) =
+                                    buffer_barrier_range(list.label(), label, entry.size(), range);
+                                buffer_barriers.push(
+                                    vk::BufferMemoryBarrier2::default()
+                                        .src_stage_mask(before.stages)
+                                        .src_access_mask(before.access)
+                                        .dst_stage_mask(after.stages)
+                                        .dst_access_mask(after.access)
+                                        .src_queue_family_index(src_family)
+                                        .dst_queue_family_index(dst_family)
+                                        .buffer(entry.buffer())
+                                        .offset(offset)
+                                        .size(size),
+                                );
+                            }
                             BarrierTarget::Texture(target, subresource) => {
                                 let (label, entry) = textures
                                     .lookup(target.handle())
@@ -1019,12 +1027,61 @@ fn queue_transfer(
     }
 }
 
+/// The offset and size of a barrier for the bytes `range` of the buffer
+/// labelled `label`, of `size` bytes, in the command list `list`, with
+/// `VK_WHOLE_SIZE` for a range that reaches the end of the buffer. Pure, so
+/// it's tested without a GPU.
+///
+/// # Panics
+///
+/// Panics, naming the list and buffer, if the range doesn't fit in the
+/// buffer.
+fn buffer_barrier_range(list: &str, label: &str, size: u64, range: &Range<u64>) -> (u64, u64) {
+    if *range == WHOLE_BUFFER {
+        return (0, vk::WHOLE_SIZE);
+    }
+    assert!(
+        range.end <= size,
+        "command list \"{list}\" has a barrier for bytes {range:?} of buffer \"{label}\", which \
+         has {size}",
+    );
+    (range.start, range.end - range.start)
+}
+
 #[cfg(test)]
 mod tests {
     //! T0 tests of recording queue transfers (design 0002,
-    //! "Synchronization").
+    //! "Synchronization") and buffer barriers' ranges.
 
     use super::*;
+
+    /// A whole buffer's barrier covers it all, whatever its size, and a
+    /// range's covers just its bytes, up to the buffer's end.
+    #[test]
+    fn buffer_barriers_cover_their_range() {
+        assert_eq!(
+            buffer_barrier_range("list", "buffer", 64, &WHOLE_BUFFER),
+            (0, vk::WHOLE_SIZE)
+        );
+        assert_eq!(
+            buffer_barrier_range("list", "buffer", 64, &(16..48)),
+            (16, 32)
+        );
+        assert_eq!(
+            buffer_barrier_range("list", "buffer", 64, &(0..64)),
+            (0, 64)
+        );
+    }
+
+    /// A barrier for bytes past a buffer's end panics, naming the buffer.
+    #[test]
+    #[should_panic(
+        expected = "command list \"list\" has a barrier for bytes 32..65 of buffer \"buffer\", \
+                    which has 64"
+    )]
+    fn buffer_barriers_past_the_end_panic() {
+        buffer_barrier_range("list", "buffer", 64, &(32..65));
+    }
 
     /// A device's queues, each a family and a name, indexed by ID.
     struct FakeQueues(&'static [(u32, &'static str)]);
