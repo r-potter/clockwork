@@ -1,9 +1,9 @@
 //! A fake of [`GpuResources`] for the uploader's T0 tests, over host
 //! memory. Compiled only for tests.
 //!
-//! It fakes only what the uploader uses: buffers, whose handles it issues
-//! from a handle table so that a stale handle panics as on a real backend.
-//! The other methods panic.
+//! It fakes only what the uploader uses: buffers, and what textures were
+//! created as, whose handles it issues from handle tables so that a stale
+//! handle panics as on a real backend. The other methods panic.
 
 use std::collections::HashMap;
 use std::sync::{Mutex, MutexGuard, PoisonError};
@@ -35,6 +35,10 @@ struct State {
     handles: HandleTable<()>,
     /// The buffers not yet destroyed.
     buffers: HashMap<Buffer, FakeBuffer>,
+    /// Issues texture handles, and finds stale ones.
+    texture_handles: HandleTable<()>,
+    /// What each texture was created as.
+    textures: HashMap<Texture, TextureInfo>,
     /// How many buffers it has created.
     created: u64,
     /// The sizes of the buffers it destroyed, in the order it destroyed
@@ -67,11 +71,22 @@ impl FakeResources {
             state: Mutex::new(State {
                 handles: HandleTable::new("buffer"),
                 buffers: HashMap::new(),
+                texture_handles: HandleTable::new("texture"),
+                textures: HashMap::new(),
                 created: 0,
                 destroyed: Vec::new(),
                 remaining: None,
             }),
         }
+    }
+
+    /// A texture labelled `label`, created as `info`, for the uploader to
+    /// look up.
+    pub(crate) fn add_texture(&self, label: &str, info: TextureInfo) -> Texture {
+        let mut state = self.state();
+        let texture = Texture::from_handle(state.texture_handles.insert(label, ()));
+        state.textures.insert(texture, info);
+        texture
     }
 
     /// Fails to create buffers once it has created `count` more.
@@ -176,6 +191,10 @@ impl GpuResources for FakeResources {
         self.with_buffer(buffer, |buffer| buffer.address)
     }
 
+    fn buffer_size(&self, buffer: Buffer) -> u64 {
+        self.with_buffer(buffer, |buffer| buffer.bytes.len() as u64)
+    }
+
     fn write_buffer(&self, buffer: Buffer, offset: u64, data: &[u8]) {
         let mut state = self.state();
         state.handles.get(buffer.handle());
@@ -204,8 +223,10 @@ impl GpuResources for FakeResources {
         unimplemented!("the uploader doesn't destroy textures")
     }
 
-    fn texture_info(&self, _: Texture) -> TextureInfo {
-        unimplemented!("the fake has no textures yet")
+    fn texture_info(&self, texture: Texture) -> TextureInfo {
+        let state = self.state();
+        state.texture_handles.get(texture.handle());
+        state.textures[&texture]
     }
 
     fn texture_index(&self, _: Texture, _: TextureView) -> RhiResult<DescriptorIndex> {

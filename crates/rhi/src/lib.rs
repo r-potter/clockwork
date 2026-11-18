@@ -377,6 +377,15 @@ pub trait GpuResources: Debug + Send + Sync {
     /// Panics if the handle is stale.
     fn buffer_address(&self, buffer: Buffer) -> GpuAddress;
 
+    /// The buffer's size, in bytes, as created. Copies name buffers by
+    /// address, so the `Uploader` uses it to check that an upload fits in
+    /// its buffer (design 0002, "Streaming").
+    ///
+    /// # Panics
+    ///
+    /// Panics if the handle is stale.
+    fn buffer_size(&self, buffer: Buffer) -> u64;
+
     /// Copies `data` into an upload buffer at `offset`.
     ///
     /// It doesn't synchronize with the GPU: the caller makes sure no

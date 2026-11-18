@@ -210,6 +210,15 @@ impl VulkanDevice {
         self.lock_buffers_for_reading().get(buffer.handle()).address
     }
 
+    /// The size of `buffer`, as created, in bytes.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the handle is stale.
+    pub(super) fn buffer_entry_size(&self, buffer: Buffer) -> u64 {
+        self.lock_buffers_for_reading().get(buffer.handle()).size
+    }
+
     /// Copies `data` into the upload buffer `buffer` at `offset`.
     ///
     /// # Panics

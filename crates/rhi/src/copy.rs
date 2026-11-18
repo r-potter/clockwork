@@ -278,7 +278,7 @@ impl TransferGranularity {
 
 /// The extent of mip `mip` of a texture whose largest mip is `extent`: each
 /// side halved for each mip, rounding down, and at least 1.
-fn mip_extent(extent: Extent3d, mip: u32) -> Extent3d {
+pub(crate) fn mip_extent(extent: Extent3d, mip: u32) -> Extent3d {
     let side = |size: u32| size.checked_shr(mip).unwrap_or(0).max(1);
     Extent3d {
         width: side(extent.width),
