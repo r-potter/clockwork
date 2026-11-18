@@ -96,6 +96,7 @@ pub use texture::{
 };
 pub use timing::{CommandBufferTimings, SubmissionTimings, Timing};
 pub use transient::{MAX_TRANSIENT_ALIGNMENT, TransientAllocation, TransientFrame};
+pub use upload::{Upload, Uploader};
 pub use view::TextureView;
 pub use viewport::{Extent2d, Offset2d, Rect2d, Viewport};
 use vulkan::VulkanRenderHardwareInterface;

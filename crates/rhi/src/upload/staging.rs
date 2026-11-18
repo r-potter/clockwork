@@ -159,6 +159,18 @@ impl Staging {
         })
     }
 
+    /// Whether nothing has been written since the last flush.
+    pub(crate) fn batch_is_empty(&self) -> bool {
+        self.batch.is_empty()
+    }
+
+    /// How many batches are in flight, for the uploader's tests to check
+    /// that flushes reclaim them.
+    #[cfg(test)]
+    pub(crate) fn in_flight_len(&self) -> usize {
+        self.in_flight.len()
+    }
+
     /// Ends the batch, whose copies complete at `timepoint`, so its buffers
     /// are in flight until then. Every flush ends one, even an empty one,
     /// so that the pool sees every flush.
@@ -341,8 +353,11 @@ mod tests {
     #[test]
     fn buffers_are_reused_once_their_copies_complete() {
         let (mut staging, resources) = staging();
+        assert!(staging.batch_is_empty());
         staging.write(&[1], 1).unwrap();
+        assert!(!staging.batch_is_empty());
         staging.submitted(timepoint(0, 1));
+        assert!(staging.batch_is_empty());
         staging.reclaim(|_| Ok(false)).unwrap();
         staging.write(&[2], 1).unwrap();
         assert_eq!(resources.created(), 2, "the first batch is in flight");
