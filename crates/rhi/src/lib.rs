@@ -60,6 +60,7 @@ mod test_support;
 mod texture;
 mod timing;
 mod transient;
+mod upload;
 mod view;
 mod viewport;
 mod vulkan;

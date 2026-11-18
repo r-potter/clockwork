@@ -1,23 +1,27 @@
-//! The pool of transient chunks a backend keeps for reuse, and how large it
-//! may grow (design 0002, "Transient memory", R23).
+//! A pool of chunks of upload memory kept for reuse, and how large it may
+//! grow (design 0002, "Transient memory", R23). The backend keeps one for
+//! its transient frames, and each uploader's staging keeps one over its own
+//! upload buffers, with each flush counting as a frame (see
+//! `upload::staging`). A change to what the pool keeps changes how much
+//! memory both keep.
 //!
-//! Frames take chunks of [`CHUNK_SIZE`] from the pool, or from the backend,
+//! Frames take chunks of [`CHUNK_SIZE`] from the pool, or from its owner,
 //! which creates them when the pool has none free, outside the pool's lock,
-//! and the chunks come back to the pool once nothing can use them. The pool counts the chunks taken and not
-//! yet back as in use: those of the frame being recorded, and of the frames
-//! still in flight.
+//! and the chunks come back to the pool once nothing can use them. The pool
+//! counts the chunks taken and not yet back as in use: those of the frame
+//! being recorded, and of the frames still in flight.
 //!
 //! So that a one-off spike doesn't hold its memory for the rest of the run,
 //! the pool keeps no more chunks, in use and free together, than were in use
 //! when the busiest of the last [`RECENT_FRAMES`] frames ended, and hands
-//! the rest back for the backend to free, the oldest first. Counting the
+//! the rest back for its owner to free, the oldest first. Counting the
 //! chunks in use, rather than only what one frame used, means that when
 //! several frames' chunks come back at once, the pool keeps what the frames
 //! recorded meanwhile will need, rather than freeing chunks only to create
-//! them again. Chunks of large allocations never come back to it: the
-//! backend frees them.
+//! them again. Chunks of large allocations never come back to it: its owner
+//! frees them.
 //!
-//! The pool is pure logic over whatever the backend calls a chunk, so it's
+//! The pool is pure logic over whatever its owner calls a chunk, so it's
 //! tested with plain values.
 
 #[cfg(doc)]
@@ -97,6 +101,20 @@ impl<C> ChunkPool<C> {
             .checked_sub(recycled)
             .expect("only chunks the pool handed out are recycled");
         self.trim()
+    }
+
+    /// Counts `count` chunks taken from the pool that its owner freed rather
+    /// than recycling, as no longer in use. An uploader's staging does this
+    /// when the copies that read them couldn't be submitted.
+    ///
+    /// # Panics
+    ///
+    /// Panics if more chunks are forgotten than are in use.
+    pub(crate) fn forget(&mut self, count: usize) {
+        self.in_use = self
+            .in_use
+            .checked_sub(count)
+            .expect("only chunks the pool handed out are forgotten");
     }
 
     /// Every free chunk, for the backend to free when it's dropped.
@@ -319,6 +337,29 @@ mod tests {
             assert_eq!(frames.pool.frame_ended(), NONE);
         }
         assert_eq!(frames.pool.frame_ended(), [1, 2, 3, 4]);
+    }
+
+    /// Forgotten chunks no longer count as in use, so the pool keeps none
+    /// for them once the frames that had them leave the window.
+    #[test]
+    fn forgotten_chunks_are_not_in_use() {
+        let mut frames = Frames::new();
+        frames.run(2);
+        frames.pool.forget(2);
+        for _ in 0..RECENT_FRAMES {
+            assert_eq!(frames.pool.frame_ended(), NONE);
+        }
+        assert_eq!(frames.pool.limit(), 0);
+    }
+
+    /// Forgetting more chunks than are in use panics, rather than
+    /// miscounting what's in use.
+    #[test]
+    #[should_panic(expected = "only chunks the pool handed out are forgotten")]
+    fn forgetting_untaken_chunks_panics() {
+        let mut frames = Frames::new();
+        frames.take();
+        frames.pool.forget(2);
     }
 
     /// Draining returns every free chunk, and leaves the pool empty.
