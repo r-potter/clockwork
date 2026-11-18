@@ -87,6 +87,21 @@ Outstanding tasks and future work.
       large list. If it's worth it, store each distinct render state once,
       for example with a map from state to its index in the arena, or skip
       state that hasn't changed since the last one set.
+- [ ] **Consider building the uploader's staging on the transient
+      allocator.** `Staging` (`crates/rhi/src/upload/staging.rs`) has its
+      own bump allocator over 4 MiB upload buffers, with the same
+      large-allocation rule as `TransientFrame`. It writes each upload
+      with `write_buffer`, which looks the buffer up every time, rather
+      than through a persistent mapping, and it tracks each flush's
+      timepoint to know when to reuse a batch. A `TransientFrame` per
+      flush, from a chunk pool of the uploader's own, would remove all
+      three: one allocator, writes through the mapping, and retirement by
+      deferred destruction. It needs a `GpuResources` method that creates
+      a pool, a Vulkan `ChunkSource` per pool, chunks that copies can read
+      from, and either a way to reach copy offset alignments beyond
+      `MAX_TRANSIENT_ALIGNMENT` or a reason to cap them there. Profile
+      streaming many small uploads first, and revise design 0002's
+      "Streaming" and "Transient memory" if it's worth doing.
 - [ ] **Let a program's stages come from separate SPIR-V modules.**
       `ProgramDesc` has one `spirv` field, and every stage is created from
       that module, choosing its entry point by name. That suits `slangc`,
