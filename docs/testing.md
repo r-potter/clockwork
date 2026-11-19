@@ -6,7 +6,7 @@ How to set up a machine, run the checks, and write tests. This guide describes o
 
 Every machine needs:
 - **Rust**, stable, with `clippy` and `rustfmt` (`rustup component add clippy rustfmt`)
-- **The Vulkan SDK** from [LunarG](https://vulkan.lunarg.com/sdk/home), which provides the Slang shader compiler (`slangc`) that `clockwork-rhi`'s `build.rs` runs, and the Khronos validation layer that GPU tests need. CI uses 1.4.363.0 (see `VULKAN_SDK_VERSION` in `.github/workflows/ci.yml`).
+- **The Vulkan SDK** from [LunarG](https://vulkan.lunarg.com/sdk/home), which provides the Slang shader compiler (`slangc`) that `clockwork-rhi`'s `build.rs` and the application's run, and the Khronos validation layer that GPU tests need. CI uses 1.4.363.0 (see `VULKAN_SDK_VERSION` in `.github/workflows/ci.yml`).
 
 GPU tests also need a Vulkan 1.4 driver. The checks below don't.
 
@@ -44,12 +44,12 @@ Check out the repository with Git's defaults: `.gitattributes` keeps every text 
 
 ### How `slangc` is found
 
-`clockwork-rhi`'s `build.rs` and `cargo xtask check` use the same lookup (`crates/rhi/build/slangc.rs`), in this order:
+Both build scripts and `cargo xtask check` use the same lookup (`crates/rhi/build/slangc.rs`), in this order:
 1. `SLANGC`, if set: the path to `slangc`, used as given
 2. the Vulkan SDK: `$VULKAN_SDK/bin/slangc` on Linux, `%VULKAN_SDK%\Bin\slangc.exe` on Windows
 3. each directory on `PATH`
 
-If none has it, the build fails with a message naming all three. Changing `SLANGC` or `VULKAN_SDK` recompiles the shaders. Changing `PATH` doesn't, so after moving `slangc` on `PATH`, run `cargo clean` or touch `crates/rhi/build.rs`.
+If none has it, the build fails with a message naming all three. Changing `SLANGC` or `VULKAN_SDK` recompiles the shaders. Changing `PATH` doesn't, so after moving `slangc` on `PATH`, run `cargo clean`, or touch `crates/rhi/build.rs` and `build.rs`.
 
 ## `cargo xtask check`
 
