@@ -7,6 +7,12 @@ publish = false
 [lints]
 workspace = true
 
+[features]
+# `test_support::backend_options`, so other crates' T1 tests create backends
+# configured as the RHI's own are. Enable it only in `[dev-dependencies]`
+# (ADR 0006).
+test-support = ["clockwork-diagnostics/test-support"]
+
 [dependencies]
 anyhow.workspace = true
 ash.workspace = true
