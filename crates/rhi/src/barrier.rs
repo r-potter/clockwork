@@ -68,11 +68,16 @@ pub enum Access {
     /// Presented to the window. Textures only: a surface image ends its
     /// frame here. Only valid alone.
     Present,
+    /// Acquired from the window. Textures only, and only before a barrier:
+    /// a surface image starts its frame here, and the barrier from it
+    /// discards its contents, as one from [`None`](Self::None) does, once
+    /// the image has been acquired. Only valid alone.
+    Acquired,
 }
 
 impl Access {
     /// Every access.
-    pub const ALL: [Self; 18] = [
+    pub const ALL: [Self; 19] = [
         Self::None,
         Self::IndirectRead,
         Self::IndexRead,
@@ -91,6 +96,7 @@ impl Access {
         Self::HostWrite,
         Self::HostRead,
         Self::Present,
+        Self::Acquired,
     ];
 
     /// Whether the access writes the resource.
@@ -116,6 +122,7 @@ impl Access {
                 | Self::DepthAttachmentRead
                 | Self::DepthAttachmentWrite
                 | Self::Present
+                | Self::Acquired
         )
     }
 
@@ -128,7 +135,7 @@ impl Access {
     /// an access only buffers have.
     pub(crate) const fn layout(self) -> Option<Layout> {
         match self {
-            Self::None => Some(Layout::Undefined),
+            Self::None | Self::Acquired => Some(Layout::Undefined),
             Self::IndirectRead | Self::IndexRead | Self::HostWrite | Self::HostRead => None,
             Self::VertexShaderRead
             | Self::FragmentShaderRead
@@ -158,7 +165,7 @@ impl Access {
 
     /// Whether the access is only valid alone in its set.
     const fn is_alone_only(self) -> bool {
-        matches!(self, Self::None | Self::Present)
+        matches!(self, Self::None | Self::Present | Self::Acquired)
     }
 
     /// The access's bit in an [`AccessSet`].
@@ -523,15 +530,19 @@ impl Barrier {
     /// # Panics
     ///
     /// Panics, naming the list, if:
-    /// - [`Access::None`] or [`Access::Present`] isn't alone in its set;
+    /// - [`Access::None`], [`Access::Present`] or [`Access::Acquired`] isn't
+    ///   alone in its set;
     /// - a buffer is given an access only textures have, or a texture one
     ///   only buffers have;
-    /// - all memory is given [`Access::Present`], which needs a layout;
+    /// - all memory is given [`Access::Present`] or [`Access::Acquired`],
+    ///   which belong to surface images;
     /// - a texture is moved to [`Access::None`], which has no layout to move
-    ///   to;
+    ///   to, or to [`Access::Acquired`], which only starts a frame;
     /// - a texture's set has no one layout, such as sampled and storage
     ///   access together.
-    /// - a queue transfer is for all memory, which no queue owns.
+    /// - a queue transfer is for all memory, which no queue owns, or is from
+    ///   [`Access::Acquired`], since a surface image has no owner to hand
+    ///   over.
     pub(crate) fn check(&self, list: &str) {
         for set in [self.before, self.after] {
             for access in set.iter() {
@@ -544,8 +555,10 @@ impl Barrier {
         }
         let (target, applies): (_, fn(Access) -> bool) = match self.target {
             // A global barrier orders memory accesses only, with no layout,
-            // so it can't present.
-            BarrierTarget::Global => ("all memory", |access| access != Access::Present),
+            // so it can't present, nor order the acquire of an image.
+            BarrierTarget::Global => ("all memory", |access| {
+                !matches!(access, Access::Present | Access::Acquired)
+            }),
             BarrierTarget::Buffer(..) => ("a buffer", Access::applies_to_buffers),
             BarrierTarget::Texture(..) => ("a texture", Access::applies_to_textures),
         };
@@ -562,6 +575,16 @@ impl Barrier {
                 "command list \"{list}\" has a barrier for all memory with a queue transfer, but \
                  only a buffer or texture can move between queues",
             );
+            // When the graphics and present queues are in different
+            // families, surface images are shared between them, so they're
+            // never transferred. Translation would also drop the acquire
+            // half's earlier stages, which order the barrier after the
+            // acquire.
+            assert!(
+                !self.before.contains(Access::Acquired),
+                "command list \"{list}\" has a barrier from Access::Acquired with a queue \
+                 transfer, but a surface image is used by every queue without moving",
+            );
         }
         if let BarrierTarget::Buffer(_, range) = &self.target {
             assert!(
@@ -575,6 +598,11 @@ impl Barrier {
                 !self.after.contains(Access::None),
                 "command list \"{list}\" has a barrier for a texture to Access::None, but a \
                  texture's contents are only discarded by a barrier from it",
+            );
+            assert!(
+                !self.after.contains(Access::Acquired),
+                "command list \"{list}\" has a barrier for a texture to Access::Acquired, but a \
+                 surface image is only acquired before its first barrier in a frame",
             );
             for set in [self.before, self.after] {
                 assert!(
@@ -678,6 +706,7 @@ mod tests {
             (Access::HostWrite, None),
             (Access::HostRead, None),
             (Access::Present, Some(L::Present)),
+            (Access::Acquired, Some(L::Undefined)),
         ];
         assert_eq!(
             expected.map(|(access, _)| access),
@@ -884,6 +913,8 @@ mod tests {
         )
         .check("list");
         Barrier::texture(texture(), Access::None, Access::ColorAttachmentWrite).check("list");
+        Barrier::texture(texture(), Access::Acquired, Access::ColorAttachmentWrite).check("list");
+        Barrier::texture(texture(), Access::ColorAttachmentWrite, Access::Present).check("list");
         Barrier::texture(
             texture(),
             Access::DepthAttachmentRead | Access::DepthAttachmentWrite,
@@ -937,6 +968,19 @@ mod tests {
             .check("upload");
     }
 
+    /// A barrier from `Acquired` can't move between queues, since surface
+    /// images are shared by the queues that use them.
+    #[test]
+    #[should_panic(
+        expected = "command list \"frame\" has a barrier from Access::Acquired with a queue \
+                    transfer, but a surface image is used by every queue without moving"
+    )]
+    fn queue_transfers_from_acquired_panic() {
+        Barrier::texture(texture(), Access::Acquired, Access::ColorAttachmentWrite)
+            .with_queue_transfer(TRANSFER, GRAPHICS)
+            .check("frame");
+    }
+
     /// A buffer barrier with an access only textures have panics, naming
     /// the list.
     #[test]
@@ -956,6 +1000,28 @@ mod tests {
     )]
     fn global_barriers_to_present_panic() {
         Barrier::global(Access::ColorAttachmentWrite, Access::Present).check("frame");
+    }
+
+    /// A global barrier can't order an acquire, which belongs to a surface
+    /// image.
+    #[test]
+    #[should_panic(
+        expected = "command list \"frame\" has a barrier for all memory with Acquired, which \
+                    doesn't apply to all memory"
+    )]
+    fn global_barriers_from_acquired_panic() {
+        Barrier::global(Access::Acquired, Access::ColorAttachmentWrite).check("frame");
+    }
+
+    /// A buffer barrier can't order an acquire, which belongs to a surface
+    /// image.
+    #[test]
+    #[should_panic(
+        expected = "command list \"frame\" has a barrier for a buffer with Acquired, which \
+                    doesn't apply to a buffer"
+    )]
+    fn buffer_barriers_from_acquired_panic() {
+        Barrier::buffer(buffer(), Access::Acquired, Access::CopyWrite).check("frame");
     }
 
     /// A texture barrier with an access only buffers have panics, in any
@@ -983,6 +1049,32 @@ mod tests {
     )]
     fn texture_barriers_to_none_panic() {
         Barrier::texture(texture(), Access::CopyRead, Access::None).check("frame");
+    }
+
+    /// A texture barrier to `Acquired` panics, since an image is acquired
+    /// only before its first barrier.
+    #[test]
+    #[should_panic(
+        expected = "command list \"frame\" has a barrier for a texture to Access::Acquired, but \
+                    a surface image is only acquired before its first barrier in a frame"
+    )]
+    fn texture_barriers_to_acquired_panic() {
+        Barrier::texture(texture(), Access::Present, Access::Acquired).check("frame");
+    }
+
+    /// `Acquired` beside another access panics, naming the set.
+    #[test]
+    #[should_panic(
+        expected = "command list \"frame\" has a barrier with ColorAttachmentWrite | Acquired, \
+                    but Acquired must be alone"
+    )]
+    fn acquired_beside_another_access_panics() {
+        Barrier::texture(
+            texture(),
+            Access::ColorAttachmentWrite | Access::Acquired,
+            Access::ColorAttachmentWrite,
+        )
+        .check("frame");
     }
 
     /// `None` beside another access panics, naming the set.

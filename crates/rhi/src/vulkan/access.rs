@@ -37,13 +37,22 @@ pub(super) enum Side {
 ///
 /// [`Access::None`] has no stages or flags, so a barrier from it waits for
 /// nothing. [`Access::Present`] has none either, since the swapchain's
-/// semaphores order presenting.
+/// semaphores order presenting. [`Access::Acquired`] has no flags, since the
+/// presentation engine's reads need no making available, and its stage is
+/// the one the submission that renders to a surface image waits for the
+/// acquire at. The two must match, so that a barrier from it is ordered
+/// after the wait, and the image isn't moved out of its layout while the
+/// presentation engine may still be reading it. `COLOR_ATTACHMENT_OUTPUT`
+/// is where a surface image's first use usually waits, so work before it in
+/// the submission can start before the image is acquired.
 pub(super) fn access_info(access: Access) -> AccessInfo {
     use vk::AccessFlags2 as A;
     use vk::PipelineStageFlags2 as S;
 
     let (stages, access) = match access {
         Access::None | Access::Present => (S::NONE, A::NONE),
+        // The stage the acquire is waited for at, as above.
+        Access::Acquired => (S::COLOR_ATTACHMENT_OUTPUT, A::NONE),
         Access::IndirectRead => (S::DRAW_INDIRECT, A::INDIRECT_COMMAND_READ),
         Access::IndexRead => (S::INDEX_INPUT, A::INDEX_READ),
         Access::VertexShaderRead => (S::VERTEX_SHADER, A::SHADER_STORAGE_READ),
@@ -144,16 +153,32 @@ mod tests {
         }
     }
 
-    /// Every access but `None` and `Present` happens in some stage, with
-    /// some memory access, so it's ordered by a barrier.
+    /// Every access but `None`, `Present` and `Acquired` has both stages and
+    /// access flags, so a barrier orders it and its memory. `None` and
+    /// `Present` have neither, and `Acquired` has a stage but no flags (see
+    /// `acquired_waits_for_the_acquire`).
     #[test]
     fn accesses_have_stages_and_flags() {
         for access in Access::ALL {
             let info = access_info(access);
             let has_stages = !info.stages.is_empty() && !info.access.is_empty();
-            let unordered = matches!(access, Access::None | Access::Present);
+            let unordered = matches!(access, Access::None | Access::Present | Access::Acquired);
             assert_eq!(has_stages, !unordered, "{access:?}");
         }
+    }
+
+    /// A barrier from `Acquired` waits for the stage the acquire is waited
+    /// for at, so it's ordered after the wait, with no memory access to make
+    /// available.
+    #[test]
+    fn acquired_waits_for_the_acquire() {
+        assert_eq!(
+            scope(Access::Acquired.into(), Side::Before),
+            AccessInfo {
+                stages: vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT,
+                access: vk::AccessFlags2::NONE,
+            },
+        );
     }
 
     /// Each layout maps to the Vulkan layout made for it, with
