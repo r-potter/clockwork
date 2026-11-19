@@ -76,13 +76,13 @@ Outstanding tasks and future work.
       back to the graphics queue for texture regions the transfer queue
       can't copy, and `flush` submits them, returning an `Upload` with
       their timepoint and acquire barriers. The design's remaining slice,
-      `rhi-present`, adds presentation, and moves the triangle out of the
-      backend, with its buffers filled through an `Uploader`, so that the
-      application decides what to draw. `TriangleShaders`
-      (`crates/rhi/src/vulkan/shaders.rs`) still creates its shader
-      objects itself, the way `create_program` does: when `rhi-present`
-      draws the triangle through the RHI, make it a `Program`, and remove
-      `TriangleShaders` and its second copy of `triangle.spv`.
+      `rhi-present`, added `acquire_surface_image` and `present`, and the
+      application now draws the triangle itself (`src/triangle.rs`), as a
+      `Program` from `assets/shaders/triangle.slang`, with its vertices
+      filled through an `Uploader`. The backend's own triangle is unused:
+      remove `render_frame`, `record_frame`, `TriangleShaders`
+      (`crates/rhi/src/vulkan/shaders.rs`) and `frames.rs`, and make
+      `crates/rhi/shaders/triangle.slang` a test shader.
 - [ ] **Profile command list recording and translation.** Recording
       appends each command's data to the list's arenas without removing
       duplicates, so a list that sets the same `RenderState` before every
@@ -205,8 +205,9 @@ Outstanding tasks and future work.
 - [x] **Add a frame loop.** `App::about_to_wait` in `src/main.rs` runs
       `App::frame` on every event loop iteration (except before the backend
       exists and while suspended), which measures the time since the last
-      frame, calls `App::update` (still a stub), then
-      `RenderHardwareInterface::render_frame`.
+      frame, calls `App::update` (still a stub), then draws the triangle
+      to a surface image from `acquire_surface_image` and presents it,
+      once the frame two before it is complete.
 - [ ] **Add frame pacing.** The `winit` event loop runs in
       `ControlFlow::Poll` mode so the engine can pace frames itself. For now,
       the swapchain's FIFO present mode limits the frame rate to the
