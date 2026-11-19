@@ -9,15 +9,18 @@ workspace = true
 # The application: the platform layer above the engine's crates (ADR 0006).
 [dependencies]
 anyhow.workspace = true
+bytemuck.workspace = true
 clap.workspace = true
 clockwork-diagnostics.workspace = true
 clockwork-rhi.workspace = true
-# Not used yet: for the triangle's vertices and push data (design 0002, "Data
-# structures and layout").
 glam.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 winit.workspace = true
+
+[dev-dependencies]
+clockwork-diagnostics = { workspace = true, features = ["test-support"] }
+clockwork-rhi = { workspace = true, features = ["test-support"] }
 
 # The engine is a crate per subsystem, under `crates/` (ADR 0006), and the
 # root package is the application. They're all default members, so plain
@@ -37,6 +40,9 @@ edition = "2024"
 anyhow = "1.0.104"
 ash = "0.38.0"
 ash-window = "0.13.0"
+# `Pod` for the structures shaders read, such as the triangle's vertices and
+# push data (design 0002, "Data structures and layout").
+bytemuck = { version = "1.25.2", features = ["derive"] }
 clap = { version = "4.6.7", features = ["derive"] }
 clockwork-diagnostics = { path = "crates/diagnostics" }
 clockwork-gpu-memory = { path = "crates/gpu-memory" }
