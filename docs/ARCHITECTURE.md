@@ -133,10 +133,10 @@ crates/diagnostics/             clockwork-diagnostics: sessions, log attribution
   src/capture.rs                  TestSession and the test subscriber, behind the test-support feature
 crates/gpu-memory/              clockwork-gpu-memory: the allocator's pure parts, the TLSF suballocator and the pool
 crates/rhi/                     clockwork-rhi: the RHI
-  build.rs                        compiles shaders/ to SPIR-V with slangc
+  build.rs                        compiles shaders/tests/ to SPIR-V with slangc, for the tests
   build/compile.rs                compiles a shader with slangc, shared by both build scripts
   build/slangc.rs                 finds slangc, shared by both build scripts and xtask
-  shaders/                        Slang shaders
+  shaders/                        Slang modules shaders import, and the test shaders in tests/
   src/lib.rs                      the RHI trait, backend options and backend selection
   src/test_support.rs             the test environment, for the RHI's tests, and other crates' with the test-support feature
   src/vulkan/                     the Vulkan backend
