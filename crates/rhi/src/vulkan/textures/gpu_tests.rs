@@ -1,15 +1,16 @@
 //! T1 tests of textures on a real device (design 0002, R3 and part of R6).
 
 use std::iter;
+use std::panic::{self, AssertUnwindSafe};
 use std::sync::PoisonError;
 
 use clockwork_diagnostics::capture::TestSession;
 
 use crate::vulkan::test_support::{Capability, VulkanTestBackend, require_capabilities};
 use crate::{
-    ColorAttachment, CommandList, DescriptorIndex, Extent3d, Format, HeapKind, LoadOp, QueueKind,
-    RenderHardwareInterface, RenderPassDesc, RhiError, StoreOp, Subresource, Texture, TextureDesc,
-    TextureDimension, TextureUsage, TextureView,
+    Access, Barrier, ColorAttachment, CommandList, DescriptorIndex, Extent3d, Format, HeapKind,
+    LoadOp, QueueKind, RenderHardwareInterface, RenderPassDesc, RhiError, StoreOp, SubmitDesc,
+    Subresource, Texture, TextureDesc, TextureDimension, TextureUsage, TextureView,
 };
 
 /// A sampled 2D texture of `width` × `height` texels, with one mip.
@@ -34,6 +35,8 @@ fn memory_type(backend: &VulkanTestBackend, texture: Texture) -> u32 {
         .unwrap_or_else(PoisonError::into_inner)
         .get(texture.handle())
         .allocation
+        .as_ref()
+        .expect("a texture created on the device has memory")
         .memory_type()
 }
 
@@ -412,4 +415,102 @@ fn invalid_textures_panic() {
         array_layers: 4,
         ..desc_2d("sky", 64, 64)
     });
+}
+
+/// A surface image is a colour attachment that can be rendered to, but not
+/// destroyed through `destroy_texture`. An ordinary texture can't be removed
+/// as one, and removing a surface image destroys its attachment views but not
+/// its image, or validation would report them when the device is destroyed.
+/// Without a window, another texture's image stands in for a swapchain's.
+#[test]
+fn surface_images_are_owned_by_their_swapchain() {
+    let session = TestSession::new();
+    let backend = VulkanTestBackend::headless(&session);
+    let resources = backend.resources();
+    let owner = resources
+        .create_texture(&TextureDesc {
+            usage: TextureUsage::COLOUR_ATTACHMENT,
+            format: Format::Bgra8Srgb,
+            ..desc_2d("owner", 8, 4)
+        })
+        .unwrap();
+    let image = backend
+        .core
+        .lock_textures_for_reading()
+        .get(owner.handle())
+        .image();
+    let extent = Extent3d {
+        width: 8,
+        height: 4,
+        depth: 1,
+    };
+    // SAFETY: The image stands in for a swapchain's: it outlives its entry,
+    // which is removed below, after the device is idle.
+    let surface = unsafe {
+        backend
+            .core
+            .insert_surface_images(&[image], Format::Bgra8Srgb, extent)
+    }[0];
+    let info = resources.texture_info(surface);
+    assert_eq!(info.format, Format::Bgra8Srgb);
+    assert_eq!(info.extent, extent);
+    assert_eq!(info.usage, TextureUsage::COLOUR_ATTACHMENT);
+
+    let mut list = CommandList::new("render");
+    list.barrier(&[Barrier::texture(
+        surface,
+        Access::None,
+        Access::ColorAttachmentWrite,
+    )]);
+    list.begin_render_pass(&RenderPassDesc {
+        colour: vec![ColorAttachment {
+            texture: surface,
+            mip: 0,
+            layers: 0..1,
+            load: LoadOp::DontCare,
+            store: StoreOp::DontCare,
+        }],
+        depth: None,
+    });
+    list.end_render_pass();
+    let graphics = backend.queue(QueueKind::Graphics);
+    let command_buffer = graphics.translate(&list).unwrap();
+    let timepoint = graphics
+        .submit(SubmitDesc {
+            command_buffers: vec![command_buffer],
+            wait_for: &[],
+        })
+        .unwrap();
+    graphics.wait(timepoint).unwrap();
+
+    let destroyed = panic::catch_unwind(AssertUnwindSafe(|| resources.destroy_texture(surface)));
+    let message = destroyed.expect_err("destroying a surface image panics");
+    assert_eq!(
+        message.downcast_ref::<String>().map(String::as_str),
+        Some(
+            "texture \"surface image 0\" is a surface image, which its swapchain owns, so it \
+             can't be destroyed"
+        ),
+    );
+
+    // An ordinary texture among the surface images panics before any of them
+    // are removed, so `surface` is still in the table below.
+    let removed = panic::catch_unwind(AssertUnwindSafe(|| {
+        // SAFETY: The submission that used `surface` has completed, and
+        // nothing is removed, since `owner` isn't a surface image.
+        unsafe { backend.core.remove_surface_images(&[surface, owner]) }
+    }));
+    let message = removed.expect_err("removing an ordinary texture panics");
+    assert_eq!(
+        message.downcast_ref::<String>().map(String::as_str),
+        Some(
+            "texture \"owner\" isn't a surface image, so it can't be removed with the \
+             swapchain's images"
+        ),
+    );
+
+    // SAFETY: The submission that used it has completed.
+    unsafe { backend.core.remove_surface_images(&[surface]) };
+    resources.destroy_texture(owner);
+    resources.collect_garbage();
 }

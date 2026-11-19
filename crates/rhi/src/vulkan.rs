@@ -341,14 +341,7 @@ impl VulkanRenderHardwareInterface {
         };
         // Pass the old swapchain to the new one so that its resources can be
         // reused, then drop it.
-        self.swapchain = Swapchain::new(
-            &self.core.instance.instance,
-            &self.core.device,
-            &self.core.physical_device,
-            surface,
-            window_size,
-            self.swapchain.as_ref(),
-        )?;
+        self.swapchain = Swapchain::new(&self.core, surface, window_size, self.swapchain.as_ref())?;
         self.swapchain_out_of_date = false;
         Ok(())
     }
@@ -789,7 +782,7 @@ impl fmt::Debug for VulkanRenderHardwareInterface {
                         "{}x{} {:?}",
                         extent.width,
                         extent.height,
-                        swapchain.format().format,
+                        swapchain.format(),
                     )
                 }),
             )

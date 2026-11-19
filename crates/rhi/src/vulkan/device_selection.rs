@@ -23,6 +23,7 @@ use super::capabilities;
 use super::descriptor_heaps::HeapLayout;
 use super::physical_device::PhysicalDevice;
 use super::surface::SurfaceSupport;
+use super::swapchain::choose_format;
 use crate::{
     Capabilities, MAX_DRAW_INDIRECT_COUNT, MAX_PUSH_DATA_SIZE, PresentCapabilities, QueueKind,
 };
@@ -212,10 +213,10 @@ const REQUIREMENTS: &[Requirement] = &[
         },
     },
     Requirement {
-        description: "supports a surface format and present mode for the window",
+        description: "supports an sRGB surface format and a present mode for the window",
         is_met: |candidate| {
             candidate.surface_support.as_ref().is_none_or(|support| {
-                !support.formats.is_empty() && !support.present_modes.is_empty()
+                choose_format(&support.formats).is_some() && !support.present_modes.is_empty()
             })
         },
     },
@@ -589,7 +590,10 @@ mod tests {
             device,
             surface_support: Some(SurfaceSupport {
                 present_families: present_families.to_vec(),
-                formats: vec![vk::SurfaceFormatKHR::default()],
+                formats: vec![vk::SurfaceFormatKHR {
+                    format: vk::Format::B8G8R8A8_SRGB,
+                    color_space: vk::ColorSpaceKHR::SRGB_NONLINEAR,
+                }],
                 present_modes: vec![vk::PresentModeKHR::FIFO],
             }),
         }
@@ -953,6 +957,29 @@ mod tests {
         );
         no_formats.surface_support.as_mut().unwrap().formats.clear();
         assert!(select(vec![no_formats], None).is_err());
+    }
+
+    /// A device whose surface offers only UNORM formats is rejected, since a
+    /// swapchain can't be created for it, so another device is chosen even
+    /// if it's otherwise worse.
+    #[test]
+    fn rejects_windowed_devices_without_srgb_surface_formats() {
+        let mut unorm_only = windowed(
+            device("unorm only", vk::PhysicalDeviceType::DISCRETE_GPU, 16 * GIB),
+            &[true],
+        );
+        unorm_only.surface_support.as_mut().unwrap().formats = vec![vk::SurfaceFormatKHR {
+            format: vk::Format::B8G8R8A8_UNORM,
+            color_space: vk::ColorSpaceKHR::SRGB_NONLINEAR,
+        }];
+        let srgb = windowed(
+            device("srgb", vk::PhysicalDeviceType::INTEGRATED_GPU, GIB),
+            &[true],
+        );
+        assert_eq!(
+            select(vec![unorm_only, srgb], None).unwrap().device.name(),
+            "srgb"
+        );
     }
 
     #[test]

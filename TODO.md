@@ -15,7 +15,7 @@ Outstanding tasks and future work.
       `REQUIREMENTS` (Vulkan 1.4, `VK_EXT_shader_object`, shader draw
       parameters, dynamic rendering and synchronization2, and a graphics
       queue; plus, when there is a window, `VK_KHR_swapchain`, a queue family
-      that can present, and a surface format and present mode), then
+      that can present, and an sRGB surface format and a present mode), then
       compared by device type and total device-local memory. The RHI keeps
       only the chosen device.
 - [ ] **Extend device selection as the renderer grows.** Add entries to
@@ -32,9 +32,9 @@ Outstanding tasks and future work.
       with the logical device and its graphics and present queues in
       `crates/rhi/src/vulkan/device.rs`. When there is a window, device
       selection requires `VK_KHR_swapchain`, a queue family that can present,
-      and a surface format and present mode. The swapchain is recreated on
-      resize, and destroyed and recreated with the surface on suspend and
-      resume.
+      and an sRGB surface format and a present mode. The swapchain is
+      recreated on resize, and destroyed and recreated with the surface on
+      suspend and resume.
 - [x] **Render and present frames.** `render_frame` in
       `crates/rhi/src/vulkan.rs` acquires a swapchain image, clears it to
       `CLEAR_COLOUR` with dynamic rendering, and presents it, with two frames
@@ -158,6 +158,19 @@ Outstanding tasks and future work.
 
   The KHR extension promoted the EXT ones, and the pinned `ash` has bindings
   for both.
+- [ ] **Catch command buffers kept past their surface image's swapchain.**
+      `Swapchain::drop` in `crates/rhi/src/vulkan/swapchain.rs` destroys its
+      images' attachment views at once, not through deferred destruction, so
+      a command buffer translated with a surface image, kept, and submitted
+      after the swapchain is recreated uses destroyed views. Design 0002
+      ("Presentation") makes that misuse, but it's undefined behaviour rather
+      than a panic. Have translation record, under the texture table's read
+      lock, each command buffer that uses a surface image until it's
+      submitted or dropped, and have `remove_surface_images` check for one
+      and remove the entries in one critical section under the write lock,
+      panicking before the swapchain waits for the device or destroys
+      anything, so every interleaving panics rather than racing. Removal
+      while the backend itself is dropped mustn't panic.
 - [x] **Order the first barrier on an acquired image after the acquire.**
       Decided at the start of `rhi-present`, and recorded as a revision of
       design 0002's "Synchronization": an acquired image starts at
