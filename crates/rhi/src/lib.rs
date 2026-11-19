@@ -56,8 +56,8 @@ mod render_state;
 mod sampler;
 #[cfg(test)]
 mod test_shaders;
-#[cfg(test)]
-mod test_support;
+#[cfg(any(test, feature = "test-support"))]
+pub mod test_support;
 mod texture;
 mod timing;
 mod transient;

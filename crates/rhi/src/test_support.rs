@@ -1,5 +1,10 @@
-//! Helpers shared by the RHI's tests: reading the test environment. Compiled
-//! only for tests.
+//! Helpers shared by the RHI's tests: reading the test environment.
+//!
+//! Compiled for the RHI's tests, and for other crates' with the
+//! `test-support` feature, which they enable only in their
+//! `[dev-dependencies]` (ADR 0006). Those get [`backend_options`], so their
+//! T1 tests create backends configured as the RHI's are. The rest, which
+//! decides whether a test needs a capability, is only for the RHI's tests.
 //!
 //! This is the only place tests read the environment (design 0001,
 //! "Configuration"): the engine itself never does, so its behaviour depends
@@ -10,11 +15,12 @@
 //! |---|---|---|
 //! | [`CLOCKWORK_DEVICE`] | Only consider devices whose names contain this, ignoring case | Every device |
 //! | [`CLOCKWORK_VALIDATION`] | The validation features, as for [`ValidationFeatures`]'s parser, except that `off` is rejected | `sync` |
-//! | [`CLOCKWORK_REQUIRED_CAPABILITIES`] | `all`, or a comma-separated list of capabilities whose absence fails tests rather than skipping them | None |
+//! | `CLOCKWORK_REQUIRED_CAPABILITIES` | `all`, or a comma-separated list of capabilities whose absence fails tests rather than skipping them | None |
 //!
 //! Each variable is read by a pure function of its value, tested here, and a
 //! wrapper that reads the environment.
 
+#[cfg(test)]
 use std::io::{self, Write};
 
 use anyhow::{Result, bail};
@@ -23,12 +29,13 @@ use clockwork_diagnostics::capture::TestSession;
 use crate::{BackendOptions, Validation, ValidationFeatures};
 
 /// Restricts T1 tests to devices whose names contain its value.
-pub(crate) const CLOCKWORK_DEVICE: &str = "CLOCKWORK_DEVICE";
+pub const CLOCKWORK_DEVICE: &str = "CLOCKWORK_DEVICE";
 
 /// The validation features T1 tests require.
-pub(crate) const CLOCKWORK_VALIDATION: &str = "CLOCKWORK_VALIDATION";
+pub const CLOCKWORK_VALIDATION: &str = "CLOCKWORK_VALIDATION";
 
 /// The capabilities whose absence fails T1 tests, rather than skipping them.
+#[cfg(test)]
 pub(crate) const CLOCKWORK_REQUIRED_CAPABILITIES: &str = "CLOCKWORK_REQUIRED_CAPABILITIES";
 
 /// The options for a backend in `session`, from the test environment: the
@@ -41,7 +48,7 @@ pub(crate) const CLOCKWORK_REQUIRED_CAPABILITIES: &str = "CLOCKWORK_REQUIRED_CAP
 /// # Panics
 ///
 /// Panics if [`CLOCKWORK_VALIDATION`] is invalid.
-pub(crate) fn backend_options(session: &TestSession) -> BackendOptions {
+pub fn backend_options(session: &TestSession) -> BackendOptions {
     let features = validation_features(env(CLOCKWORK_VALIDATION).as_deref())
         .unwrap_or_else(|err| panic!("{CLOCKWORK_VALIDATION}: {err:#}"));
     BackendOptions {
@@ -57,6 +64,7 @@ pub(crate) fn backend_options(session: &TestSession) -> BackendOptions {
 /// # Panics
 ///
 /// Panics if the variable is invalid, or names an unknown capability.
+#[cfg(test)]
 pub(crate) fn required_capabilities(known: &[&str]) -> RequiredCapabilities {
     RequiredCapabilities::parse(env(CLOCKWORK_REQUIRED_CAPABILITIES).as_deref(), known)
         .unwrap_or_else(|err| panic!("{CLOCKWORK_REQUIRED_CAPABILITIES}: {err:#}"))
@@ -98,6 +106,7 @@ fn device_filter(value: Option<&str>) -> Option<String> {
 /// Which capabilities T1 tests require, from
 /// [`CLOCKWORK_REQUIRED_CAPABILITIES`]. A test that needs a capability the
 /// device lacks fails if it's required, and is skipped otherwise.
+#[cfg(test)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum RequiredCapabilities {
     /// Every capability, as on the reference device.
@@ -106,6 +115,7 @@ pub(crate) enum RequiredCapabilities {
     Listed(Vec<String>),
 }
 
+#[cfg(test)]
 impl RequiredCapabilities {
     /// Parses [`CLOCKWORK_REQUIRED_CAPABILITIES`]'s value: `all`, or a
     /// comma-separated list of names from `known`. Unset or empty requires
@@ -146,6 +156,7 @@ impl RequiredCapabilities {
 }
 
 /// What a T1 test does when the device lacks a capability it needs (R9).
+#[cfg(test)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum MissingCapability {
     /// Skip the test, with a message.
@@ -157,6 +168,7 @@ pub(crate) enum MissingCapability {
 
 /// Decides what a test does when the device lacks the capability called
 /// `name`. Pure.
+#[cfg(test)]
 pub(crate) fn on_missing_capability(
     name: &str,
     required: &RequiredCapabilities,
@@ -178,6 +190,7 @@ pub(crate) fn on_missing_capability(
 /// # Panics
 ///
 /// Panics if `required` includes the capability.
+#[cfg(test)]
 pub(crate) fn missing_capability(name: &str, device: &str, required: &RequiredCapabilities) {
     let test = std::thread::current()
         .name()
@@ -203,6 +216,7 @@ pub(crate) fn missing_capability(name: &str, device: &str, required: &RequiredCa
 ///
 /// Like [`missing_capability`]'s, the message goes to the process's stderr
 /// directly, so that skips are visible in passing runs.
+#[cfg(test)]
 pub(crate) fn skip_for_driver_bug(device: &str, bug: &str) {
     let test = std::thread::current()
         .name()
