@@ -14,6 +14,7 @@
 //! to [`BackendOptions::session`]. See the [`validation`] module.
 
 mod access;
+mod acquire_semaphores;
 mod buffers;
 mod capabilities;
 mod command_pools;
@@ -46,7 +47,7 @@ mod validation;
 
 use std::ffi::CStr;
 use std::sync::{Arc, Mutex, PoisonError, RwLock, Weak};
-use std::{fmt, slice};
+use std::{fmt, mem, slice};
 
 use anyhow::{Context, Result, bail};
 use ash::vk::TaggedStructure;
@@ -55,18 +56,21 @@ use raw_window_handle::RawDisplayHandle;
 use tracing::{info, warn};
 
 use super::{
-    BackendOptions, Buffer, BufferDesc, Capabilities, DescriptorIndex, GpuAddress, GpuResources,
-    GraphicsApi, PresentCapabilities, Program, ProgramDesc, Queue, QueueKind,
-    RenderHardwareInterface, RhiResult, Sampler, SamplerDesc, Texture, TextureDesc, TextureInfo,
-    TextureView, TransientFrame, WindowSize, WindowTarget,
+    BackendOptions, Buffer, BufferDesc, Capabilities, DescriptorIndex, Extent2d, GpuAddress,
+    GpuResources, GpuTimepoint, GraphicsApi, PresentCapabilities, PresentDesc, Program,
+    ProgramDesc, Queue, QueueKind, RenderHardwareInterface, RhiResult, Sampler, SamplerDesc,
+    SubmitDesc, SurfaceImage, Texture, TextureDesc, TextureInfo, TextureView, TransientFrame,
+    WindowSize, WindowTarget,
 };
 use crate::deferred::DeferredQueue;
 use crate::handle::HandleTable;
+use acquire_semaphores::AcquireSemaphores;
 use buffers::BufferEntry;
 use descriptor_heaps::DescriptorHeaps;
 use destruction::Retired;
 use device::LogicalDevice;
 use device_selection::{Candidate, Selection};
+use error::{error, error_from_chain};
 use frames::Frames;
 use memory::MemoryAllocator;
 use physical_device::PhysicalDevice;
@@ -119,8 +123,16 @@ pub(crate) struct VulkanRenderHardwareInterface {
     frames: Frames,
     /// The shader objects that draw the triangle.
     triangle_shaders: TriangleShaders,
+    /// The image [`acquire_surface_image`] returned last, until it's
+    /// presented, or the swapchain is destroyed.
+    ///
+    /// [`acquire_surface_image`]: RenderHardwareInterface::acquire_surface_image
+    acquired: Option<AcquiredImage>,
     /// `None` when headless, while suspended, or while the window has no area.
     swapchain: Option<Swapchain>,
+    /// The semaphores acquiring signals. Declared after the swapchain, so a
+    /// semaphore an acquire may still signal outlives it.
+    acquire_semaphores: AcquireSemaphores,
     /// `None` when headless, or while suspended.
     surface: Option<Surface>,
     /// What presenting can do on the selected device.
@@ -134,6 +146,17 @@ pub(crate) struct VulkanRenderHardwareInterface {
     /// reference to it is dropped last, after every object created from it.
     /// Holders of `resources` may keep it alive longer.
     core: Arc<VulkanDevice>,
+}
+
+/// A swapchain image acquired for a frame, and not yet presented.
+#[derive(Debug, Clone, Copy)]
+struct AcquiredImage {
+    /// The image's index in the swapchain.
+    index: u32,
+    /// The image, as a texture.
+    texture: Texture,
+    /// The index in the pool of the semaphore acquiring it signals.
+    semaphore: usize,
 }
 
 /// The Vulkan backend's shared core (design 0002, "Ownership and
@@ -278,6 +301,7 @@ impl VulkanRenderHardwareInterface {
         // fails, the surface is still destroyed before the instance.
         let frames = Frames::new(&device)?;
         let triangle_shaders = TriangleShaders::new(&device)?;
+        let acquire_semaphores = AcquireSemaphores::new(&device);
 
         let allocator = MemoryAllocator::new(device.handle(), physical_device.memory_properties);
         let mut queues = Queues::new(&device, &physical_device)?;
@@ -315,7 +339,9 @@ impl VulkanRenderHardwareInterface {
             swapchain_out_of_date: false,
             frames,
             triangle_shaders,
+            acquired: None,
             swapchain: None,
+            acquire_semaphores,
             surface,
             present_capabilities,
             resources: core.clone(),
@@ -339,11 +365,40 @@ impl VulkanRenderHardwareInterface {
         let Some(surface) = &self.surface else {
             return Ok(());
         };
+        // An image acquired from the old swapchain can't be presented, and
+        // its semaphore is never reused, since its signal may be pending.
+        self.acquired = None;
         // Pass the old swapchain to the new one so that its resources can be
         // reused, then drop it.
         self.swapchain = Swapchain::new(&self.core, surface, window_size, self.swapchain.as_ref())?;
         self.swapchain_out_of_date = false;
         Ok(())
+    }
+
+    /// Recreates the swapchain once for everything since the last frame:
+    /// any number of resizes, or an out-of-date result from acquiring or
+    /// presenting. Window systems may report a resize without a change in
+    /// size, so it compares with the size the swapchain was created for.
+    ///
+    /// Returns the swapchain, or `None` if headless, suspended, or the
+    /// window has no area.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if swapchain creation fails.
+    fn prepare_swapchain(&mut self) -> Result<Option<&Swapchain>> {
+        let Some(window_size) = self.window_size else {
+            // Headless or suspended.
+            return Ok(None);
+        };
+        let size_changed = self
+            .swapchain
+            .as_ref()
+            .is_none_or(|swapchain| swapchain.window_size() != window_size);
+        if size_changed || self.swapchain_out_of_date {
+            self.recreate_swapchain(window_size)?;
+        }
+        Ok(self.swapchain.as_ref())
     }
 
     /// Acquires a swapchain image, clears it to [`CLEAR_COLOUR`], draws the
@@ -984,6 +1039,8 @@ impl RenderHardwareInterface for VulkanRenderHardwareInterface {
         // `resume` provides the window's size at that point.
         self.window_size = None;
         self.swapchain_out_of_date = false;
+        // As in `recreate_swapchain`.
+        self.acquired = None;
         // The swapchain must be destroyed before its surface.
         self.swapchain = None;
         self.surface = None;
@@ -1029,30 +1086,145 @@ impl RenderHardwareInterface for VulkanRenderHardwareInterface {
     }
 
     fn render_frame(&mut self) -> Result<()> {
-        let Some(window_size) = self.window_size else {
-            // Headless or suspended.
+        if self.prepare_swapchain()?.is_none() {
             return Ok(());
-        };
-
-        // Recreate the swapchain once for everything since the last frame: any
-        // number of resizes, or an out-of-date result from acquiring or
-        // presenting. Window systems may report a resize without a change in
-        // size, so compare with the size the swapchain was created for.
-        let size_changed = self
-            .swapchain
-            .as_ref()
-            .is_none_or(|swapchain| swapchain.window_size() != window_size);
-        if size_changed || self.swapchain_out_of_date {
-            self.recreate_swapchain(window_size)?;
         }
-
-        let Some(swapchain) = &self.swapchain else {
-            // The window has no area, so there is nothing to render to.
-            return Ok(());
-        };
+        let swapchain = self.swapchain.as_ref().expect("the swapchain was prepared");
         let out_of_date = self.draw_frame(swapchain)?;
         self.swapchain_out_of_date = out_of_date;
         self.frames.advance();
         Ok(())
+    }
+
+    fn acquire_surface_image(&mut self) -> RhiResult<Option<SurfaceImage>> {
+        if let Some(acquired) = &self.acquired {
+            panic!(
+                "acquire_surface_image was called again before surface image {} was presented",
+                acquired.index,
+            );
+        }
+        match self.prepare_swapchain() {
+            Ok(Some(_)) => {}
+            Ok(None) => return Ok(None),
+            Err(err) => return Err(error_from_chain(err, "swapchain")),
+        }
+        let swapchain = self.swapchain.as_ref().expect("the swapchain was prepared");
+        let core = &self.core;
+        let device = core.device.handle();
+        let (semaphore_index, semaphore) = self.acquire_semaphores.take(|timepoint| {
+            core.queues
+                .is_complete(device, timepoint.queue(), timepoint)
+        })?;
+        // SAFETY: The semaphore is unsignalled with no pending operations:
+        // it's new, or the submission that waited for its last signal has
+        // completed, or the acquire that took it last didn't signal it.
+        let acquired = unsafe { swapchain.acquire(semaphore) };
+        let (index, suboptimal) = match acquired {
+            Ok(acquired) => acquired,
+            Err(result) => {
+                // Neither result signals the semaphore.
+                self.acquire_semaphores.unsignalled(semaphore_index);
+                if result == vk::Result::ERROR_OUT_OF_DATE_KHR {
+                    self.swapchain_out_of_date = true;
+                    return Ok(None);
+                }
+                return Err(error(result, "acquire an image from", "swapchain"));
+            }
+        };
+        // A suboptimal image can still be presented, so render this frame,
+        // and recreate the swapchain at the next acquire.
+        self.swapchain_out_of_date |= suboptimal;
+        let extent = swapchain.extent();
+        let image = SurfaceImage {
+            texture: swapchain.texture(index),
+            extent: Extent2d {
+                width: extent.width,
+                height: extent.height,
+            },
+            format: swapchain.format(),
+        };
+        self.acquired = Some(AcquiredImage {
+            index,
+            texture: image.texture,
+            semaphore: semaphore_index,
+        });
+        Ok(Some(image))
+    }
+
+    fn present(&mut self, desc: PresentDesc<'_>) -> RhiResult<GpuTimepoint> {
+        let acquired = self.acquired.take().unwrap_or_else(|| {
+            panic!(
+                "present was given a surface image, but none is acquired: it was presented \
+                 already, or the swapchain was recreated since",
+            )
+        });
+        assert_eq!(
+            desc.image.texture, acquired.texture,
+            "present was given a surface image that isn't the one acquired last",
+        );
+        // Until the image is presented, an error leaves it acquired, but no
+        // longer in `acquired`, and the next acquire may then wait forever,
+        // since the swapchain may have no image to spare. So every error
+        // below leaves the swapchain marked for recreation, which drops the
+        // image with the old swapchain, and success restores the mark.
+        let was_out_of_date = mem::replace(&mut self.swapchain_out_of_date, true);
+        let swapchain = self
+            .swapchain
+            .as_ref()
+            .expect("an image is acquired only while there's a swapchain");
+        let core = &self.core;
+        let device = core.device.handle();
+        // Found before anything is submitted, so that a missing queue leaves
+        // no work waiting on a present that never happens.
+        let present_queue = core
+            .queues
+            .get(QueueRole::Present)
+            .context("a windowed Vulkan backend has no present queue")?;
+
+        // The submission waits for the acquire at the stage `Access::Acquired`
+        // has in the access table, `COLOR_ATTACHMENT_OUTPUT`, so the barrier
+        // from it is ordered after the wait. The two must match.
+        let acquire_wait = (
+            self.acquire_semaphores.semaphore(acquired.semaphore),
+            vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT,
+        );
+        let render_finished = swapchain.render_finished(acquired.index);
+        // SAFETY: Both semaphores were created on `device`. The acquire
+        // signalled the acquire semaphore, and nothing has waited for it.
+        // The render-finished semaphore is unsignalled with no pending
+        // signal: the present that waited for its last signal has, since the
+        // presentation engine released the image to be acquired again.
+        let timepoint = unsafe {
+            core.queues.submit_with_binary_semaphores(
+                device,
+                core.queues.id(QueueKind::Graphics),
+                SubmitDesc {
+                    command_buffers: desc.command_buffers,
+                    wait_for: desc.wait_for,
+                },
+                Some(acquire_wait),
+                Some(render_finished),
+            )
+        };
+        core.collect_retired_if_needed();
+        let timepoint = timepoint?;
+        self.acquire_semaphores
+            .waited(acquired.semaphore, timepoint);
+
+        let presented = {
+            let present_queue = present_queue.lock();
+            // SAFETY: The present queue was created on `device`, is locked,
+            // and its family can present to the surface, as checked by
+            // device selection and on resume. The image was acquired, and
+            // not presented, and the submission above signals its semaphore.
+            unsafe { swapchain.present(*present_queue, acquired.index) }
+        };
+        match presented {
+            Ok(suboptimal) => self.swapchain_out_of_date = was_out_of_date || suboptimal,
+            // Left marked for recreation.
+            Err(vk::Result::ERROR_OUT_OF_DATE_KHR) => {}
+            Err(result) => return Err(error(result, "present an image from", "swapchain")),
+        }
+        Ok(timepoint)
     }
 }

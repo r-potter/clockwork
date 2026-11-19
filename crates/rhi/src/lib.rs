@@ -48,6 +48,7 @@ mod ffi;
 #[cfg(test)]
 mod gpu_tests;
 mod handle;
+mod present;
 mod program;
 mod queue;
 mod render_pass;
@@ -83,6 +84,7 @@ pub use command_list::CommandList;
 pub use copy::{TextureCopy, TextureDataLayout, TransferGranularity};
 pub use descriptor::{DescriptorIndex, HeapKind};
 pub use error::{RhiError, RhiResult};
+pub use present::{PresentDesc, SurfaceImage};
 pub use program::{Program, ProgramDesc, ShaderStage};
 pub use queue::{CommandBuffer, GpuTimepoint, Queue, QueueId, SubmitDesc};
 pub use render_pass::{ColorAttachment, DepthAttachment, LoadOp, RenderPassDesc, StoreOp};
@@ -610,6 +612,7 @@ pub trait RenderHardwareInterface: Debug {
 
     /// Records a new window size. Size-dependent resources, such as the
     /// swapchain, are recreated for it at the start of the next
+    /// [`acquire_surface_image`](Self::acquire_surface_image) or
     /// [`render_frame`](Self::render_frame), so a stream of resizes (as during
     /// an interactive resize) causes only one recreation per frame.
     ///
@@ -628,6 +631,53 @@ pub trait RenderHardwareInterface: Debug {
     ///
     /// Returns an error if size-dependent resources cannot be recreated.
     fn render_frame(&mut self) -> Result<()>;
+
+    /// Acquires the swapchain image for the next frame to render to, first
+    /// recreating the swapchain if the window was resized, or acquiring or
+    /// presenting found it out of date. Waits until the presentation engine
+    /// releases an image.
+    ///
+    /// Returns `None` if headless, suspended, or while the window has no
+    /// area, and also when the swapchain turns out to be out of date as the
+    /// image is acquired, in which case the next call recreates it. The
+    /// image must be presented with [`present`](Self::present) before the
+    /// next call.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RhiError::SurfaceLost`] if the window's surface was lost,
+    /// [`RhiError::DeviceLost`] if the device was, or [`RhiError::Other`] if
+    /// the swapchain can't be recreated, or acquiring fails otherwise.
+    ///
+    /// # Panics
+    ///
+    /// Panics if an image acquired earlier hasn't been presented.
+    fn acquire_surface_image(&mut self) -> RhiResult<Option<SurfaceImage>>;
+
+    /// Submits the command buffers that render to the acquired image on the
+    /// graphics queue, waiting for its acquire and for `desc.wait_for`, then
+    /// presents it. Returns the submission's timepoint, which the frame's
+    /// resources, such as its transient memory, are in use until.
+    ///
+    /// If presenting finds the swapchain out of date, or no longer matching
+    /// the surface exactly, the next
+    /// [`acquire_surface_image`](Self::acquire_surface_image) recreates it.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RhiError::SurfaceLost`] if the window's surface was lost,
+    /// [`RhiError::DeviceLost`] if the device was, or [`RhiError::Other`] if
+    /// submitting or presenting fails otherwise. If submitting fails,
+    /// nothing is presented. After any error, the next
+    /// [`acquire_surface_image`](Self::acquire_surface_image) recreates the
+    /// swapchain, since the image may still be acquired.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `desc.image` isn't the image acquired last, or was
+    /// presented already, if a command buffer was translated for another
+    /// queue, or a timepoint to wait for wasn't returned by its queue.
+    fn present(&mut self, desc: PresentDesc<'_>) -> RhiResult<GpuTimepoint>;
 }
 
 /// Creates the render hardware interface for the given graphics API.

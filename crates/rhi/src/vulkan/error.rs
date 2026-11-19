@@ -38,6 +38,7 @@ fn variant(result: vk::Result, label: &str) -> Option<RhiError> {
             label: label.to_owned(),
         }),
         vk::Result::ERROR_DEVICE_LOST => Some(RhiError::DeviceLost),
+        vk::Result::ERROR_SURFACE_LOST_KHR => Some(RhiError::SurfaceLost),
         _ => None,
     }
 }
@@ -77,6 +78,22 @@ mod tests {
         assert!(matches!(
             error_from_chain(err, "vertices"),
             RhiError::DeviceLost
+        ));
+    }
+
+    /// A lost surface is `SurfaceLost`, on its own or in a chain, such as
+    /// from recreating a swapchain.
+    #[test]
+    fn surface_lost_is_mapped() {
+        assert!(matches!(
+            error(vk::Result::ERROR_SURFACE_LOST_KHR, "present", "swapchain"),
+            RhiError::SurfaceLost
+        ));
+        let err = anyhow::Error::from(vk::Result::ERROR_SURFACE_LOST_KHR)
+            .context("failed to create Vulkan swapchain");
+        assert!(matches!(
+            error_from_chain(err, "swapchain"),
+            RhiError::SurfaceLost
         ));
     }
 

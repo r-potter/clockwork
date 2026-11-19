@@ -26,9 +26,9 @@
 #[cfg(test)]
 mod gpu_tests;
 
-use std::fmt;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::{fmt, iter};
 
 use anyhow::{Context, Result};
 use ash::vk::TaggedStructure;
@@ -427,6 +427,36 @@ impl Queues {
         id: QueueId,
         desc: SubmitDesc<'_>,
     ) -> RhiResult<GpuTimepoint> {
+        // SAFETY: There are no binary semaphores.
+        unsafe { self.submit_with_binary_semaphores(device, id, desc, None, None) }
+    }
+
+    /// Submits `desc` to the queue `id`, as [`submit`](Self::submit) does,
+    /// also waiting for `binary_wait`, a binary semaphore and the stages
+    /// that wait for it, before running, and signalling `binary_signal`, a
+    /// binary semaphore, once complete, as presenting needs.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the submission fails.
+    ///
+    /// # Safety
+    ///
+    /// The semaphores must have been created on `device`. `binary_wait`
+    /// must have a signal submitted, and no other wait pending, and
+    /// `binary_signal` must be unsignalled, with no signal pending.
+    ///
+    /// # Panics
+    ///
+    /// As for [`submit`](Self::submit).
+    pub(super) unsafe fn submit_with_binary_semaphores(
+        &self,
+        device: &ash::Device,
+        id: QueueId,
+        desc: SubmitDesc<'_>,
+        binary_wait: Option<(vk::Semaphore, vk::PipelineStageFlags2)>,
+        binary_signal: Option<vk::Semaphore>,
+    ) -> RhiResult<GpuTimepoint> {
         let queue = self.queue(id);
         let command_buffer_infos: Vec<_> = desc
             .command_buffers
@@ -452,6 +482,11 @@ impl Queues {
                     .value(timepoint.value())
                     .stage_mask(vk::PipelineStageFlags2::ALL_COMMANDS)
             })
+            .chain(binary_wait.map(|(semaphore, stages)| {
+                vk::SemaphoreSubmitInfo::default()
+                    .semaphore(semaphore)
+                    .stage_mask(stages)
+            }))
             .collect();
 
         let locked = lock(&self.locks.0[id.index()]);
@@ -460,17 +495,24 @@ impl Queues {
             .semaphore(queue.timeline)
             .value(value)
             .stage_mask(vk::PipelineStageFlags2::ALL_COMMANDS);
+        let binary_signal = binary_signal.map(|semaphore| {
+            vk::SemaphoreSubmitInfo::default()
+                .semaphore(semaphore)
+                .stage_mask(vk::PipelineStageFlags2::ALL_COMMANDS)
+        });
+        let signals: Vec<_> = iter::once(signal).chain(binary_signal).collect();
         let submit_info = vk::SubmitInfo2::default()
             .wait_semaphore_infos(&waits)
             .command_buffer_infos(&command_buffer_infos)
-            .signal_semaphore_infos(std::slice::from_ref(&signal));
+            .signal_semaphore_infos(&signals);
         // SAFETY: The queue, semaphores and command buffers were created on
         // `device`, the queue is locked, so no other thread uses it, each
         // command buffer was recorded for its family and has ended, and is
         // owned by `desc`, so it's not pending elsewhere, the info structures
         // outlive the call, and `value` is greater than any value signalled
         // or waited for on this timeline so far. Every value waited for was
-        // returned by a submission, so its signal has been submitted.
+        // returned by a submission, so its signal has been submitted, and
+        // the caller guarantees the binary semaphores' states.
         unsafe {
             device.queue_submit2(
                 *locked,
