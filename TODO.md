@@ -23,6 +23,20 @@ Outstanding tasks and future work.
       comes to depend on, and refine `compare` if needed. The ADR 0002
       baseline is required since design 0002's `rhi-baseline` slice, and
       every field of `PhysicalDevice` is now read.
+- [ ] **Make the device filter a type that can't be blank.**
+      `BackendOptions::device_filter` is an `Option<String>`, and its two
+      sources each decide what a blank value means: `--device` rejects one
+      (`parse_device` in `src/main.rs`), and the T1 tests treat a blank
+      `CLOCKWORK_DEVICE` as unset (`device_filter` in
+      `crates/rhi/src/test_support.rs`). `BackendOptions` itself accepts
+      `Some("")`, which matches every device, and `Some(" ")`, which matches
+      every device with a space in its name, the silent mistake
+      `parse_device` exists to catch. Add a `DeviceFilter` newtype to
+      `clockwork-rhi`, whose constructor (or `FromStr`) rejects a value
+      that's empty or only whitespace, so the rule sits beside device
+      selection (`filter` in `crates/rhi/src/vulkan/device_selection.rs`).
+      `--device` would parse into it, and `backend_options` map a blank
+      variable to `None` before constructing one.
 - [x] **Create a window surface.** Done in `crates/rhi/src/vulkan/surface.rs`,
       using `ash-window` to enable the surface instance extensions and create
       the surface. Passing no window runs the backend headless.
