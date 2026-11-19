@@ -130,6 +130,7 @@ jobs:
       # needs ("Smoke runs").
       - name: Install lavapipe's build dependencies and the virtual displays
         run: |
+          echo 'Acquire::ForceIPv4 "true";' | sudo tee /etc/apt/apt.conf.d/99force-ipv4
           sudo apt-get update
           sudo apt-get install --yes --no-install-recommends \
             git ninja-build pkg-config g++ llvm-dev bison flex \
