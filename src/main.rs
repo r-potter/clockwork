@@ -1,6 +1,9 @@
 //! Clockwork application entry point: the platform layer, above the engine's
 //! crates (ADR 0006).
 
+mod triangle;
+
+use std::collections::VecDeque;
 use std::io::IsTerminal;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -9,8 +12,9 @@ use anyhow::{Context, Result, bail};
 use clap::Parser;
 use clockwork_diagnostics::{DiagnosticCounter, Session, SessionLayer, is_session_span};
 use clockwork_rhi::{
-    BackendOptions, GraphicsApi, RenderHardwareInterface, Validation, ValidationFeatures,
-    WindowSize, WindowTarget,
+    Access, BackendOptions, CommandList, GpuTimepoint, GraphicsApi, PresentDesc, QueueKind,
+    RenderHardwareInterface, RhiError, RhiResult, Validation, ValidationFeatures, WindowSize,
+    WindowTarget,
 };
 use tracing::level_filters::LevelFilter;
 use tracing::{info, trace};
@@ -24,8 +28,15 @@ use winit::event::WindowEvent;
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::window::{Window, WindowId};
 
+use crate::triangle::Triangle;
+
 /// Title of the application window.
 const WINDOW_TITLE: &str = "Clockwork";
+
+/// The most frames submitted and not yet complete when a frame starts. A
+/// frame waits for the one two before it, so the CPU records one frame while
+/// the GPU renders the one before.
+const FRAMES_IN_FLIGHT: usize = 2;
 
 /// Clockwork, a small game engine.
 ///
@@ -222,8 +233,15 @@ struct App {
     exit_after_frames: Option<u64>,
     /// Created when the application is first resumed.
     window: Option<Arc<Window>>,
+    /// What's drawn each frame. Created with `rhi`, and declared before it
+    /// so that it's dropped first, even if `exiting` doesn't run, and none
+    /// of its resources is reported as leaked.
+    triangle: Option<Triangle>,
     /// Renders to `window`. Created along with it.
     rhi: Option<Box<dyn RenderHardwareInterface>>,
+    /// The timepoints of the frames submitted and maybe not yet complete,
+    /// oldest first.
+    in_flight: VecDeque<GpuTimepoint>,
     /// When the previous frame started. `None` before the first frame, and
     /// after suspending, so that time spent suspended is not counted.
     last_frame_start: Option<Instant>,
@@ -242,7 +260,9 @@ impl App {
             options,
             exit_after_frames,
             window: None,
+            triangle: None,
             rhi: None,
+            in_flight: VecDeque::new(),
             last_frame_start: None,
             frame_count: 0,
             error: None,
@@ -265,9 +285,11 @@ impl App {
             &self.options,
         )?;
         info!("using {:?} backend", rhi.api());
+        let triangle = Triangle::new(&*rhi)?;
 
         self.window = Some(window);
         self.rhi = Some(rhi);
+        self.triangle = Some(triangle);
         Ok(())
     }
 
@@ -286,8 +308,48 @@ impl App {
         trace!(frame = self.frame_count, ?delta, "starting frame");
 
         self.update(delta);
-        if let Some(rhi) = &mut self.rhi {
-            rhi.render_frame()?;
+        self.render()
+    }
+
+    /// Draws the triangle to a surface image and presents it, once the frame
+    /// [`FRAMES_IN_FLIGHT`] before it is complete. Nothing is drawn if
+    /// there's no image to draw to, such as while the window is minimised.
+    /// If the window's surface was lost, it's recreated, and the frame is
+    /// skipped.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if rendering fails, or a lost surface can't be
+    /// recreated.
+    fn render(&mut self) -> Result<()> {
+        let (Some(rhi), Some(triangle)) = (&mut self.rhi, &mut self.triangle) else {
+            return Ok(());
+        };
+        let graphics = rhi.queue(QueueKind::Graphics).clone();
+        while self.in_flight.len() >= FRAMES_IN_FLIGHT {
+            let oldest = self.in_flight.pop_front().expect("a frame is in flight");
+            graphics.wait(oldest)?;
+        }
+        let rendered = draw_frame(&mut **rhi, triangle);
+        match rendered {
+            Ok(Some(timepoint)) => self.in_flight.push_back(timepoint),
+            Ok(None) => {}
+            Err(RhiError::SurfaceLost) => self.recreate_surface()?,
+            Err(err) => return Err(err.into()),
+        }
+        Ok(())
+    }
+
+    /// Recreates the window's surface after it was lost, by resuming the
+    /// backend with the window.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the surface or its swapchain can't be created.
+    fn recreate_surface(&mut self) -> Result<()> {
+        info!("the window's surface was lost, so it's being recreated");
+        if let (Some(window), Some(rhi)) = (&self.window, &mut self.rhi) {
+            rhi.resume(window_target(window))?;
         }
         Ok(())
     }
@@ -309,6 +371,38 @@ impl App {
         self.error = Some(err);
         event_loop.exit();
     }
+}
+
+/// Draws `triangle` to a surface image from `rhi` and presents it, and
+/// returns the frame's timepoint, or `None` if there was no image to draw
+/// to.
+///
+/// # Errors
+///
+/// Returns an error if acquiring, translating or presenting fails.
+fn draw_frame(
+    rhi: &mut dyn RenderHardwareInterface,
+    triangle: &mut Triangle,
+) -> RhiResult<Option<GpuTimepoint>> {
+    let Some(image) = rhi.acquire_surface_image()? else {
+        return Ok(None);
+    };
+    let mut commands = CommandList::new("triangle");
+    let upload = triangle.draw(
+        &mut commands,
+        image.texture,
+        image.extent,
+        Access::Acquired,
+        Access::Present,
+    );
+    let command_buffer = rhi.queue(QueueKind::Graphics).translate(&commands)?;
+    let wait_for: Vec<_> = upload.into_iter().collect();
+    let timepoint = rhi.present(PresentDesc {
+        image,
+        command_buffers: vec![command_buffer],
+        wait_for: &wait_for,
+    })?;
+    Ok(Some(timepoint))
 }
 
 /// Describes `window` and its current size for the renderer backend.
@@ -379,7 +473,9 @@ impl ApplicationHandler for App {
     fn exiting(&mut self, _event_loop: &ActiveEventLoop) {
         // Destroy the backend, and with it the window surface and swapchain,
         // while the event loop's connection to the window system is still
-        // open.
+        // open. The triangle's resources are destroyed first, so none is
+        // reported as leaked.
+        self.triangle = None;
         self.rhi = None;
     }
 
