@@ -37,6 +37,11 @@ pub enum RhiError {
     /// Vulkan's `maintenance5` guarantees. The caller can stop rendering and
     /// exit cleanly, since recovering is out of scope.
     DeviceLost,
+    /// The window's surface was lost, so nothing more can be presented to
+    /// it. Only acquiring and presenting return it. The caller can call
+    /// [`resume`](crate::RenderHardwareInterface::resume) with the window,
+    /// which recreates the surface.
+    SurfaceLost,
     /// Anything with no specific recovery, with its context.
     Other(anyhow::Error),
 }
@@ -58,6 +63,7 @@ impl fmt::Display for RhiError {
                 write!(f, "the {heap} has no free slot for \"{label}\"")
             }
             Self::DeviceLost => f.write_str("the device was lost"),
+            Self::SurfaceLost => f.write_str("the window's surface was lost"),
             Self::Other(err) => fmt::Display::fmt(err, f),
         }
     }
@@ -69,9 +75,10 @@ impl Error for RhiError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
             Self::Other(err) => err.source(),
-            Self::OutOfDeviceMemory { .. } | Self::DescriptorHeapFull { .. } | Self::DeviceLost => {
-                None
-            }
+            Self::OutOfDeviceMemory { .. }
+            | Self::DescriptorHeapFull { .. }
+            | Self::DeviceLost
+            | Self::SurfaceLost => None,
         }
     }
 }
@@ -140,6 +147,16 @@ mod tests {
     fn device_lost_says_so() {
         assert_eq!(RhiError::DeviceLost.to_string(), "the device was lost");
         assert!(RhiError::DeviceLost.source().is_none());
+    }
+
+    /// A lost surface has a message, and no cause.
+    #[test]
+    fn surface_lost_says_so() {
+        assert_eq!(
+            RhiError::SurfaceLost.to_string(),
+            "the window's surface was lost"
+        );
+        assert!(RhiError::SurfaceLost.source().is_none());
     }
 
     /// `Other` keeps its `anyhow` context chain, through `?` into an

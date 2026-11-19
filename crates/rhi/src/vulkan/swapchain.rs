@@ -284,6 +284,11 @@ impl Swapchain {
         self.window_size
     }
 
+    /// Image `index` as a texture.
+    pub(super) fn texture(&self, index: u32) -> Texture {
+        self.textures[index as usize]
+    }
+
     /// Image `index` and a view of it.
     pub(super) fn image(&self, index: u32) -> (vk::Image, vk::ImageView) {
         let index = index as usize;
