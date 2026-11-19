@@ -1,31 +1,29 @@
 //! Swapchains, which hold the images presented to a window.
+//!
+//! Each image is a texture in the core's texture table (design 0002,
+//! "Presentation"), inserted when the swapchain is created and removed
+//! before it's destroyed.
+
+use std::sync::Arc;
 
 use anyhow::{Context, Result, bail};
 use ash::VkResult;
-use ash::{Instance, khr, vk};
+use ash::{khr, vk};
 use tracing::info;
 
-use super::device::LogicalDevice;
-use super::physical_device::PhysicalDevice;
-use super::queues::QueueLocks;
+use super::VulkanDevice;
 use super::surface::Surface;
-use crate::WindowSize;
+use crate::{Extent3d, Format, Texture, WindowSize};
 
-/// Surface formats to use for swapchain images, in order of preference. If the
-/// surface supports none of them, its first format is used.
+/// The formats swapchain images may have, in order of preference, all in
+/// the sRGB colour space.
 ///
-/// 8-bit sRGB formats, so that shaders can write linear colour and have it
-/// converted for display.
-const PREFERRED_FORMATS: &[vk::SurfaceFormatKHR] = &[
-    vk::SurfaceFormatKHR {
-        format: vk::Format::B8G8R8A8_SRGB,
-        color_space: vk::ColorSpaceKHR::SRGB_NONLINEAR,
-    },
-    vk::SurfaceFormatKHR {
-        format: vk::Format::R8G8B8A8_SRGB,
-        color_space: vk::ColorSpaceKHR::SRGB_NONLINEAR,
-    },
-];
+/// Only sRGB formats, so that shaders write linear colour and have it encoded
+/// for display: a UNORM format would show it unencoded, so too dark. The
+/// desktop drivers the engine targets are expected to offer one of these,
+/// and device selection rejects a device whose surface doesn't. Each is a
+/// [`Format`], so that the images can be textures.
+const PREFERRED_FORMATS: [Format; 2] = [Format::Bgra8Srgb, Format::Rgba8Srgb];
 
 /// Present mode for the swapchain.
 ///
@@ -43,22 +41,40 @@ const PREFERRED_COMPOSITE_ALPHA: &[vk::CompositeAlphaFlagsKHR] = &[
     vk::CompositeAlphaFlagsKHR::POST_MULTIPLIED,
 ];
 
-/// A swapchain for a surface, a view of each of its images, and a semaphore
-/// for presenting each image.
+/// The first of [`PREFERRED_FORMATS`] that a surface supporting `formats`
+/// supports, and the surface format to create a swapchain with for it, or
+/// `None` if it supports none of them.
+pub(super) fn choose_format(
+    formats: &[vk::SurfaceFormatKHR],
+) -> Option<(Format, vk::SurfaceFormatKHR)> {
+    PREFERRED_FORMATS.into_iter().find_map(|format| {
+        let surface_format = vk::SurfaceFormatKHR {
+            format: vk::Format::from(format),
+            color_space: vk::ColorSpaceKHR::SRGB_NONLINEAR,
+        };
+        formats
+            .contains(&surface_format)
+            .then_some((format, surface_format))
+    })
+}
+
+/// A swapchain for a surface, its images as textures, a view of each image,
+/// and a semaphore for presenting each image.
 ///
-/// Destroyed when dropped, so the owner must drop it before the surface and
-/// the logical device it was created from.
+/// Destroyed when dropped, so the owner must drop it before the surface it
+/// was created from.
 pub(super) struct Swapchain {
-    /// Kept to destroy the image views and semaphores.
-    device: ash::Device,
-    /// The device's queues, locked while waiting for it to be idle.
-    queue_locks: QueueLocks,
+    /// The core, whose texture table holds the images, and whose device
+    /// destroys the image views and semaphores.
+    core: Arc<VulkanDevice>,
     /// The `VK_KHR_swapchain` functions for the device.
     swapchain_fn: khr::swapchain::Device,
     /// The swapchain, created with `swapchain_fn`.
     swapchain: vk::SwapchainKHR,
     /// The swapchain's images, owned by the swapchain.
     images: Vec<vk::Image>,
+    /// Each image in `images`, at the same index, as a texture.
+    textures: Vec<Texture>,
     /// A view of each image in `images`, at the same index.
     image_views: Vec<vk::ImageView>,
     /// Signalled when rendering to each image has finished, and waited on to
@@ -66,8 +82,8 @@ pub(super) struct Swapchain {
     /// may still be waiting on its semaphore after the frame's fence has
     /// signalled, but not once the same image has been acquired again.
     render_finished: Vec<vk::Semaphore>,
-    /// The images' format and colour space.
-    format: vk::SurfaceFormatKHR,
+    /// The images' format.
+    format: Format,
     /// The images' size, in pixels.
     extent: vk::Extent2D,
     /// The window size the swapchain was created for. May differ from
@@ -87,16 +103,17 @@ impl Swapchain {
     ///
     /// # Errors
     ///
-    /// Returns an error if the surface cannot be queried, has no formats, or
-    /// if the swapchain or its image views cannot be created.
+    /// Returns an error if the surface cannot be queried, supports none of
+    /// [`PREFERRED_FORMATS`], or if the swapchain or its image views cannot
+    /// be created.
     pub(super) fn new(
-        instance: &Instance,
-        device: &LogicalDevice,
-        physical_device: &PhysicalDevice,
+        core: &Arc<VulkanDevice>,
         surface: &Surface,
         window_size: WindowSize,
         old: Option<&Swapchain>,
     ) -> Result<Option<Self>> {
+        let device = &core.device;
+        let physical_device = &core.physical_device;
         let capabilities = surface.capabilities(physical_device.handle)?;
         // A current extent of `u32::MAX` means the surface takes its size from
         // the swapchain.
@@ -123,14 +140,12 @@ impl Swapchain {
         }
 
         let formats = surface.formats(physical_device.handle)?;
-        let Some(&first_format) = formats.first() else {
-            bail!("the window surface reports no supported formats");
+        let Some((format, surface_format)) = choose_format(&formats) else {
+            bail!(
+                "the window surface supports none of the formats swapchain images may have \
+                 ({PREFERRED_FORMATS:?} in the sRGB colour space), only {formats:?}"
+            );
         };
-        let format = PREFERRED_FORMATS
-            .iter()
-            .find(|preferred| formats.contains(preferred))
-            .copied()
-            .unwrap_or(first_format);
 
         // One more than the minimum, so that the application does not have to
         // wait for the driver to release an image before acquiring the next.
@@ -149,8 +164,8 @@ impl Swapchain {
         let mut create_info = vk::SwapchainCreateInfoKHR::default()
             .surface(surface.handle())
             .min_image_count(image_count)
-            .image_format(format.format)
-            .image_color_space(format.color_space)
+            .image_format(surface_format.format)
+            .image_color_space(surface_format.color_space)
             .image_extent(extent)
             .image_array_layers(1)
             .image_usage(vk::ImageUsageFlags::COLOR_ATTACHMENT)
@@ -172,7 +187,7 @@ impl Swapchain {
                 .queue_family_indices(&shared_families);
         }
 
-        let swapchain_fn = khr::swapchain::Device::load(instance, device.handle());
+        let swapchain_fn = khr::swapchain::Device::load(&core.instance.instance, device.handle());
         // SAFETY: `create_info` and the structures it points to are valid for
         // the duration of the call, and its surface and old swapchain belong to
         // this device's instance and device.
@@ -183,17 +198,18 @@ impl Swapchain {
         // swapchain and any views already created are destroyed by `Drop` if a
         // later step fails.
         let mut this = Self {
-            device: device.handle().clone(),
-            queue_locks: device.queue_locks().clone(),
+            core: core.clone(),
             swapchain_fn,
             swapchain,
             images: Vec::new(),
+            textures: Vec::new(),
             image_views: Vec::new(),
             render_finished: Vec::new(),
             format,
             extent,
             window_size,
         };
+        let device = device.handle();
         // SAFETY: `swapchain` was just created from `swapchain_fn`.
         this.images = unsafe { this.swapchain_fn.get_swapchain_images(swapchain) }
             .context("failed to get Vulkan swapchain images")?;
@@ -201,7 +217,7 @@ impl Swapchain {
             let view_create_info = vk::ImageViewCreateInfo::default()
                 .image(image)
                 .view_type(vk::ImageViewType::TYPE_2D)
-                .format(format.format)
+                .format(surface_format.format)
                 .subresource_range(vk::ImageSubresourceRange {
                     aspect_mask: vk::ImageAspectFlags::COLOR,
                     base_mip_level: 0,
@@ -212,26 +228,37 @@ impl Swapchain {
             // SAFETY: `image` belongs to the swapchain, which was created on
             // this device, and `view_create_info` is valid for the duration of
             // the call.
-            let view = unsafe { this.device.create_image_view(&view_create_info, None) }
+            let view = unsafe { device.create_image_view(&view_create_info, None) }
                 .context("failed to create Vulkan swapchain image view")?;
             this.image_views.push(view);
 
             // SAFETY: The create info is valid for the duration of the call.
-            let semaphore = unsafe {
-                this.device
-                    .create_semaphore(&vk::SemaphoreCreateInfo::default(), None)
-            }
-            .context("failed to create Vulkan semaphore")?;
+            let semaphore =
+                unsafe { device.create_semaphore(&vk::SemaphoreCreateInfo::default(), None) }
+                    .context("failed to create Vulkan semaphore")?;
             this.render_finished.push(semaphore);
         }
+        // SAFETY: The images belong to the swapchain, created on the core's
+        // device, and `drop` removes them before destroying it.
+        this.textures = unsafe {
+            core.insert_surface_images(
+                &this.images,
+                format,
+                Extent3d {
+                    width: extent.width,
+                    height: extent.height,
+                    depth: 1,
+                },
+            )
+        };
 
         info!(
             "created swapchain: {}x{}, {} images, {:?} {:?}, {:?}",
             extent.width,
             extent.height,
             this.images.len(),
-            format.format,
-            format.color_space,
+            surface_format.format,
+            surface_format.color_space,
             PRESENT_MODE,
         );
         Ok(Some(this))
@@ -243,7 +270,7 @@ impl Swapchain {
     }
 
     /// The format of the swapchain's images.
-    pub(super) fn format(&self) -> vk::SurfaceFormatKHR {
+    pub(super) fn format(&self) -> Format {
         self.format
     }
 
@@ -319,20 +346,81 @@ impl Swapchain {
 
 impl Drop for Swapchain {
     fn drop(&mut self) {
-        // SAFETY: The semaphores, views and swapchain were created by `new`
-        // and are destroyed exactly once here. Waiting for the device, which
-        // the queues were retrieved from, to be idle ensures that no
-        // submitted work still uses them.
+        let device = self.core.device.handle();
+        // SAFETY: The textures, semaphores, views and swapchain were created
+        // by `new` and are removed or destroyed exactly once here. Waiting
+        // for the device, which the queues were retrieved from, to be idle
+        // ensures that no submitted work still uses them. That no command
+        // buffer translated with a texture is submitted later rests on the
+        // application using a surface image only in the command buffers it
+        // presents with it, as design 0002's "Presentation" requires: nothing
+        // checks it yet (see TODO.md).
         unsafe {
             // Nothing useful can be done if this fails while dropping.
-            let _ = self.queue_locks.wait_idle(&self.device);
+            let _ = self.core.device.queue_locks().wait_idle(device);
+            self.core.remove_surface_images(&self.textures);
             for &semaphore in &self.render_finished {
-                self.device.destroy_semaphore(semaphore, None);
+                device.destroy_semaphore(semaphore, None);
             }
             for &view in &self.image_views {
-                self.device.destroy_image_view(view, None);
+                device.destroy_image_view(view, None);
             }
             self.swapchain_fn.destroy_swapchain(self.swapchain, None);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    //! T0 tests of choosing a swapchain's format.
+
+    use super::*;
+
+    /// `format` in the sRGB colour space.
+    fn srgb(format: vk::Format) -> vk::SurfaceFormatKHR {
+        vk::SurfaceFormatKHR {
+            format,
+            color_space: vk::ColorSpaceKHR::SRGB_NONLINEAR,
+        }
+    }
+
+    /// The first preferred format the surface supports is chosen, whatever
+    /// order the surface lists them in.
+    #[test]
+    fn the_most_preferred_format_is_chosen() {
+        let formats = [
+            srgb(vk::Format::R8G8B8A8_UNORM),
+            srgb(vk::Format::R8G8B8A8_SRGB),
+            srgb(vk::Format::B8G8R8A8_SRGB),
+        ];
+        assert_eq!(
+            choose_format(&formats),
+            Some((Format::Bgra8Srgb, srgb(vk::Format::B8G8R8A8_SRGB))),
+        );
+    }
+
+    /// A surface with only UNORM formats gets none, rather than one that
+    /// would show linear colour unencoded.
+    #[test]
+    fn unorm_formats_are_not_chosen() {
+        let formats = [
+            srgb(vk::Format::B8G8R8A8_UNORM),
+            srgb(vk::Format::R8G8B8A8_UNORM),
+        ];
+        assert_eq!(choose_format(&formats), None);
+    }
+
+    /// Formats in other colour spaces, or that `Format` can't name, aren't
+    /// chosen.
+    #[test]
+    fn other_formats_are_not_chosen() {
+        let formats = [
+            vk::SurfaceFormatKHR {
+                format: vk::Format::B8G8R8A8_SRGB,
+                color_space: vk::ColorSpaceKHR::DISPLAY_P3_NONLINEAR_EXT,
+            },
+            srgb(vk::Format::A2B10G10R10_UNORM_PACK32),
+        ];
+        assert_eq!(choose_format(&formats), None);
     }
 }

@@ -19,6 +19,14 @@
 //! entry in the same way, behind a `Mutex` of their own. They use no heap
 //! slot, and are destroyed with the texture.
 //!
+//! A swapchain's images are textures too, so that command lists render to
+//! them as to any other (design 0002, "Presentation"). Their entries have
+//! no memory, since the swapchain owns the images: it inserts them when
+//! it's created, and removes them, destroying their attachment views,
+//! before it's destroyed. Destroying one through
+//! [`destroy_texture`](crate::GpuResources::destroy_texture) is a bug, and
+//! panics.
+//!
 //! Lock order: as for buffers, the texture table is never held while
 //! allocating or freeing memory. Writing a view takes the table's read
 //! lock, then the entry's view lock, then the resource heap's slot
@@ -56,8 +64,9 @@ use crate::{
 pub(super) struct TextureEntry {
     /// The image.
     image: vk::Image,
-    /// The memory it's bound to.
-    allocation: MemoryAllocation,
+    /// The memory it's bound to, or `None` for a swapchain's image, which
+    /// the swapchain owns.
+    allocation: Option<MemoryAllocation>,
     /// Its format.
     format: Format,
     /// Its shape.
@@ -391,7 +400,7 @@ impl VulkanDevice {
 
         let entry = TextureEntry {
             image,
-            allocation,
+            allocation: Some(allocation),
             format: desc.format,
             dimension: desc.dimension,
             usage: desc.usage,
@@ -411,10 +420,111 @@ impl VulkanDevice {
     ///
     /// # Panics
     ///
-    /// Panics if the handle is stale.
+    /// Panics if the handle is stale, or the texture is a swapchain's
+    /// image, which only its swapchain destroys.
     pub(super) fn destroy_texture_entry(&self, texture: Texture) {
-        let (_, entry) = self.lock_textures_for_writing().remove(texture.handle());
+        let entry = {
+            let mut textures = self.lock_textures_for_writing();
+            let (label, entry) = textures
+                .lookup(texture.handle())
+                .unwrap_or_else(|err| panic!("{err}"));
+            assert!(
+                entry.allocation.is_some(),
+                "texture \"{label}\" is a surface image, which its swapchain owns, so it can't \
+                 be destroyed",
+            );
+            textures.remove(texture.handle()).1
+        };
         self.retire(Retired::Texture(entry));
+    }
+
+    /// Adds a swapchain's `images`, of `format` and `extent`, to the table
+    /// as colour attachments, labelled by their index, and returns their
+    /// handles in the same order.
+    ///
+    /// # Safety
+    ///
+    /// The images must belong to a swapchain created on this device, which
+    /// must remove them with [`remove_surface_images`] before it's
+    /// destroyed.
+    ///
+    /// [`remove_surface_images`]: Self::remove_surface_images
+    pub(super) unsafe fn insert_surface_images(
+        &self,
+        images: &[vk::Image],
+        format: Format,
+        extent: Extent3d,
+    ) -> Vec<Texture> {
+        // Named before the table is locked, so that the debug utils call
+        // doesn't hold up other threads' texture lookups.
+        let labels: Vec<_> = (0..images.len())
+            .map(|index| format!("surface image {index}"))
+            .collect();
+        for (&image, label) in images.iter().zip(&labels) {
+            self.device.set_object_name(image, label);
+        }
+        let mut textures = self.lock_textures_for_writing();
+        images
+            .iter()
+            .zip(&labels)
+            .map(|(&image, label)| {
+                let entry = TextureEntry {
+                    image,
+                    allocation: None,
+                    format,
+                    dimension: TextureDimension::D2,
+                    usage: TextureUsage::COLOUR_ATTACHMENT,
+                    extent,
+                    mip_count: 1,
+                    layer_count: 1,
+                    views: Mutex::new(HashMap::new()),
+                    attachment_views: Mutex::new(HashMap::new()),
+                };
+                Texture::from_handle(textures.insert(label, entry))
+            })
+            .collect()
+    }
+
+    /// Removes a swapchain's images, which [`insert_surface_images`]
+    /// added, from the table, and destroys their attachment views. Their
+    /// handles are stale from then on.
+    ///
+    /// # Safety
+    ///
+    /// No submitted work may still use the images or their views, and no
+    /// command buffer translated with them may be submitted later.
+    ///
+    /// # Panics
+    ///
+    /// Panics if a handle is stale, or names a texture that isn't a surface
+    /// image, before removing any of them, so that an ordinary texture's
+    /// memory isn't leaked.
+    ///
+    /// [`insert_surface_images`]: Self::insert_surface_images
+    pub(super) unsafe fn remove_surface_images(&self, textures: &[Texture]) {
+        let entries: Vec<_> = {
+            let mut table = self.lock_textures_for_writing();
+            for texture in textures {
+                let (label, entry) = table
+                    .lookup(texture.handle())
+                    .unwrap_or_else(|err| panic!("{err}"));
+                assert!(
+                    entry.allocation.is_none(),
+                    "texture \"{label}\" isn't a surface image, so it can't be removed with \
+                     the swapchain's images",
+                );
+            }
+            textures
+                .iter()
+                .map(|texture| table.remove(texture.handle()).1)
+                .collect()
+        };
+        for entry in entries {
+            // SAFETY: Guaranteed by the caller. The entry has no memory, so
+            // only its views are destroyed, and its image is left to the
+            // swapchain.
+            unsafe { self.free_texture(entry) };
+        }
     }
 
     /// What `texture` was created as.
@@ -429,7 +539,8 @@ impl VulkanDevice {
     }
 
     /// Destroys a texture taken out of the table and its attachment views,
-    /// frees its memory, and frees its views' slots.
+    /// frees its memory, and frees its views' slots. A swapchain's image
+    /// has no memory, and is left to the swapchain to destroy.
     ///
     /// # Safety
     ///
@@ -446,11 +557,13 @@ impl VulkanDevice {
             // image.
             unsafe { device.destroy_image_view(view, None) };
         }
-        // SAFETY: The image was created on this device, and the caller
-        // guarantees that nothing uses it. It's destroyed before its memory
-        // is freed.
-        unsafe { device.destroy_image(entry.image, None) };
-        self.allocator.free(entry.allocation);
+        if let Some(allocation) = entry.allocation {
+            // SAFETY: The image was created on this device, and the caller
+            // guarantees that nothing uses it. It's destroyed before its
+            // memory is freed.
+            unsafe { device.destroy_image(entry.image, None) };
+            self.allocator.free(allocation);
+        }
         let views = entry
             .views
             .into_inner()
