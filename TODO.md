@@ -70,9 +70,14 @@ Outstanding tasks and future work.
       `begin_transient_frame` hands out a `TransientFrame`, which any
       thread allocates from without a lock, in chunks of upload memory
       that a pool sized by recent frames recycles through deferred
-      destruction. The design's remaining slices add streaming and
-      presentation, and
-      `rhi-present` moves the triangle out of the backend, so that the
+      destruction. `rhi-streaming` added the BC formats and streaming: an
+      `Uploader` on any thread stages bytes in upload buffers of its own,
+      records the copies and the release to the graphics queue, falling
+      back to the graphics queue for texture regions the transfer queue
+      can't copy, and `flush` submits them, returning an `Upload` with
+      their timepoint and acquire barriers. The design's remaining slice,
+      `rhi-present`, adds presentation, and moves the triangle out of the
+      backend, with its buffers filled through an `Uploader`, so that the
       application decides what to draw. `TriangleShaders`
       (`crates/rhi/src/vulkan/shaders.rs`) still creates its shader
       objects itself, the way `create_program` does: when `rhi-present`
@@ -102,6 +107,19 @@ Outstanding tasks and future work.
       `MAX_TRANSIENT_ALIGNMENT` or a reason to cap them there. Profile
       streaming many small uploads first, and revise design 0002's
       "Streaming" and "Transient memory" if it's worth doing.
+- [ ] **Run the uploader's graphics-queue fallback on a device.** An
+      `Uploader` copies texture regions its transfer queue's
+      `minImageTransferGranularity` doesn't allow on the graphics queue
+      instead, submitted after the transfer queue's copies and waiting for
+      them. On NVIDIA, transfers share the compute family, which Vulkan
+      requires to copy any region, and lavapipe has one queue family, so
+      only T0 tests (`crates/rhi/src/upload/recording/tests.rs`) cover
+      that path, and the T1 tests (`crates/rhi/src/upload/gpu_tests.rs`)
+      upload whole mips. On a device whose transfer queue has a coarser
+      granularity, add a T1 test that uploads a mip in partial regions,
+      some the transfer queue can copy and some it can't, samples or
+      copies it out after the `Upload`, and checks its acquire barriers
+      cover only the transfer queue's regions.
 - [ ] **Let a program's stages come from separate SPIR-V modules.**
       `ProgramDesc` has one `spirv` field, and every stage is created from
       that module, choosing its entry point by name. That suits `slangc`,
@@ -319,9 +337,10 @@ Outstanding tasks and future work.
       compute family, and tests that need a dedicated transfer queue skip
       there. When the fix ships, limit the check to earlier driver
       versions, and check `cross_queue_wait`,
-      `storage_buffers_are_filled_and_copied` and the texture round trips
-      pass on the transfer-only family, and that the round trips pass on
-      the graphics queue with no flag on the copy in.
+      `storage_buffers_are_filled_and_copied`, the texture round trips and
+      the uploader's tests (`crates/rhi/src/upload/gpu_tests.rs`) pass on
+      the transfer-only family, and that the round trips pass on the
+      graphics queue with no flag on the copy in.
 - [ ] **Make `CLOCKWORK_VALIDATION=gpu` usable.** With GPU-assisted
       validation, every T1 test fails on the layer's own warnings at
       start-up: `VALIDATION-SETTINGS`, for running GPU-AV alongside core

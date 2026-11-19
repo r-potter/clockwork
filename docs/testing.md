@@ -370,6 +370,15 @@ A test that draws with transient data, such as those in `crates/rhi/src/vulkan/t
 
 Some paths can't be reached on a given device. The padding that aligns an allocation larger than a chunk, which has memory of its own, is needed only when the driver places that memory at an unaligned address, and the reference GPU doesn't. Cover a path like that with a T0 test of its pure part, as `padding_reaches_the_next_aligned_address` does in `crates/rhi/src/vulkan/transient.rs`, and say in the PR that the T1 test doesn't reach it.
 
+### Streaming
+
+The uploader's staging and recording are T0-tested with `FakeResources`, in `crates/rhi/src/upload/`, but its `flush` is T1-tested, in `crates/rhi/src/upload/gpu_tests.rs`, since a fake queue can't make a `CommandBuffer`. A T1 test of an upload:
+- **Hands the upload over as rendering will:** it submits the work that uses what was uploaded on the graphics queue, waiting for the `Upload`'s timepoint, and records its acquire barriers in the list's first barrier.
+- **Checks the acquire barriers both ways,** with `check_acquire`: none where the transfer queue is the graphics queue, and otherwise an acquire from the transfer queue for each buffer range and subresource. Lavapipe, with one queue family, runs the first path, and the reference machine, whose transfers share the compute family, the second.
+- **Checks what an upload leaves alone,** such as the bytes of a buffer before the offset uploaded to, filled first on the graphics queue, which must keep their contents, since only the bytes uploaded move between queues.
+
+Neither validation nor the result shows some mistakes on NVIDIA: a missing acquire passes, and its driver keeps a buffer's contents however their ownership moves, so a release of the whole buffer passes too. Read the barriers a change records, rather than trusting a pass there. On NVIDIA, transfers share the compute family, which Vulkan requires to copy any region, so the copies the graphics queue makes for regions a transfer queue with a coarser `minImageTransferGranularity` can't copy only run in T0 tests, such as `coarse_granularity_moves_partial_regions_to_graphics` in `crates/rhi/src/upload/recording/tests.rs`. Say in the PR when a change to that path isn't run on a device.
+
 ### Validation is required
 
 Every T1 test runs with the Khronos validation layer, and can't run without it: `VulkanTestBackend::headless` and `backend_options` always ask for `Validation::Required`, so creating the backend fails if the layer, or a requested feature, isn't available. There's no way to turn validation off for tests, because a pass without it would prove less than it claims.
