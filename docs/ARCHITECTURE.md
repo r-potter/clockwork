@@ -137,7 +137,7 @@ crates/rhi/                     clockwork-rhi: the RHI
   build/slangc.rs                 finds slangc, shared by both build scripts and xtask
   shaders/                        Slang shaders
   src/lib.rs                      the RHI trait, backend options and backend selection
-  src/test_support.rs             the test environment, for the RHI's tests
+  src/test_support.rs             the test environment, for the RHI's tests, and other crates' with the test-support feature
   src/vulkan/                     the Vulkan backend
 xtask/                          developer tooling: cargo xtask check, cargo xtask lavapipe
 .github/workflows/              CI
