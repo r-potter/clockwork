@@ -343,7 +343,7 @@ The report names the first eight objects it finds. `leaked_objects_are_reported`
 
 ### Test shaders
 
-T1 tests that dispatch or draw use the test shaders in `crates/rhi/shaders/tests/`, which `build.rs` compiles to SPIR-V with the engine's own in `crates/rhi/shaders/`, and the engine's triangle. To add one:
+T1 tests that dispatch or draw use the test shaders in `crates/rhi/shaders/tests/`, which `build.rs` compiles to SPIR-V. `crates/rhi/shaders/` holds only the modules they import, since the engine draws nothing itself. To add one:
 
 1. Write it in Slang in `shaders/tests/`, with a comment saying what it does and how it's driven. Reach texture views and samplers through `ResourceIndex` and `SamplerIndex` from `shaders/heap.slang`, which `import heap;` finds since `shaders/` is on the include path, never `ResourceDescriptorHeap` or a bare `uint`, so that changing how shaders reach the heaps changes only that file.
 2. List it in `TEST_SHADERS` in `crates/rhi/build.rs`.

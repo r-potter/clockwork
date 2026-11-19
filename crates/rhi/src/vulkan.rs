@@ -23,7 +23,6 @@ mod destruction;
 mod device;
 mod device_selection;
 mod error;
-mod frames;
 #[cfg(test)]
 mod gpu_tests;
 mod memory;
@@ -34,7 +33,6 @@ mod queues;
 mod render_pass;
 mod render_state;
 mod samplers;
-mod shaders;
 mod surface;
 mod swapchain;
 #[cfg(test)]
@@ -47,7 +45,7 @@ mod validation;
 
 use std::ffi::CStr;
 use std::sync::{Arc, Mutex, PoisonError, RwLock, Weak};
-use std::{fmt, mem, slice};
+use std::{fmt, mem};
 
 use anyhow::{Context, Result, bail};
 use ash::vk::TaggedStructure;
@@ -71,14 +69,12 @@ use destruction::Retired;
 use device::LogicalDevice;
 use device_selection::{Candidate, Selection};
 use error::{error, error_from_chain};
-use frames::Frames;
 use memory::MemoryAllocator;
 use physical_device::PhysicalDevice;
 use programs::ProgramEntry;
 use query_pools::QueryPools;
 use queues::{QueueRole, Queues, VulkanQueue};
 use samplers::SamplerEntry;
-use shaders::TriangleShaders;
 use surface::Surface;
 use swapchain::Swapchain;
 use textures::TextureEntry;
@@ -92,17 +88,11 @@ const NAME: &CStr = c"clockwork";
 /// Vulkan version the backend targets (ADR 0002).
 const API_VERSION: u32 = vk::API_VERSION_1_4;
 
-/// The colour each frame is cleared to before drawing, as linear RGBA.
-/// Swapchain images use an sRGB format, so this appears brighter on screen
-/// than the values suggest.
-const CLEAR_COLOUR: [f32; 4] = [0.02, 0.05, 0.1, 1.0];
-
 /// Vulkan render hardware interface.
 ///
 /// Owns what belongs to the window: unless headless or suspended, the
-/// window surface and swapchain. Also owns, until design 0002 moves them
-/// out, the resources for frames in flight and the triangle's shader
-/// objects. Everything else is in the shared [`VulkanDevice`], which it
+/// window surface and swapchain, and the semaphores that acquire its
+/// images. Everything else is in the shared [`VulkanDevice`], which it
 /// hands out as the [`GpuResources`] and the [`Queue`]s.
 ///
 /// Fields are dropped in declaration order, so each is declared before the
@@ -118,11 +108,6 @@ pub(crate) struct VulkanRenderHardwareInterface {
     /// matches the surface, so that it is recreated at the start of the next
     /// frame.
     swapchain_out_of_date: bool,
-    /// The command buffers and synchronization objects for each frame in
-    /// flight.
-    frames: Frames,
-    /// The shader objects that draw the triangle.
-    triangle_shaders: TriangleShaders,
     /// The image [`acquire_surface_image`] returned last, until it's
     /// presented, or the swapchain is destroyed.
     ///
@@ -297,10 +282,7 @@ impl VulkanRenderHardwareInterface {
             queue_families,
             instance.debug_utils,
         )?;
-        // Create these before the core takes the instance, so that if either
-        // fails, the surface is still destroyed before the instance.
-        let frames = Frames::new(&device)?;
-        let triangle_shaders = TriangleShaders::new(&device)?;
+        // Made before the core takes the device, which it's made from.
         let acquire_semaphores = AcquireSemaphores::new(&device);
 
         let allocator = MemoryAllocator::new(device.handle(), physical_device.memory_properties);
@@ -337,8 +319,6 @@ impl VulkanRenderHardwareInterface {
         let mut rhi = Self {
             window_size,
             swapchain_out_of_date: false,
-            frames,
-            triangle_shaders,
             acquired: None,
             swapchain: None,
             acquire_semaphores,
@@ -399,227 +379,6 @@ impl VulkanRenderHardwareInterface {
             self.recreate_swapchain(window_size)?;
         }
         Ok(self.swapchain.as_ref())
-    }
-
-    /// Acquires a swapchain image, clears it to [`CLEAR_COLOUR`], draws the
-    /// triangle, and presents it, using the current frame's
-    /// resources.
-    ///
-    /// Returns whether the swapchain should be recreated before the next
-    /// frame. If it is out of date, nothing is rendered or presented.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if any Vulkan call fails, other than with
-    /// `ERROR_OUT_OF_DATE_KHR`.
-    fn draw_frame(&self, swapchain: &Swapchain) -> Result<bool> {
-        let device = self.core.device.handle();
-        let frame = self.frames.current();
-        // Found before anything is submitted, so that a missing queue leaves
-        // no work waiting on a present that never happens.
-        let present_queue = self
-            .core
-            .queues
-            .get(QueueRole::Present)
-            .context("a windowed Vulkan backend has no present queue")?;
-
-        // Every handle used below was created on `device`, or by `swapchain`
-        // on `device`, and each info structure is valid for the duration of
-        // its call. The `SAFETY` comments below rely on this.
-
-        // Wait until the GPU has finished the last frame that used these
-        // resources.
-        // SAFETY: `frame.in_flight` is a fence created on `device`.
-        unsafe { device.wait_for_fences(&[frame.in_flight], true, u64::MAX) }
-            .context("failed to wait for Vulkan frame fence")?;
-
-        // `image_acquired` is unsignalled: the submit that waited on it last
-        // time has finished, as its fence has signalled.
-        // SAFETY: `image_acquired` was created on `device`, and is
-        // unsignalled with no pending operations, as above.
-        let (image_index, mut out_of_date) =
-            match unsafe { swapchain.acquire(frame.image_acquired) } {
-                Ok(result) => result,
-                // Leave the fence signalled, as nothing will be submitted to
-                // signal it again.
-                Err(vk::Result::ERROR_OUT_OF_DATE_KHR) => return Ok(true),
-                Err(err) => return Err(err).context("failed to acquire Vulkan swapchain image"),
-            };
-        let (image, image_view) = swapchain.image(image_index);
-
-        // SAFETY: the fence was created on `device`, and has signalled, so no
-        // queue submission still uses it.
-        unsafe { device.reset_fences(&[frame.in_flight]) }
-            .context("failed to reset Vulkan frame fence")?;
-        // SAFETY: the fence wait above guarantees that the GPU has finished
-        // with the command buffer.
-        unsafe { frame.reset_commands(device) }?;
-
-        let command_buffer = frame.command_buffer;
-        let begin_info = vk::CommandBufferBeginInfo::default()
-            .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
-        // SAFETY: the command buffer was allocated on `device` and has just
-        // been reset, and `begin_info` is valid for the call.
-        unsafe { device.begin_command_buffer(command_buffer, &begin_info) }
-            .context("failed to begin Vulkan command buffer")?;
-        // SAFETY: the command buffer is recording, `image` and `image_view`
-        // are a swapchain image of the swapchain's extent and its view, and
-        // everything was created on `device`.
-        unsafe {
-            record_frame(
-                device,
-                command_buffer,
-                image,
-                image_view,
-                swapchain.extent(),
-                &self.triangle_shaders,
-            )
-        };
-        // SAFETY: the command buffer is recording, on `device`.
-        unsafe { device.end_command_buffer(command_buffer) }
-            .context("failed to end Vulkan command buffer")?;
-
-        // Wait for the image to be acquired before writing to it, and signal
-        // when every command, including the final layout transition, is done.
-        let wait = vk::SemaphoreSubmitInfo::default()
-            .semaphore(frame.image_acquired)
-            .stage_mask(vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT);
-        let signal = vk::SemaphoreSubmitInfo::default()
-            .semaphore(swapchain.render_finished(image_index))
-            .stage_mask(vk::PipelineStageFlags2::ALL_COMMANDS);
-        let command_buffer_info =
-            vk::CommandBufferSubmitInfo::default().command_buffer(command_buffer);
-        let submit_info = vk::SubmitInfo2::default()
-            .wait_semaphore_infos(slice::from_ref(&wait))
-            .command_buffer_infos(slice::from_ref(&command_buffer_info))
-            .signal_semaphore_infos(slice::from_ref(&signal));
-        // Each queue is locked only for its call, since the present queue
-        // may be the graphics queue.
-        {
-            let graphics_queue = self
-                .core
-                .queues
-                .lock(QueueRole::Kind(QueueKind::Graphics))
-                .expect("every queue kind has a queue");
-            // SAFETY: the graphics queue, semaphores, command buffer and
-            // fence were all created on `device`, the queue is locked, the
-            // command buffer has ended, the fence is unsignalled, and the
-            // info structures outlive the call.
-            unsafe {
-                device.queue_submit2(
-                    *graphics_queue,
-                    slice::from_ref(&submit_info),
-                    frame.in_flight,
-                )
-            }
-            .context("failed to submit Vulkan frame")?;
-        }
-
-        let presented = {
-            let present_queue = present_queue.lock();
-            // SAFETY: the present queue was created on `device`, is locked,
-            // and its family can present to the surface, as checked by
-            // device selection and on resume. `image_index` was acquired
-            // above.
-            unsafe { swapchain.present(*present_queue, image_index) }
-        };
-        match presented {
-            Ok(suboptimal) => out_of_date |= suboptimal,
-            Err(vk::Result::ERROR_OUT_OF_DATE_KHR) => out_of_date = true,
-            Err(err) => return Err(err).context("failed to present Vulkan swapchain image"),
-        }
-        Ok(out_of_date)
-    }
-}
-
-/// Records commands into `command_buffer` that clear `image` to
-/// [`CLEAR_COLOUR`], draw the triangle with `shaders`, and leave the image
-/// ready to present.
-///
-/// # Safety
-///
-/// `command_buffer` must be recording, `image` and `image_view` must be a
-/// swapchain image of size `extent` and a view of it, and `shaders` must
-/// have been created on `device`, as must the others.
-unsafe fn record_frame(
-    device: &ash::Device,
-    command_buffer: vk::CommandBuffer,
-    image: vk::Image,
-    image_view: vk::ImageView,
-    extent: vk::Extent2D,
-    shaders: &TriangleShaders,
-) {
-    let subresource_range = vk::ImageSubresourceRange {
-        aspect_mask: vk::ImageAspectFlags::COLOR,
-        base_mip_level: 0,
-        level_count: 1,
-        base_array_layer: 0,
-        layer_count: 1,
-    };
-
-    // Transition the image for rendering. Its previous contents are not
-    // needed, so the old layout is `UNDEFINED`. The source stage matches the
-    // stage the submit waits for the acquire semaphore at, so that the
-    // transition happens after the image has been acquired.
-    let to_attachment = vk::ImageMemoryBarrier2::default()
-        .src_stage_mask(vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT)
-        .src_access_mask(vk::AccessFlags2::NONE)
-        .dst_stage_mask(vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT)
-        .dst_access_mask(vk::AccessFlags2::COLOR_ATTACHMENT_WRITE)
-        .old_layout(vk::ImageLayout::UNDEFINED)
-        .new_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
-        .image(image)
-        .subresource_range(subresource_range);
-
-    // Clearing happens when rendering begins, as the attachment's load
-    // operation.
-    let colour_attachment = vk::RenderingAttachmentInfo::default()
-        .image_view(image_view)
-        .image_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
-        .load_op(vk::AttachmentLoadOp::CLEAR)
-        .store_op(vk::AttachmentStoreOp::STORE)
-        .clear_value(vk::ClearValue {
-            color: vk::ClearColorValue {
-                float32: CLEAR_COLOUR,
-            },
-        });
-    let rendering_info = vk::RenderingInfo::default()
-        .render_area(vk::Rect2D {
-            offset: vk::Offset2D::default(),
-            extent,
-        })
-        .layer_count(1)
-        .color_attachments(slice::from_ref(&colour_attachment));
-
-    // Transition the image for presenting, after rendering has written to it.
-    // Presenting is ordered by the render-finished semaphore, so there is no
-    // destination stage.
-    let to_present = vk::ImageMemoryBarrier2::default()
-        .src_stage_mask(vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT)
-        .src_access_mask(vk::AccessFlags2::COLOR_ATTACHMENT_WRITE)
-        .dst_stage_mask(vk::PipelineStageFlags2::NONE)
-        .dst_access_mask(vk::AccessFlags2::NONE)
-        .old_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
-        .new_layout(vk::ImageLayout::PRESENT_SRC_KHR)
-        .image(image)
-        .subresource_range(subresource_range);
-
-    // SAFETY: Guaranteed by the caller, and each info structure is valid for
-    // the duration of its call.
-    unsafe {
-        device.cmd_pipeline_barrier2(
-            command_buffer,
-            &vk::DependencyInfo::default().image_memory_barriers(slice::from_ref(&to_attachment)),
-        );
-        device.cmd_begin_rendering(command_buffer, &rendering_info);
-        shaders.bind(command_buffer, extent);
-        // Three vertices, generated by the vertex shader, and one instance.
-        device.cmd_draw(command_buffer, 3, 1, 0, 0);
-        device.cmd_end_rendering(command_buffer);
-        device.cmd_pipeline_barrier2(
-            command_buffer,
-            &vk::DependencyInfo::default().image_memory_barriers(slice::from_ref(&to_present)),
-        );
     }
 }
 
@@ -1083,17 +842,6 @@ impl RenderHardwareInterface for VulkanRenderHardwareInterface {
         if self.window_size.is_some() {
             self.window_size = Some(size);
         }
-    }
-
-    fn render_frame(&mut self) -> Result<()> {
-        if self.prepare_swapchain()?.is_none() {
-            return Ok(());
-        }
-        let swapchain = self.swapchain.as_ref().expect("the swapchain was prepared");
-        let out_of_date = self.draw_frame(swapchain)?;
-        self.swapchain_out_of_date = out_of_date;
-        self.frames.advance();
-        Ok(())
     }
 
     fn acquire_surface_image(&mut self) -> RhiResult<Option<SurfaceImage>> {

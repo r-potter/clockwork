@@ -35,28 +35,27 @@ Outstanding tasks and future work.
       and an sRGB surface format and a present mode. The swapchain is
       recreated on resize, and destroyed and recreated with the surface on
       suspend and resume.
-- [x] **Render and present frames.** `render_frame` in
-      `crates/rhi/src/vulkan.rs` acquires a swapchain image, clears it to
-      `CLEAR_COLOUR` with dynamic rendering, and presents it, with two frames
-      in flight (`crates/rhi/src/vulkan/frames.rs`) and a render-finished
-      semaphore per swapchain image. Resizes and `OUT_OF_DATE`/`SUBOPTIMAL`
+- [x] **Render and present frames.** `acquire_surface_image` in
+      `crates/rhi/src/vulkan.rs` acquires a swapchain image as a texture,
+      with a semaphore from a pool that reuses each once the submission
+      that waited for it completes, and `present` submits what renders to
+      it and presents it, with a render-finished semaphore per swapchain
+      image. The application keeps two frames in flight. Resizes and `OUT_OF_DATE`/`SUBOPTIMAL`
       results recreate the swapchain once at the start of the next frame.
       Vulkan 1.3's `dynamic_rendering` and `synchronization2` are enabled and
       required.
-- [x] **Draw a triangle.** `TriangleShaders` in
-      `crates/rhi/src/vulkan/shaders.rs` draws a triangle with per-corner
-      colours from `crates/rhi/shaders/triangle.slang`, with no vertex
-      buffers, using linked `VK_EXT_shader_object` shader objects instead of a
-      pipeline, with all rendering state set when drawing. `build.rs` compiles
-      the shaders to SPIR-V with `slangc`, and the backend embeds them. Vulkan
-      1.1's `shaderDrawParameters` is enabled and required, because Slang
-      compiles `SV_VertexID` using the base vertex.
+- [x] **Draw a triangle.** `src/triangle.rs` draws a triangle with
+      per-corner colours through the RHI, from a vertex buffer its shader,
+      `assets/shaders/triangle.slang`, reads by address. Programs are linked
+      `VK_EXT_shader_object` shader objects instead of a pipeline, with all
+      rendering state set when drawing. The application's `build.rs`
+      compiles its shaders to SPIR-V with `slangc`, and it embeds them.
+      Vulkan 1.1's `shaderDrawParameters` is enabled and required, because
+      Slang compiles `SV_VertexID` using the base vertex.
 - [x] **Decide what to do on drivers without `VK_EXT_shader_object`.**
       Decided in ADR 0002: it's required, with no emulation layer or
       pipeline fallback. Devices without it are rejected at start-up.
-- [ ] **Add a rendering API to the RHI.** The triangle is hardcoded in the
-      Vulkan backend (`record_frame` in `crates/rhi/src/vulkan.rs`). Design
-      0002's `rhi-resources` slice added buffers, textures and samplers as
+- [ ] **Add a rendering API to the RHI.** Design 0002's `rhi-resources` slice added buffers, textures and samplers as
       opaque handles through `GpuResources`, with descriptor heap slots,
       debug names and leak reports. `rhi-commands` added command lists,
       translated on any thread and submitted to queues with timelines,
@@ -79,10 +78,10 @@ Outstanding tasks and future work.
       `rhi-present`, added `acquire_surface_image` and `present`, and the
       application now draws the triangle itself (`src/triangle.rs`), as a
       `Program` from `assets/shaders/triangle.slang`, with its vertices
-      filled through an `Uploader`. The backend's own triangle is unused:
-      remove `render_frame`, `record_frame`, `TriangleShaders`
-      (`crates/rhi/src/vulkan/shaders.rs`) and `frames.rs`, and make
-      `crates/rhi/shaders/triangle.slang` a test shader.
+      filled through an `Uploader`, and the backend no longer draws
+      anything itself. What remains of `rhi-present` is checking that no
+      Vulkan type is in the RHI's API (R14), the threading assertions
+      (R15), and the benchmarks.
 - [ ] **Profile command list recording and translation.** Recording
       appends each command's data to the list's arenas without removing
       duplicates, so a list that sets the same `RenderState` before every
