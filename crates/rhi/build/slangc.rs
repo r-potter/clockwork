@@ -1,9 +1,10 @@
 //! Finds the Slang shader compiler, `slangc` (R18 in design 0001).
 //!
-//! Shared by `clockwork-rhi`'s `build.rs`, which compiles the shaders with
-//! it, and by `xtask`, whose prerequisites check reports it and whose unit
-//! tests cover this module (build scripts can't have tests of their own).
-//! Each includes this file as a module with `#[path]`.
+//! Shared by `clockwork-rhi`'s `build.rs` and the application's, which
+//! compile shaders with it, and by `xtask`, whose prerequisites check
+//! reports it and whose unit tests cover this module (build scripts can't
+//! have tests of their own). Each includes this file as a module with
+//! `#[path]`.
 //!
 //! The lookup is a pure function of the platform, the environment and a file
 //! probe, so every platform's behaviour is tested on any machine (ADR 0003).

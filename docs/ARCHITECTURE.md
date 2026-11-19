@@ -125,13 +125,16 @@ Any unexpected `WARN` or `ERROR` fails the test that caused it, and fails the ap
 The engine is a Cargo workspace with a crate per subsystem, under `crates/`, each named `clockwork-<subsystem>`: see [ADR 0006](decisions/0006-crates-by-subsystem.md). The root package is the `clockwork` binary, the platform layer and the application code above the subsystems. `xtask`, the developer tooling, is in the workspace too, but isn't a default member.
 
 ```
+build.rs                        clockwork: compiles assets/shaders/ to SPIR-V with slangc, until assets are loaded at run time
 src/main.rs                     clockwork: platform layer, options, winit event loop, window, frame loop
+assets/shaders/                 the application's Slang shaders
 crates/diagnostics/             clockwork-diagnostics: sessions, log attribution, classification and counting
   src/capture.rs                  TestSession and the test subscriber, behind the test-support feature
 crates/gpu-memory/              clockwork-gpu-memory: the allocator's pure parts, the TLSF suballocator and the pool
 crates/rhi/                     clockwork-rhi: the RHI
   build.rs                        compiles shaders/ to SPIR-V with slangc
-  build/slangc.rs                 finds slangc, shared by build.rs and xtask
+  build/compile.rs                compiles a shader with slangc, shared by both build scripts
+  build/slangc.rs                 finds slangc, shared by both build scripts and xtask
   shaders/                        Slang shaders
   src/lib.rs                      the RHI trait, backend options and backend selection
   src/test_support.rs             the test environment, for the RHI's tests
