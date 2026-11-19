@@ -161,7 +161,7 @@ impl QueueLocks {
     /// time, so this can't deadlock with other threads.
     ///
     /// The locks aren't reentrant, so the calling thread must not hold a
-    /// queue's lock, from [`Queues::lock`] or [`QueueLock::lock`], or this
+    /// queue's lock, from [`QueueLock::lock`], or this
     /// waits for itself forever. That includes dropping an object that
     /// waits for the device to be idle, such as a swapchain, while holding
     /// one.
@@ -382,10 +382,11 @@ impl Queues {
         Some(QueueLock(&self.locks.0[index]))
     }
 
-    /// Locks the queue `role` uses, for one submission or present, or
-    /// returns `None` if it has none, which is only presenting when
+    /// Locks the queue `role` uses, for tests that submit to it directly,
+    /// or returns `None` if it has none, which is only presenting when
     /// headless. Don't wait for the device to be idle while holding it (see
     /// [`QueueLocks::wait_idle`]).
+    #[cfg(test)]
     pub(super) fn lock(&self, role: QueueRole) -> Option<MutexGuard<'_, vk::Queue>> {
         self.get(role).map(QueueLock::lock)
     }

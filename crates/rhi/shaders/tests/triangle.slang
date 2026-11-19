@@ -1,4 +1,5 @@
-// Draws a triangle with a different colour at each corner.
+// A test shader (design 0002, "Test plan"): draws a triangle with a
+// different colour at each corner.
 //
 // There are no vertex buffers: the vertex shader looks up each corner's
 // position and colour by its vertex index, so the triangle is drawn with

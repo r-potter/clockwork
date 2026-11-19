@@ -68,7 +68,7 @@ fn headless_backends_ignore_suspend_and_resize_and_reject_resume() {
         assert!(rhi.is_headless());
         assert!(!rhi.is_suspended());
         rhi.resize(size);
-        assert!(rhi.render_frame().is_ok());
+        assert!(matches!(rhi.acquire_surface_image(), Ok(None)));
         let target = WindowTarget {
             window: Arc::new(UnavailableWindow),
             size,
