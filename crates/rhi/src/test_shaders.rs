@@ -1,6 +1,5 @@
 //! The shaders T1 tests create programs from (design 0002, "Test plan"),
-//! compiled by `build.rs` from `shaders/tests/`, and the triangle, from
-//! `shaders/`, which they share with the engine.
+//! compiled by `build.rs` from `shaders/tests/`.
 //!
 //! Each is a [`TestProgram`] holding its SPIR-V as words, since
 //! `include_bytes!` doesn't align the bytes for `u32`s, from which
@@ -148,7 +147,9 @@ pub(crate) fn read_colour() -> TestProgram {
     )
 }
 
-/// The triangle's vertex and fragment program (`shaders/triangle.slang`).
+/// A vertex and fragment program that draws a triangle with a different
+/// colour at each corner, with no bound resources
+/// (`shaders/tests/triangle.slang`).
 pub(crate) fn triangle() -> TestProgram {
     TestProgram::new(
         "triangle",

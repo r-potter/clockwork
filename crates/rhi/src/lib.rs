@@ -612,25 +612,14 @@ pub trait RenderHardwareInterface: Debug {
 
     /// Records a new window size. Size-dependent resources, such as the
     /// swapchain, are recreated for it at the start of the next
-    /// [`acquire_surface_image`](Self::acquire_surface_image) or
-    /// [`render_frame`](Self::render_frame), so a stream of resizes (as during
-    /// an interactive resize) causes only one recreation per frame.
+    /// [`acquire_surface_image`](Self::acquire_surface_image), so a stream of
+    /// resizes (as during an interactive resize) causes only one recreation
+    /// per frame.
     ///
     /// Must be called whenever the window is resized. Does nothing if headless
     /// or suspended. A size with no area (for example, when minimised) pauses
     /// presenting until a later resize.
     fn resize(&mut self, size: WindowSize);
-
-    /// Renders and presents one frame.
-    ///
-    /// Currently a stub: it only applies any pending [`resize`](Self::resize).
-    /// Does nothing else if headless, suspended, or while the window has no
-    /// area.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if size-dependent resources cannot be recreated.
-    fn render_frame(&mut self) -> Result<()>;
 
     /// Acquires the swapchain image for the next frame to render to, first
     /// recreating the swapchain if the window was resized, or acquiring or

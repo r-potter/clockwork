@@ -58,14 +58,14 @@ pub(super) fn choose_format(
     })
 }
 
-/// A swapchain for a surface, its images as textures, a view of each image,
-/// and a semaphore for presenting each image.
+/// A swapchain for a surface, its images as textures, and a semaphore for
+/// presenting each image.
 ///
 /// Destroyed when dropped, so the owner must drop it before the surface it
 /// was created from.
 pub(super) struct Swapchain {
     /// The core, whose texture table holds the images, and whose device
-    /// destroys the image views and semaphores.
+    /// destroys the semaphores.
     core: Arc<VulkanDevice>,
     /// The `VK_KHR_swapchain` functions for the device.
     swapchain_fn: khr::swapchain::Device,
@@ -75,12 +75,10 @@ pub(super) struct Swapchain {
     images: Vec<vk::Image>,
     /// Each image in `images`, at the same index, as a texture.
     textures: Vec<Texture>,
-    /// A view of each image in `images`, at the same index.
-    image_views: Vec<vk::ImageView>,
     /// Signalled when rendering to each image has finished, and waited on to
-    /// present it. Indexed by image rather than by frame in flight: a present
-    /// may still be waiting on its semaphore after the frame's fence has
-    /// signalled, but not once the same image has been acquired again.
+    /// present it. Indexed by image rather than by frame: a present may
+    /// still be waiting on its semaphore after the submission that signalled
+    /// it completes, but not once the same image has been acquired again.
     render_finished: Vec<vk::Semaphore>,
     /// The images' format.
     format: Format,
@@ -194,16 +192,15 @@ impl Swapchain {
         let swapchain = unsafe { swapchain_fn.create_swapchain(&create_info, None) }
             .context("failed to create Vulkan swapchain")?;
 
-        // Construct `Self` before creating the image views, so that the
-        // swapchain and any views already created are destroyed by `Drop` if a
-        // later step fails.
+        // Construct `Self` before creating the semaphores, so that the
+        // swapchain and any semaphores already created are destroyed by `Drop`
+        // if a later step fails.
         let mut this = Self {
             core: core.clone(),
             swapchain_fn,
             swapchain,
             images: Vec::new(),
             textures: Vec::new(),
-            image_views: Vec::new(),
             render_finished: Vec::new(),
             format,
             extent,
@@ -213,25 +210,7 @@ impl Swapchain {
         // SAFETY: `swapchain` was just created from `swapchain_fn`.
         this.images = unsafe { this.swapchain_fn.get_swapchain_images(swapchain) }
             .context("failed to get Vulkan swapchain images")?;
-        for &image in &this.images {
-            let view_create_info = vk::ImageViewCreateInfo::default()
-                .image(image)
-                .view_type(vk::ImageViewType::TYPE_2D)
-                .format(surface_format.format)
-                .subresource_range(vk::ImageSubresourceRange {
-                    aspect_mask: vk::ImageAspectFlags::COLOR,
-                    base_mip_level: 0,
-                    level_count: 1,
-                    base_array_layer: 0,
-                    layer_count: 1,
-                });
-            // SAFETY: `image` belongs to the swapchain, which was created on
-            // this device, and `view_create_info` is valid for the duration of
-            // the call.
-            let view = unsafe { device.create_image_view(&view_create_info, None) }
-                .context("failed to create Vulkan swapchain image view")?;
-            this.image_views.push(view);
-
+        for _ in &this.images {
             // SAFETY: The create info is valid for the duration of the call.
             let semaphore =
                 unsafe { device.create_semaphore(&vk::SemaphoreCreateInfo::default(), None) }
@@ -287,12 +266,6 @@ impl Swapchain {
     /// Image `index` as a texture.
     pub(super) fn texture(&self, index: u32) -> Texture {
         self.textures[index as usize]
-    }
-
-    /// Image `index` and a view of it.
-    pub(super) fn image(&self, index: u32) -> (vk::Image, vk::ImageView) {
-        let index = index as usize;
-        (self.images[index], self.image_views[index])
     }
 
     /// The semaphore to signal when rendering to image `index` has finished,
@@ -352,7 +325,7 @@ impl Swapchain {
 impl Drop for Swapchain {
     fn drop(&mut self) {
         let device = self.core.device.handle();
-        // SAFETY: The textures, semaphores, views and swapchain were created
+        // SAFETY: The textures, semaphores and swapchain were created
         // by `new` and are removed or destroyed exactly once here. Waiting
         // for the device, which the queues were retrieved from, to be idle
         // ensures that no submitted work still uses them. That no command
@@ -366,9 +339,6 @@ impl Drop for Swapchain {
             self.core.remove_surface_images(&self.textures);
             for &semaphore in &self.render_finished {
                 device.destroy_semaphore(semaphore, None);
-            }
-            for &view in &self.image_views {
-                device.destroy_image_view(view, None);
             }
             self.swapchain_fn.destroy_swapchain(self.swapchain, None);
         }

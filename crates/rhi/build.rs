@@ -1,7 +1,8 @@
-//! Compiles the Slang shaders in `shaders/`, and the test shaders in
-//! `shaders/tests/`, to SPIR-V with `slangc`, writing `<name>.spv` files to
-//! `OUT_DIR` for the Vulkan backend and the tests to embed, with heap
-//! access through `SPV_EXT_descriptor_heap`.
+//! Compiles the test shaders in `shaders/tests/` to SPIR-V with `slangc`,
+//! writing `<name>.spv` files to `OUT_DIR` for the tests to embed, with heap
+//! access through `SPV_EXT_descriptor_heap`. The engine draws nothing
+//! itself, so it has no shaders of its own: `shaders/` holds only the
+//! modules shaders import, which the application's shaders import too.
 //!
 //! `slangc` is found by [`slangc::find`]: from the `SLANGC` environment
 //! variable, then the Vulkan SDK, then `PATH`.
@@ -14,14 +15,11 @@ mod slangc;
 use std::env;
 use std::path::{Path, PathBuf};
 
-/// The engine's shaders, as file names in `shaders/` without the `.slang`
-/// extension.
-const SHADERS: &[&str] = &["triangle"];
-
 /// The shaders only tests use (design 0002, "Test plan"), as file names in
 /// `shaders/tests/` without the `.slang` extension. The tests describe them
-/// in `src/test_shaders.rs`, and share the engine's `triangle`.
+/// in `src/test_shaders.rs`.
 const TEST_SHADERS: &[&str] = &[
+    "triangle",
     "write_value",
     "count_groups",
     "fill_texels",
@@ -37,8 +35,7 @@ const TEST_SHADERS: &[&str] = &[
 /// `shaders/` is on the include path, so the test shaders find them too.
 const MODULES: &[&str] = &["heap"];
 
-/// Finds `slangc`, then compiles each shader in [`SHADERS`] and
-/// [`TEST_SHADERS`].
+/// Finds `slangc`, then compiles each shader in [`TEST_SHADERS`].
 ///
 /// # Panics
 ///
@@ -54,12 +51,8 @@ fn main() {
     }
     let shaders = Path::new("shaders");
     let tests = shaders.join("tests");
-    let sources = SHADERS
-        .iter()
-        .map(|name| (shaders, name))
-        .chain(TEST_SHADERS.iter().map(|name| (tests.as_path(), name)));
-    for (directory, name) in sources {
-        let source = directory.join(format!("{name}.slang"));
+    for name in TEST_SHADERS {
+        let source = tests.join(format!("{name}.slang"));
         let output = out_dir.join(format!("{name}.spv"));
         compile::compile(&slangc, &source, shaders, &output);
     }
