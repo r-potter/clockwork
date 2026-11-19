@@ -127,6 +127,7 @@ The engine is a Cargo workspace with a crate per subsystem, under `crates/`, eac
 ```
 build.rs                        clockwork: compiles assets/shaders/ to SPIR-V with slangc, until assets are loaded at run time
 src/main.rs                     clockwork: platform layer, options, winit event loop, window, frame loop
+src/triangle.rs                 the triangle, drawn through the RHI until the renderer replaces it
 assets/shaders/                 the application's Slang shaders
 crates/diagnostics/             clockwork-diagnostics: sessions, log attribution, classification and counting
   src/capture.rs                  TestSession and the test subscriber, behind the test-support feature
