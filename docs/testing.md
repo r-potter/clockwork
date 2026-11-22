@@ -219,14 +219,19 @@ Property tests are T0: they run with the unit tests, and need no GPU.
 
 ## Benchmarks
 
-Benchmarks measure hot paths against the budgets in their designs, such as design 0002's "Performance", using [`criterion`](https://docs.rs/criterion). Each is in its crate's `benches/`, a separate crate that can reach only the public API, so it measures what callers pay. The first is `crates/gpu-memory/benches/allocator.rs`, which times the TLSF suballocator's and the pool's allocations and frees.
+Benchmarks measure hot paths against the budgets in their designs, such as design 0002's "Performance", using [`criterion`](https://docs.rs/criterion). Each is in its crate's `benches/`, a separate crate that can reach only the public API, so it measures what callers pay. There are two:
+
+- `crates/gpu-memory/benches/allocator.rs` times the TLSF suballocator's and the pool's allocations and frees. It needs no GPU.
+- `crates/rhi/benches/rhi/` times the RHI, with a module for each group, such as `recording.rs`. It needs a GPU: every group shares one headless backend, created without validation, since the layers would time themselves, but in a `TestSession`, so a warning still fails the run.
 
 ```
 cargo bench -p clockwork-gpu-memory
 cargo bench -p clockwork-gpu-memory -- tlsf/allocate
+cargo bench -p clockwork-rhi
+cargo bench -p clockwork-rhi -- recording
 ```
 
-The second runs only the benchmarks whose names contain `tlsf/allocate`. Results are printed, and kept in `target/criterion/`, so the next run reports the change from the last. To compare a branch with `main`, run the benchmarks on `main` with `-- --save-baseline main`, then on the branch with `-- --baseline main`.
+A filter after `--` runs only the benchmarks whose names contain it: the second command runs the TLSF allocation benchmark, and the last the RHI's recording benchmarks. Results are printed, and kept in `target/criterion/`, so the next run reports the change from the last. To compare a branch with `main`, run the benchmarks on `main` with `-- --save-baseline main`, then on the branch with `-- --baseline main`.
 
 - **Benchmarks are run on demand,** not by `cargo xtask check` or CI, whose shared runners are too noisy for timings. The check builds them, through clippy's `--all-targets`, so they can't stop compiling. Run them when changing the code they cover, and give the numbers, and the machine, in the PR.
 - **Budgets are for the reference machine** a design names, the RTX 3090 machine for design 0002. Elsewhere, compare against `main` on the same machine rather than against the budget.
