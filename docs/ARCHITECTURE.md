@@ -116,7 +116,7 @@ Any unexpected `WARN` or `ERROR` fails the test that caused it, and fails the ap
 - The platform event loop runs on the main thread, as winit requires on some platforms.
 - The ECS scheduler runs systems on a pool of worker threads.
 - Each job runs inside the tracing span that was current where it was queued, so that its log events are attributed to the right session.
-- **Command recording is multi-threaded.** The frame graph records independent passes on the worker pool, each into its own command buffer, and the buffers are submitted together in the plan's order. A frame with many passes or draws is then not limited by one thread's recording speed.
+- **Command recording is multi-threaded.** The frame graph records passes on the worker pool, each into its own command list, then translates the lists in groups, also in parallel, into command buffers that are submitted in the plan's order (see [`0003-frame-graph`](design/0003-frame-graph.md#coalescing)). A frame with many passes or draws is then not limited by one thread's recording speed.
 - **Resources are streamed.** Assets are uploaded while frames render, from threads other than the one rendering, on the transfer queue where the device has a dedicated one. Loading a scene doesn't stall the frame loop.
 - `0002-rhi` designs the RHI for both: which of its types are `Send` or `Sync`, what each thread may create, record and submit, and how uploads made on other threads become visible to rendering (see also the `PhysicalDevice` `Send`/`Sync` item in `TODO.md`).
 
@@ -155,7 +155,7 @@ Each step is a design document, accepted before any implementation, then a serie
 |---|---|---|
 | 0 | [`0001-foundations`](design/0001-foundations.md): design process, diagnostics and test harness, Vulkan 1.4 bindings, checks and CI | Implemented |
 | 1 | [`0002-rhi`](design/0002-rhi.md): render hardware interface | Implemented |
-| 2 | `0003-frame-graph`: data-driven frame graph | Not started |
+| 2 | [`0003-frame-graph`](design/0003-frame-graph.md): data-driven frame graph | Accepted |
 | 3 | `0004-input`: input devices, actions and cameras | Not started |
 | 4 | `0005-ecs`: entity-component system | Not started |
 | 5 | `0006-importers`: glTF and USD importers | Not started |
