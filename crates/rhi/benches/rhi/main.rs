@@ -8,11 +8,19 @@
 //! session ends. The device is the one device selection prefers.
 //!
 //! Each benchmark group is a module: [`recording`] times recording draws
-//! into a command list.
+//! into a command list, and [`translation`] translating lists of them, on
+//! one thread and on several at once.
 //!
 //! Run them with `cargo bench -p clockwork-rhi`. They need a GPU.
 
 mod recording;
+mod translation;
+
+use std::sync::Barrier;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::thread;
+use std::time::{Duration, Instant};
+use std::{panic, process};
 
 use clockwork_diagnostics::capture::TestSession;
 use clockwork_rhi::{
@@ -21,22 +29,124 @@ use clockwork_rhi::{
     Validation, create,
 };
 use criterion::Criterion;
+use tracing::Span;
 
-/// The size of the texture draws render to. Recording never renders, so
-/// it only needs to be valid.
+/// The size of the texture draws render to. Nothing is submitted, so it
+/// only needs to be valid.
 const TARGET_EXTENT: Extent2d = Extent2d {
     width: 64,
     height: 64,
 };
 
+/// The threads that work at once in benchmarks of contention, as many as
+/// design 0002's budgets assume.
+const THREADS: usize = 8;
+
+/// What every benchmark group is given.
+struct Context {
+    /// The backend.
+    rhi: Box<dyn RenderHardwareInterface>,
+    /// The session's span, for threads a benchmark starts to enter, so that
+    /// what they log is attributed to the session too.
+    span: Span,
+}
+
+impl Context {
+    /// The backend's resources.
+    fn resources(&self) -> &dyn GpuResources {
+        self.rhi.resources().as_ref()
+    }
+}
+
 /// Creates the backend, runs every benchmark group with it, then reports
 /// criterion's summary.
 fn main() {
+    abort_on_panic();
     let session = TestSession::new();
-    let rhi = backend(&session);
+    let context = Context {
+        rhi: backend(&session),
+        span: session.span().clone(),
+    };
     let mut criterion = Criterion::default().configure_from_args();
-    recording::bench(&mut criterion, rhi.resources().as_ref());
+    recording::bench(&mut criterion, &context);
+    translation::bench(&mut criterion, &context);
     criterion.final_summary();
+}
+
+/// Makes any panic, on any thread, abort the process once its message is
+/// printed, so that a benchmark that fails exits with an error rather than
+/// hanging.
+///
+/// [`bench_threads`] needs this: its threads and the main thread wait for
+/// each other at barriers, which a panic doesn't release, so a thread that
+/// panics would leave the others waiting forever.
+fn abort_on_panic() {
+    let print = panic::take_hook();
+    panic::set_hook(Box::new(move |info| {
+        print(info);
+        process::abort();
+    }));
+}
+
+/// Benchmarks running `work` on [`THREADS`] threads at once, as `name`,
+/// with each thread's input from `inputs`, and counting each run as
+/// `operations` iterations.
+///
+/// The threads are started once, rather than for each run, so that
+/// starting them isn't timed. Each run releases them together, and is
+/// timed from their release until the last has finished its work. Each
+/// then drops what its work returned, and `between` prepares the next run,
+/// while the threads wait to be released again, and neither is timed.
+///
+/// Whole runs are timed, so the time is scaled to the iterations criterion
+/// asks for. It asks for thousands or more, so the last run's remainder
+/// makes no difference.
+fn bench_threads<I: Sync, R>(
+    criterion: &mut Criterion,
+    context: &Context,
+    name: &str,
+    inputs: &[I; THREADS],
+    operations: u64,
+    work: impl Fn(&I) -> R + Sync,
+    mut between: impl FnMut(),
+) {
+    let start = Barrier::new(THREADS + 1);
+    let end = Barrier::new(THREADS + 1);
+    let stop = AtomicBool::new(false);
+    thread::scope(|scope| {
+        for input in inputs {
+            let (start, end, stop, work) = (&start, &end, &stop, &work);
+            let span = context.span.clone();
+            scope.spawn(move || {
+                let _entered = span.enter();
+                loop {
+                    start.wait();
+                    if stop.load(Ordering::Relaxed) {
+                        break;
+                    }
+                    let result = work(input);
+                    end.wait();
+                    drop(result);
+                }
+            });
+        }
+        criterion.bench_function(name, |bencher| {
+            bencher.iter_custom(|iters| {
+                let runs = iters.div_ceil(operations);
+                let mut total = Duration::ZERO;
+                for _ in 0..runs {
+                    start.wait();
+                    let released = Instant::now();
+                    end.wait();
+                    total += released.elapsed();
+                    between();
+                }
+                total.mul_f64(iters as f64 / (runs * operations) as f64)
+            });
+        });
+        stop.store(true, Ordering::Relaxed);
+        start.wait();
+    });
 }
 
 /// A headless Vulkan backend in `session`, on the device selection prefers,
