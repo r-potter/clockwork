@@ -139,6 +139,17 @@ pub struct PresentCapabilities {
     pub swapchain_maintenance: bool,
 }
 
+// Capabilities are plain data, read by any thread that decides what to do
+// with the device (design 0002, "Threading", R15).
+const _: () = {
+    /// Compiles only for types that are `Send` and `Sync`.
+    const fn assert_send_sync<T: Send + Sync>() {}
+    assert_send_sync::<QueueKind>();
+    assert_send_sync::<Capabilities>();
+    assert_send_sync::<Limits>();
+    assert_send_sync::<PresentCapabilities>();
+};
+
 /// Summarises the optional capabilities the device has and lacks, for the
 /// log: for example, `has swapchain maintenance, BC compression; lacks
 /// present timing`.

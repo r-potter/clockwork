@@ -137,6 +137,14 @@ impl ViewType {
     }
 }
 
+// Views are plain data, recorded into command lists on any thread (design
+// 0002, "Threading", R15).
+const _: () = {
+    /// Compiles only for types that are `Send` and `Sync`.
+    const fn assert_send_sync<T: Send + Sync>() {}
+    assert_send_sync::<TextureView>();
+};
+
 #[cfg(test)]
 mod tests {
     //! T0 tests of view checks and view types (design 0002, R21).

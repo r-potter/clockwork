@@ -175,11 +175,13 @@ impl<T> RetainedTimings<T> {
 }
 
 // Results are plain data, sent to whichever thread takes them (design 0002,
-// "Threading").
+// "Threading", R15).
 const _: () = {
     /// Compiles only for types that are `Send` and `Sync`.
     const fn assert_send_sync<T: Send + Sync>() {}
     assert_send_sync::<SubmissionTimings>();
+    assert_send_sync::<CommandBufferTimings>();
+    assert_send_sync::<Timing>();
 };
 
 /// The timestamp counter of a queue that can write timestamps: how many of

@@ -29,3 +29,12 @@ impl fmt::Display for HeapKind {
 /// A slot in a descriptor heap, for shaders to index.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct DescriptorIndex(pub u32);
+
+// Heap slots are plain data, written into push data on any thread (design
+// 0002, "Threading", R15).
+const _: () = {
+    /// Compiles only for types that are `Send` and `Sync`.
+    const fn assert_send_sync<T: Send + Sync>() {}
+    assert_send_sync::<HeapKind>();
+    assert_send_sync::<DescriptorIndex>();
+};
