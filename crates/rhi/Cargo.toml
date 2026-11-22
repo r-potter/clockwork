@@ -24,4 +24,10 @@ tracing.workspace = true
 
 [dev-dependencies]
 clockwork-diagnostics = { workspace = true, features = ["test-support"] }
+criterion.workspace = true
 proptest.workspace = true
+
+[[bench]]
+name = "rhi"
+# Criterion has its own harness.
+harness = false
