@@ -8,12 +8,14 @@
 //! session ends. The device is the one device selection prefers.
 //!
 //! Each benchmark group is a module: [`recording`] times recording draws
-//! into a command list, and [`translation`] translating lists of them, on
-//! one thread and on several at once.
+//! into a command list, [`translation`] translating lists of them, on one
+//! thread and on several at once, and [`resources`] looking up and
+//! creating resources.
 //!
 //! Run them with `cargo bench -p clockwork-rhi`. They need a GPU.
 
 mod recording;
+mod resources;
 mod translation;
 
 use std::sync::Barrier;
@@ -70,6 +72,7 @@ fn main() {
     let mut criterion = Criterion::default().configure_from_args();
     recording::bench(&mut criterion, &context);
     translation::bench(&mut criterion, &context);
+    resources::bench(&mut criterion, &context);
     criterion.final_summary();
 }
 
