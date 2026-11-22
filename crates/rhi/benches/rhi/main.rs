@@ -9,13 +9,15 @@
 //!
 //! Each benchmark group is a module: [`recording`] times recording draws
 //! into a command list, [`translation`] translating lists of them, on one
-//! thread and on several at once, and [`resources`] looking up and
-//! creating resources.
+//! thread and on several at once, [`resources`] looking up and creating
+//! resources, and [`transient`] allocating transient memory from several
+//! threads at once.
 //!
 //! Run them with `cargo bench -p clockwork-rhi`. They need a GPU.
 
 mod recording;
 mod resources;
+mod transient;
 mod translation;
 
 use std::sync::Barrier;
@@ -73,6 +75,7 @@ fn main() {
     recording::bench(&mut criterion, &context);
     translation::bench(&mut criterion, &context);
     resources::bench(&mut criterion, &context);
+    transient::bench(&mut criterion, &context);
     criterion.final_summary();
 }
 
