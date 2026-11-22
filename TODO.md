@@ -244,6 +244,71 @@ Outstanding tasks and future work.
       frame, calls `App::update` (still a stub), then draws the triangle
       to a surface image from `acquire_surface_image` and presents it,
       once the frame two before it is complete.
+- [ ] **Revisit RON for technique files.** Design 0003 chose TOML for
+      technique files, over RON, in review ("Alternatives considered"):
+      the `toml` crate keeps each value's position with `Spanned<T>`, so
+      errors found after parsing point at the value, TOML is familiar,
+      and a name table keeps the format separate from the Rust API. RON
+      reads as the description's Rust values, with a syntax for enums,
+      which TOML lacks. Once `graph-techniques` has a loader, revisit it
+      if descriptions have grown deeper than two levels, or the loader
+      has much hand-written code mapping TOML strings and tables onto
+      enums. Check first whether the `ron` crate now reports the
+      positions of values. Both formats would parse into the same
+      `GraphDesc`, so a switch changes only the loader, and the
+      techniques in `assets/techniques/`.
+- [ ] **Design asset access and hot reload with `0006-importers`.**
+      Design 0003 deferred hot reload of techniques to the asset system
+      ("Non-goals"), so that techniques, their shaders, textures and
+      models are read and reloaded one way. The design should give:
+      - one abstraction over where assets come from: the file system,
+        and other sources such as compressed asset packages
+      - hot reload for every kind of asset, techniques included,
+        installing a reloaded technique with `FrameGraph::set_technique`,
+        and keeping the running one, with an `ERROR`, when a reload fails
+      - how shaders reach `slangc`, which reads sources from the file
+        system itself, and whether packaged shaders are compiled ahead
+        of time
+      - a replacement for the one function that reads technique files in
+        `clockwork-frame-graph`
+
+      It should also choose between polling modification times and
+      platform file events through `notify`, which design 0003's review
+      compared. Polling costs a few microseconds a file, notices a save
+      within about half a second, handles editors that save by renaming
+      a new file over the old one, works under WSL across the Windows
+      boundary, where inotify sees no events, and is T0-testable with a
+      fake file probe and clock. `notify` reacts at once and costs
+      nothing while idle, but still needs debouncing, has to watch
+      directories rather than files to survive those renames, misses
+      events on WSL and network drives, and is hard to test without
+      real timing.
+- [ ] **Revisit linking Slang once hot reload exists.** Design 0003
+      compiles a technique's programs by running `slangc`, chosen over
+      linking Slang as a library in review ("Alternatives considered"):
+      it needs nothing new built, keeps compiler crashes out of the
+      engine, and needs no `unsafe`. But every compile starts a process
+      and loads Slang's core module. Once hot reload exists (see above),
+      time reloading a technique after editing one of its shaders. If it takes
+      more than about half a second, link the library behind the same
+      compiler interface, with bindings of our own rather than the
+      `shader-slang` crate:
+      - the compiling interfaces (global session, session, module, entry
+        point, component type and blob), declared as `#[repr(C)]` tables
+        of `extern "system"` functions in `slang.h`'s order, and the C
+        reflection functions (`spReflection*`) for push data
+      - the library loaded with `libloading` from beside the `slangc` that
+        `crates/rhi/build/slangc.rs` finds, so it's the build's version,
+        and refused if its version isn't one the bindings were checked
+        against, since a table that doesn't match the header is undefined
+        behaviour
+      - a session per worker, or a lock, since global sessions aren't
+        meant to be shared between threads freely
+      - the interfaces compared with `slang.h` whenever the pinned SDK
+        moves
+
+      Revise design 0003's "Techniques" and "Alternatives considered"
+      with the change.
 - [ ] **Add frame pacing.** The `winit` event loop runs in
       `ControlFlow::Poll` mode so the engine can pace frames itself. For now,
       the swapchain's FIFO present mode limits the frame rate to the
