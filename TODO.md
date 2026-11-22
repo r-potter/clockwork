@@ -94,8 +94,7 @@ Outstanding tasks and future work.
       application now draws the triangle itself (`src/triangle.rs`), as a
       `Program` from `assets/shaders/triangle.slang`, with its vertices
       filled through an `Uploader`, and the backend no longer draws
-      anything itself. What remains of `rhi-present` is the threading
-      assertions (R15) and the benchmarks.
+      anything itself. What remains of `rhi-present` is the benchmarks.
 - [ ] **Profile command list recording and translation.** Recording
       appends each command's data to the list's arenas without removing
       duplicates, so a list that sets the same `RenderState` before every
