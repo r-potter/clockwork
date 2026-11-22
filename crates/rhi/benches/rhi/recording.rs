@@ -11,18 +11,18 @@ use std::hint::black_box;
 use std::time::{Duration, Instant};
 
 use clockwork_rhi::{
-    CommandList, GpuResources, LoadOp, Program, Rect2d, RenderPassDesc, RenderState, Texture,
-    Viewport,
+    CommandList, LoadOp, Program, Rect2d, RenderPassDesc, RenderState, Texture, Viewport,
 };
 use criterion::Criterion;
 
-use crate::{TARGET_EXTENT, render_target, triangle};
+use crate::{Context, TARGET_EXTENT, render_target, triangle};
 
 /// The most draws in one batch: as many as a list of a busy pass holds.
-const BATCH: u64 = 10_000;
+pub(crate) const BATCH: u64 = 10_000;
 
 /// Benchmarks recording a draw, as `recording/draw`.
-pub(crate) fn bench(criterion: &mut Criterion, resources: &dyn GpuResources) {
+pub(crate) fn bench(criterion: &mut Criterion, context: &Context) {
+    let resources = context.resources();
     let program = triangle(resources);
     let target = render_target(resources);
     let mut list = CommandList::new("recording");
@@ -42,26 +42,34 @@ fn record(list: &mut CommandList, program: Program, target: Texture, draws: u64)
     while done < draws {
         let batch = (draws - done).min(BATCH);
         list.reset();
-        list.bind_program(program);
-        list.set_viewport(&Viewport::from_extent(TARGET_EXTENT));
-        list.set_scissor(Rect2d::from_extent(TARGET_EXTENT));
-        list.begin_render_pass(&RenderPassDesc::colour(target, LoadOp::Clear([0.0; 4])));
-
+        begin_drawing(list, program, target);
         let start = Instant::now();
         for draw in 0..batch {
-            // A typical draw's push data: the address of its constants,
-            // and an index.
-            let mut data = [0; 16];
-            data[..8].copy_from_slice(&(0x1_0000_0000 + draw * 256).to_le_bytes());
-            data[8..12].copy_from_slice(&(draw as u32).to_le_bytes());
-            list.set_render_state(black_box(&state));
-            list.push_data(0, black_box(&data));
-            list.draw(3, 1);
+            record_draw(list, black_box(&state), draw);
         }
         total += start.elapsed();
-
         list.end_render_pass();
         done += batch;
     }
     total
+}
+
+/// Binds `program` in `list`, sets the viewport and scissor to cover
+/// `target`, and begins a render pass to it, ready to draw.
+pub(crate) fn begin_drawing(list: &mut CommandList, program: Program, target: Texture) {
+    list.bind_program(program);
+    list.set_viewport(&Viewport::from_extent(TARGET_EXTENT));
+    list.set_scissor(Rect2d::from_extent(TARGET_EXTENT));
+    list.begin_render_pass(&RenderPassDesc::colour(target, LoadOp::Clear([0.0; 4])));
+}
+
+/// Records the draw numbered `draw` into `list`, with `state`, and push
+/// data typical of a draw: the address of its constants, and an index.
+pub(crate) fn record_draw(list: &mut CommandList, state: &RenderState, draw: u64) {
+    let mut data = [0; 16];
+    data[..8].copy_from_slice(&(0x1_0000_0000 + draw * 256).to_le_bytes());
+    data[8..12].copy_from_slice(&(draw as u32).to_le_bytes());
+    list.set_render_state(state);
+    list.push_data(0, black_box(&data));
+    list.draw(3, 1);
 }
