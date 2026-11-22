@@ -69,7 +69,7 @@ Outstanding tasks and future work.
 - [x] **Decide what to do on drivers without `VK_EXT_shader_object`.**
       Decided in ADR 0002: it's required, with no emulation layer or
       pipeline fallback. Devices without it are rejected at start-up.
-- [ ] **Add a rendering API to the RHI.** Design 0002's `rhi-resources`
+- [x] **Add a rendering API to the RHI.** Design 0002's `rhi-resources`
       slice added buffers, textures and samplers as opaque handles through
       `GpuResources`, with descriptor heap slots, debug names and leak
       reports. `rhi-commands` added command lists,
@@ -94,16 +94,40 @@ Outstanding tasks and future work.
       application now draws the triangle itself (`src/triangle.rs`), as a
       `Program` from `assets/shaders/triangle.slang`, with its vertices
       filled through an `Uploader`, and the backend no longer draws
-      anything itself. What remains of `rhi-present` is the benchmarks.
-- [ ] **Profile command list recording and translation.** Recording
-      appends each command's data to the list's arenas without removing
-      duplicates, so a list that sets the same `RenderState` before every
-      draw stores a copy each time, and translation sets every piece of
-      dynamic state for each one (design 0002, "Performance"). Once
-      something draws real scenes, profile recording and translating a
-      large list. If it's worth it, store each distinct render state once,
-      for example with a map from state to its index in the arena, or skip
-      state that hasn't changed since the last one set.
+      anything itself. It also added benchmarks of the design's
+      "Performance" budgets, in `crates/rhi/benches/rhi/`. Design 0002 is
+      implemented; its "As built" section lists what differs.
+- [ ] **Meet design 0002's translation budgets.** Translating a list of
+      10,000 draws takes 4.0 ms on one thread, against a budget of 1 ms,
+      and eight such lists on eight threads take 5.1 ms, against 2 ms
+      (`translation/serial` and `translation/parallel`, on the Windows
+      desktop's i9-13900K and RTX 4090). The benchmark's lists set the
+      whole `RenderState` before every draw, and translation sets every
+      piece of dynamic state each time, which is about 90% of the cost:
+      with the state set once per list, a list takes 0.48 ms. Skip state
+      that hasn't changed since the last one set, the design's first
+      remedy, kept off in tests by its rule that translation translates
+      and nothing more ("Keeping the recording model reversible").
+      Recording also stores a copy of the state each time it's set, so
+      storing each distinct state once, for example with a map from state
+      to its index in the arena, may help too. Check with
+      `cargo bench -p clockwork-rhi -- translation`.
+- [ ] **Decide what design 0002's transient allocation budget measures.**
+      With eight threads allocating from one frame at once, an
+      allocation takes 312 ns on each thread, against a budget of 50 ns
+      (`transient/contended`). Each allocation is one compare-and-swap on
+      the chunk's offset, and eight threads doing nothing else contend for
+      its cache line: one thread alone takes 32 ns, and the eight
+      together make one allocation every 39 ns. Real threads record
+      between allocations, so they contend far less. Either revise the
+      budget to the eight threads' throughput, or give each thread a
+      range of the chunk of its own to bump through, and revise
+      "Performance" or "Transient memory" to match.
+- [ ] **Run the RHI's benchmarks on the RTX 3090 machine.** Design
+      0002's budgets are for the RTX 3090 machine, but the benchmarks
+      have only run on the Windows desktop's RTX 4090. Run
+      `cargo bench -p clockwork-rhi` there, and update the two items
+      above and the design's "As built" with the results.
 - [ ] **Consider building the uploader's staging on the transient
       allocator.** `Staging` (`crates/rhi/src/upload/staging.rs`) has its
       own bump allocator over 4 MiB upload buffers, with the same
