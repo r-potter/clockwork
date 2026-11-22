@@ -305,6 +305,54 @@ impl CommandList {
         &self.label
     }
 
+    /// Removes every command, and forgets the program, state, index buffer
+    /// and render pass they set, as if the list were new, but keeps its label
+    /// and its memory. A list reset and recorded again each frame
+    /// allocates nothing once it has grown to the frame's size (design 0002,
+    /// "Performance").
+    ///
+    /// It's called `reset` rather than `clear`, so that it isn't mistaken
+    /// for a command that clears a render target.
+    pub fn reset(&mut self) {
+        let Self {
+            label: _,
+            commands,
+            text,
+            barriers,
+            texture_copies,
+            render_states,
+            colour_attachments,
+            depth_attachments,
+            push_data,
+            program_bound,
+            render_state_set,
+            viewport_set,
+            scissor_set,
+            index_buffer,
+            in_render_pass,
+            open_regions,
+            open_timings,
+        } = self;
+        // Every field is named above, so a field added later can't be
+        // forgotten here.
+        commands.clear();
+        text.clear();
+        barriers.clear();
+        texture_copies.clear();
+        render_states.clear();
+        colour_attachments.clear();
+        depth_attachments.clear();
+        push_data.clear();
+        *program_bound = false;
+        *render_state_set = false;
+        *viewport_set = false;
+        *scissor_set = false;
+        *index_buffer = None;
+        *in_render_pass = false;
+        *open_regions = 0;
+        *open_timings = 0;
+    }
+
     /// The commands, in recording order, for translation.
     pub(crate) fn commands(&self) -> &[Command] {
         &self.commands
@@ -1733,6 +1781,52 @@ mod tests {
     #[test]
     fn new_lists_are_empty() {
         assert_eq!(CommandList::new("empty").recorded(), []);
+    }
+
+    /// A reset list is empty, and keeps its label and its memory, even
+    /// when reset inside a render pass and an open region and timing
+    /// scope, which it forgets.
+    #[test]
+    fn reset_lists_are_empty() {
+        let mut list = ready_to_draw();
+        list.begin_debug_region("shadows");
+        list.begin_timing("shadows");
+        list.push_data(0, &[1, 0, 0, 0]);
+        list.draw(3, 1);
+        list.reset();
+        assert_eq!(list.recorded(), []);
+        assert_eq!(list.label(), "frame");
+        list.check_complete();
+        assert!(list.commands.capacity() > 0);
+        assert!(list.render_states.capacity() > 0);
+        assert!(list.push_data.capacity() > 0);
+    }
+
+    /// A reset list forgets the program and state it set, so drawing
+    /// again needs them set again, as in a new list.
+    #[test]
+    #[should_panic(expected = "command list \"frame\" draws with no program bound")]
+    fn reset_lists_forget_their_state() {
+        let mut list = ready_to_draw();
+        list.reset();
+        list.begin_render_pass(&render_pass("albedo", 1));
+        list.draw(3, 1);
+    }
+
+    /// A reset list forgets its index buffer, so indexed draws need one
+    /// bound again.
+    #[test]
+    #[should_panic(expected = "command list \"frame\" draws indexed with no index buffer bound")]
+    fn reset_lists_forget_their_index_buffer() {
+        let mut list = CommandList::new("frame");
+        list.bind_index_buffer(GpuAddress(0x1000), 12, IndexFormat::Uint32);
+        list.reset();
+        list.bind_program(program());
+        list.set_render_state(&RenderState::default());
+        list.set_viewport(&Viewport::from_extent(ATTACHMENT));
+        list.set_scissor(Rect2d::from_extent(ATTACHMENT));
+        list.begin_render_pass(&render_pass("albedo", 1));
+        list.draw_indexed(3, 1);
     }
 
     /// Copies whose ranges touch without overlapping are allowed, in either
