@@ -131,6 +131,7 @@ src/triangle.rs                 the triangle, drawn through the RHI until the re
 assets/shaders/                 the application's Slang shaders
 crates/diagnostics/             clockwork-diagnostics: sessions, log attribution, classification and counting
   src/capture.rs                  TestSession and the test subscriber, behind the test-support feature
+crates/frame-graph/             clockwork-frame-graph: graph descriptions, so far, then the compiler and the executor
 crates/gpu-memory/              clockwork-gpu-memory: the allocator's pure parts, the TLSF suballocator and the pool
 crates/rhi/                     clockwork-rhi: the RHI
   build.rs                        compiles shaders/tests/ to SPIR-V with slangc, for the tests

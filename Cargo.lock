@@ -446,6 +446,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "clockwork-frame-graph"
+version = "0.1.0"
+dependencies = [
+ "clockwork-rhi",
+]
+
+[[package]]
 name = "clockwork-gpu-memory"
 version = "0.1.0"
 dependencies = [

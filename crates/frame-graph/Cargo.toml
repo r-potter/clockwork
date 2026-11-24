@@ -1,0 +1,14 @@
+[package]
+name = "clockwork-frame-graph"
+version.workspace = true
+edition.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+# The frame graph (design 0003): descriptions of passes and resources,
+# compiled into plans with their synchronization derived, and executed through
+# the RHI.
+[dependencies]
+clockwork-rhi.workspace = true
