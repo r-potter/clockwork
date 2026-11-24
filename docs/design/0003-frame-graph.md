@@ -125,7 +125,7 @@ A **pass** has a name, a kind, the queue it asks for, and its uses of resources.
 | `compute` | A recorder, or the graph: one dispatch of a program from the technique | Reads and writes through shaders, and bindings for the graph's dispatch | Graphics or compute |
 | `transfer` | A recorder | Copy reads and writes, and fills | Any |
 
-**Uses** are RHI `AccessSet`s on a resource, or on a `Subresource` of a texture, so a pass can read mip 2 of a texture while writing mip 3. Attachments are uses too, with the accesses 0002's "Synchronization" gives them: a colour attachment that's cleared or discarded is `ColorAttachmentWrite`, and one that's kept, because the pass blends with it or draws over it, adds `ColorAttachmentRead`. A depth attachment is `DepthAttachmentRead`, with `DepthAttachmentWrite` if the pass writes depth.
+**Uses** are RHI `AccessSet`s on a resource, or on a `Subresource` of a texture, so a pass can read mip 2 of a texture while writing mip 3. Attachments are uses too, with the accesses 0002's "Synchronization" gives them: a colour attachment that's cleared or discarded is `ColorAttachmentWrite`, and one that's kept, because the pass blends with it or draws over it, adds `ColorAttachmentRead`. A depth attachment is `DepthAttachmentRead`, with `DepthAttachmentWrite` if the pass writes depth, or clears or discards it, since its load operation then writes it. An attachment is one mip of one layer of a texture, mip 0 of layer 0 unless the pass names another, so a pass can render to one mip of a chain.
 
 **Bindings** are what the graph's own fullscreen and compute passes put in their push data: a texture view's heap index, a sampler's, or a buffer's address, each with the access the shader uses it for, and constants from the technique. The layout is fixed by the order of the bindings (see "Data structures and layout"), so the graph can fill it without knowing the shader, and it's checked against the shader's reflection when the technique loads.
 
@@ -135,7 +135,7 @@ A **pass** has a name, a kind, the queue it asks for, and its uses of resources.
 
 The compiler takes a `GraphDesc` and `CompileInputs`, and returns a `Plan` or every error it found. Its steps:
 
-1. **Validate.** Names resolve. Each access suits its pass's kind and its resource: no attachment access in a compute pass, no sampled access to a buffer, no attachment that's a BC or 3D texture, no storage view of more than one mip. A pass's uses of one subresource have one layout, by the RHI's rule. A raster pass's attachments are the same size. Every read of a transient resource follows, in the written order, a pass that writes it. The output is written.
+1. **Validate.** Names resolve. Each access suits its pass's kind and its resource: no attachment access in a compute pass, no sampled access to a buffer, no attachment that's a BC or 3D texture, no storage view of more than one mip. Each pass asks for a queue its kind can run on: raster and fullscreen passes graphics, compute passes graphics or compute, and transfer passes any. IDs and subresources name resources, mips and layers the description has. A 3D texture has a fixed size and one layer, and a cube map's layers are a multiple of six. A pass's uses of one subresource have one layout, by the RHI's rule. A raster pass's attachments are the same size. Every read of a transient resource follows, in the written order, a pass that writes it. The output is written.
 2. **Expand** passes repeated for each mip.
 3. **Build the dependency graph** (see "Scheduling").
 4. **Cull** passes whose writes nothing reads. Starting from the output, imported resources' final accesses, persistent resources, and passes marked as having side effects, a pass is kept if a kept pass depends on it by reading something it writes. Culled passes are logged at `DEBUG`, naming them. A pass culled because a debug view isn't shown is normal, so it's not a warning.
@@ -397,17 +397,28 @@ impl GraphDesc {
 /// A transient or persistent texture's description. Its usage is derived.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct TransientTexture {
+    pub dimension: TextureDimension,
     pub format: Format,
     pub size: TextureSize,
     pub mips: MipCount,
     pub layers: u32,
 }
 
-/// A texture's size: fixed, or the output's scaled and rounded up.
+/// A texture's size: fixed, or the output's scaled and rounded up, with a
+/// depth of 1.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum TextureSize {
-    Fixed(Extent2d),
+    Fixed(Extent3d),
     Output { scale: f32 },
+}
+
+/// One mip of one layer of a texture, rendered to as an attachment. A
+/// `TextureId` converts to its mip 0 of layer 0.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct AttachmentTarget {
+    pub texture: TextureId,
+    pub mip: u32,
+    pub layer: u32,
 }
 
 /// The accesses an imported resource is in before each frame, and must be
@@ -419,8 +430,8 @@ pub struct ImportDesc {
 }
 
 impl RasterPassBuilder<'_> {
-    pub fn colour(&mut self, texture: TextureId, attachment: Attachment<[f32; 4]>) -> &mut Self;
-    pub fn depth(&mut self, texture: TextureId, attachment: Attachment<f32>, write: bool) -> &mut Self;
+    pub fn colour(&mut self, target: impl Into<AttachmentTarget>, attachment: Attachment<[f32; 4]>) -> &mut Self;
+    pub fn depth(&mut self, target: impl Into<AttachmentTarget>, attachment: Attachment<f32>, write: bool) -> &mut Self;
     pub fn read(&mut self, resource: impl Into<ResourceUse>, access: impl Into<AccessSet>) -> &mut Self;
     pub fn write(&mut self, resource: impl Into<ResourceUse>, access: impl Into<AccessSet>) -> &mut Self;
     /// Keeps the pass even if nothing reads what it writes.
@@ -833,3 +844,4 @@ Filled in at close-out.
 | 2026-11-22 | Revised after review: passes are still recorded one command list each, in parallel, but each batch's lists are then split, in order, into translation units by their command counts, up to `UNIT_COMMANDS`, and each unit is translated into one command buffer, rather than each pass having a command buffer of its own. Coalescing changes no synchronization, so the plan is unchanged, and units are chosen each frame. The RHI gains `Queue::translate_lists` and `CommandList::command_count`, in `graph-execute` ("Goals", "Requirements", "Executing", "Coalescing", "Changes to the RHI", "Threading", "Performance", "Alternatives considered", "Test plan", "Implementation slices", "Risks", "Resolved in review") |
 | 2026-11-23 | Revised after review: aliasing stays in this design, as the last slice, since the lifetimes, plans and barriers it depends on are designed here, and scheduling's effect on lifetimes is tuned with it, closing the last open question ("Alternatives considered", "Open questions", "Resolved in review") |
 | 2026-11-24 | Accepted |
+| 2026-11-25 | Revised during `graph-plan`, after review: a depth attachment that's cleared or discarded writes it, so its accesses include `DepthAttachmentWrite` whether or not the pass writes depth. Attachments name one mip of one layer, an `AttachmentTarget`, rather than any part of a texture. Transient and persistent textures have a dimension, so cube maps and 3D textures can be described, and a fixed size is an `Extent3d`. Validation checks each pass's queue against its kind, IDs and subresources against the description, and the shapes of 3D and cube textures ("Passes and resources", "Compiling", "API") |
