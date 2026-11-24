@@ -74,7 +74,7 @@ use anyhow::{Result, bail};
 use clockwork_diagnostics::SessionId;
 use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
 
-pub use barrier::{Access, AccessSet, Barrier, Subresource};
+pub use barrier::{Access, AccessSet, Barrier, Layout, Subresource};
 pub use buffer::{Buffer, BufferDesc, BufferUsage, GpuAddress, IndexFormat};
 pub use capabilities::{
     Capabilities, Limits, MAX_DRAW_INDIRECT_COUNT, MAX_PUSH_DATA_SIZE, PresentCapabilities,

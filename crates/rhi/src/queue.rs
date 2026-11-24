@@ -26,8 +26,16 @@ use crate::{CommandList, QueueKind, RhiResult, SubmissionTimings, TransferGranul
 pub struct QueueId(u32);
 
 impl QueueId {
-    /// The ID of the backend's queue at `index`.
-    pub(crate) const fn new(index: u32) -> Self {
+    /// The ID of the backend's queue at `index`, numbered from 0.
+    ///
+    /// This is for code that plans work for queues with no device, such as
+    /// the frame graph's compiler and its tests, which need IDs that are
+    /// equal exactly where queues are shared. Plans for a real device must
+    /// take each queue's ID from [`Queue::id`]: an ID made here with another
+    /// numbering than the backend's names a real queue, just the wrong one,
+    /// and nothing can tell. Only an index past the backend's last queue
+    /// panics, when it's used, such as in a timepoint waited for.
+    pub const fn new(index: u32) -> Self {
         Self(index)
     }
 

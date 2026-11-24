@@ -313,7 +313,12 @@ dispatch = { mip-of = "bloom", group = [8, 8, 1] }
 
 ### Changes to the RHI
 
-Coalescing needs two things the RHI doesn't have, and aliasing three. Each is recorded as a revision of design 0002 when it's added.
+The compiler needs two things the RHI keeps to itself, coalescing two it doesn't have, and aliasing three. Each is recorded as a revision of design 0002 when it's added.
+
+The compiler's, added in the `graph-plan` slice:
+
+- **The layout rule.** `Layout`, `Access::layout` and `AccessSet::layout` are public, so validation checks that a pass's uses of a subresource share a layout, and barrier derivation finds layout changes, by the rule recording checks rather than a copy of it. So are `Access::is_alone_only` and `AccessSet::is_valid_combination`, so validation rejects `None`, `Present` and `Acquired` beside other accesses as recording does. Validation checks `Access::applies_to_textures` before a texture's layout, since a layout of none can mean either.
+- **Queue IDs without a device.** `QueueId::new(index)` is public, so `QueueLayout`s can be built for compiling and testing plans with no GPU. A real queue's ID still comes from `Queue::id`.
 
 Coalescing's, added in the `graph-execute` slice:
 
@@ -787,7 +792,7 @@ Each slice is a stack of small PRs, as `CLAUDE.md` describes.
 | Branch | Contents | Requirements |
 |---|---|---|
 | `design/frame-graph` | This design (this branch) | |
-| `graph-plan` | The `clockwork-frame-graph` crate; `GraphDesc` and its builders; validation, expansion, the dependency graph, culling, the `AsWritten` schedule, and barrier derivation and load and store operations on one queue, for any order; `Plan` and `describe`, with `insta`; the plan checker and its property tests, in random orders too; the compiling benchmark | R1, R3, R4, R5, R18, part of R17 |
+| `graph-plan` | The `clockwork-frame-graph` crate; the RHI's layout rule and `QueueId::new` made public, recorded as revisions of 0002; `GraphDesc` and its builders; validation, expansion, the dependency graph, culling, the `AsWritten` schedule, and barrier derivation and load and store operations on one queue, for any order; `Plan` and `describe`, with `insta`; the plan checker and its property tests, in random orders too; the compiling benchmark | R1, R3, R4, R5, R18, part of R17 |
 | `graph-execute` | The RHI's `Queue::translate_lists` and `CommandList::command_count`, recorded as revisions of 0002; `FrameGraph`; transient and persistent resources, created without aliasing; imports and uploads; `Recorders`, `PassContext` and the recorder types; the graph's fullscreen and compute passes; `WorkerPool` and `Serial`; partitioning into translation units; debug regions, timing scopes and `timings`; `set_technique`; the executing benchmarks, which tune `UNIT_COMMANDS` | R2, R6, R7, R8, R10, R11, R17 |
 | `graph-techniques` | TOML technique files, the name table, spans and errors; compiling programs with `slangc` at run time, with reflection and the push data check; `assets/techniques/triangle.toml`; the application rendering through the graph, on a `WorkerPool` over `rayon`, its barriers and its `build.rs`'s shader compilation removed | R13, R14, R15, R16 |
 | `graph-queues` | Queue assignment, batching, cross-queue waits and ownership transfers, and their snapshots and T1 test; the `Overlap` schedule, groups and their shared barriers, `set_schedule`, `schedules_render_the_same`, and the GPU time benchmarks | R9, R19 |
@@ -844,4 +849,5 @@ Filled in at close-out.
 | 2026-11-22 | Revised after review: passes are still recorded one command list each, in parallel, but each batch's lists are then split, in order, into translation units by their command counts, up to `UNIT_COMMANDS`, and each unit is translated into one command buffer, rather than each pass having a command buffer of its own. Coalescing changes no synchronization, so the plan is unchanged, and units are chosen each frame. The RHI gains `Queue::translate_lists` and `CommandList::command_count`, in `graph-execute` ("Goals", "Requirements", "Executing", "Coalescing", "Changes to the RHI", "Threading", "Performance", "Alternatives considered", "Test plan", "Implementation slices", "Risks", "Resolved in review") |
 | 2026-11-23 | Revised after review: aliasing stays in this design, as the last slice, since the lifetimes, plans and barriers it depends on are designed here, and scheduling's effect on lifetimes is tuned with it, closing the last open question ("Alternatives considered", "Open questions", "Resolved in review") |
 | 2026-11-24 | Accepted |
+| 2026-11-24 | Revised during `graph-plan`: the RHI makes public its layout rule (`Layout`, `Access::layout` and `AccessSet::layout`), the rule that some accesses stand alone (`Access::is_alone_only` and `AccessSet::is_valid_combination`), and `QueueId::new`, which the design hadn't listed, so the compiler validates and derives barriers by the rule recording checks, and plans can be compiled with no device ("Changes to the RHI") |
 | 2026-11-25 | Revised during `graph-plan`, after review: a depth attachment that's cleared or discarded writes it, so its accesses include `DepthAttachmentWrite` whether or not the pass writes depth. Attachments name one mip of one layer, an `AttachmentTarget`, rather than any part of a texture. Transient and persistent textures have a dimension, so cube maps and 3D textures can be described, and a fixed size is an `Extent3d`. Validation checks each pass's queue against its kind, IDs and subresources against the description, and the shapes of 3D and cube textures ("Passes and resources", "Compiling", "API") |
