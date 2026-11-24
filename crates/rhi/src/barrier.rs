@@ -133,7 +133,12 @@ impl Access {
 
     /// The layout a texture must be in for this access alone, or `None` for
     /// an access only buffers have.
-    pub(crate) const fn layout(self) -> Option<Layout> {
+    ///
+    /// [`None`](Self::None) and [`Acquired`](Self::Acquired) are
+    /// [`Layout::Undefined`], since a barrier from them discards the
+    /// contents, but a texture can't be moved to either: that's a rule of
+    /// barriers, which this doesn't check.
+    pub const fn layout(self) -> Option<Layout> {
         match self {
             Self::None | Self::Acquired => Some(Layout::Undefined),
             Self::IndirectRead | Self::IndexRead | Self::HostWrite | Self::HostRead => None,
@@ -163,8 +168,10 @@ impl Access {
         }
     }
 
-    /// Whether the access is only valid alone in its set.
-    const fn is_alone_only(self) -> bool {
+    /// Whether the access is only valid alone in its set:
+    /// [`None`](Self::None), [`Present`](Self::Present) and
+    /// [`Acquired`](Self::Acquired).
+    pub const fn is_alone_only(self) -> bool {
         matches!(self, Self::None | Self::Present | Self::Acquired)
     }
 
@@ -177,8 +184,12 @@ impl Access {
 /// The layouts a texture can be in, which each [`Access`] names and
 /// recording chooses for each [`AccessSet`]. Backends map each to a layout
 /// of their own.
+///
+/// It's public so that code planning barriers, such as the frame graph's
+/// compiler, follows the same rule recording does: two uses of a texture
+/// need a barrier between them if their layouts differ.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub(crate) enum Layout {
+pub enum Layout {
     /// No contents: a new texture, or one whose contents are discarded.
     Undefined,
     /// Read and written by shaders through storage views.
@@ -224,13 +235,28 @@ impl AccessSet {
             .filter(move |&access| self.contains(access))
     }
 
-    /// The one layout a texture can be in for every access in the set, or
-    /// `None` if there isn't one, or an access is one only buffers have.
+    /// Whether every access that must be alone in its set is: the set has
+    /// [`Access::None`], [`Access::Present`] or [`Access::Acquired`] only on
+    /// its own. Recording panics for a barrier with a set that isn't.
+    pub fn is_valid_combination(self) -> bool {
+        self.iter()
+            .all(|access| !access.is_alone_only() || self == AccessSet::from(access))
+    }
+
+    /// The one layout a texture can be in for every access in the set.
     ///
     /// A set with writes takes their layout, and its reads must be able to
     /// happen in it. A set of only reads takes the layout they share,
     /// preferring the one its accesses use alone.
-    pub(crate) fn layout(self) -> Option<Layout> {
+    ///
+    /// It's `None` for two reasons, which a caller that reports them should
+    /// tell apart by checking [`Access::applies_to_textures`] first: an
+    /// access in the set is one only buffers have, or the set's accesses
+    /// share no layout. It checks only layouts, so a set it gives a layout
+    /// may still be one recording rejects: one that isn't a
+    /// [valid combination](Self::is_valid_combination), or one a texture
+    /// can't move to, [`Access::None`] or [`Access::Acquired`].
+    pub fn layout(self) -> Option<Layout> {
         let can_be_in = |layout: Layout| {
             self.iter()
                 .all(|access| access.layout() == Some(layout) || access.also_in() == Some(layout))
@@ -545,9 +571,12 @@ impl Barrier {
     ///   over.
     pub(crate) fn check(&self, list: &str) {
         for set in [self.before, self.after] {
-            for access in set.iter() {
-                assert!(
-                    !access.is_alone_only() || set == AccessSet::from(access),
+            if !set.is_valid_combination() {
+                let access = set
+                    .iter()
+                    .find(|access| access.is_alone_only())
+                    .expect("only an access that must be alone makes a set invalid");
+                panic!(
                     "command list \"{list}\" has a barrier with {set:?}, but {access:?} must be \
                      alone",
                 );
@@ -789,6 +818,29 @@ mod tests {
         ] {
             assert_eq!(set.layout(), None, "{set:?}");
         }
+    }
+
+    /// Accesses that must be alone make a set invalid beside any other,
+    /// even one with the same layout, and every other combination is valid
+    /// as far as this rule goes.
+    #[test]
+    fn alone_only_accesses_combine_with_nothing() {
+        for access in Access::ALL {
+            assert!(AccessSet::from(access).is_valid_combination(), "{access:?}");
+        }
+        for set in [
+            Access::None | Access::Acquired,
+            Access::Present | Access::CopyRead,
+            Access::None | Access::ComputeShaderWrite,
+        ] {
+            assert!(!set.is_valid_combination(), "{set:?}");
+        }
+        assert_eq!(
+            (Access::None | Access::Acquired).layout(),
+            Some(Layout::Undefined),
+            "layout() checks layouts alone"
+        );
+        assert!((Access::CopyRead | Access::FragmentShaderSampledRead).is_valid_combination());
     }
 
     /// The named subresources cover what their names say, with
