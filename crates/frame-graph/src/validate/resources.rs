@@ -113,19 +113,20 @@ impl ShapeCheck<'_> {
     /// The shape of `desc`, or `None` if it has a mistake, which is
     /// reported.
     fn shape(&mut self, desc: &TransientTexture, inputs: &CompileInputs) -> Option<TextureShape> {
-        let extent = self.extent(desc, inputs)?;
         // Each check reports its own mistakes, so all of them run before
-        // any failure is acted on.
+        // any failure is acted on. Only those that need the size wait for
+        // it.
+        let extent = self.extent(desc, inputs);
         let shaped = self.check_dimension(desc, extent);
         let layers = self.layers(desc);
-        let mips = self.mips(desc.mips, extent);
+        let mips = extent.and_then(|extent| self.mips(desc.mips, extent));
         if !shaped {
             return None;
         }
         Some(TextureShape {
             dimension: desc.dimension,
             format: desc.format,
-            extent,
+            extent: extent?,
             mips: mips?,
             layers: layers?,
         })
@@ -180,34 +181,35 @@ impl ShapeCheck<'_> {
     }
 
     /// Whether `extent` and the layers suit the texture's dimension,
-    /// reporting why not.
-    fn check_dimension(&mut self, desc: &TransientTexture, extent: Extent3d) -> bool {
+    /// reporting why not. The size is checked only if it's known, since
+    /// [`extent`](Self::extent) reported why it isn't, and a count of no
+    /// layers is left to [`layers`](Self::layers).
+    fn check_dimension(&mut self, desc: &TransientTexture, extent: Option<Extent3d>) -> bool {
         match desc.dimension {
             TextureDimension::D3 => {
                 let fixed = matches!(desc.size, TextureSize::Fixed(_));
                 if !fixed {
                     self.report("is 3D, so it needs a fixed size, not the output's");
                 }
-                if desc.layers != 1 {
+                let one_layer = desc.layers <= 1;
+                if !one_layer {
                     self.report(&format!("is 3D, so it has one layer, not {}", desc.layers));
                 }
-                fixed && desc.layers == 1
+                fixed && one_layer
             }
-            TextureDimension::D2 | TextureDimension::Cube if extent.depth != 1 => {
-                self.report(&format!(
-                    "has a depth of {}, but only a 3D texture can have more than 1",
-                    extent.depth
-                ));
-                false
-            }
+            TextureDimension::D2 => self.check_flat(extent),
             TextureDimension::Cube => {
-                let square = extent.width == extent.height;
-                if !square {
-                    self.report(&format!(
-                        "is a cube map, so its faces must be square, not {} × {}",
-                        extent.width, extent.height
-                    ));
-                }
+                let flat = self.check_flat(extent);
+                let square = match extent {
+                    Some(extent) if extent.width != extent.height => {
+                        self.report(&format!(
+                            "is a cube map, so its faces must be square, not {} × {}",
+                            extent.width, extent.height
+                        ));
+                        false
+                    }
+                    _ => true,
+                };
                 let whole_cubes = desc.layers.is_multiple_of(6);
                 if !whole_cubes {
                     self.report(&format!(
@@ -215,9 +217,23 @@ impl ShapeCheck<'_> {
                         desc.layers
                     ));
                 }
-                square && whole_cubes
+                flat && square && whole_cubes
             }
-            TextureDimension::D2 => true,
+        }
+    }
+
+    /// Whether `extent`, if it's known, has a depth of 1, as every texture
+    /// but a 3D one has, reporting it if not.
+    fn check_flat(&mut self, extent: Option<Extent3d>) -> bool {
+        match extent {
+            Some(extent) if extent.depth != 1 => {
+                self.report(&format!(
+                    "has a depth of {}, but only a 3D texture can have more than 1",
+                    extent.depth
+                ));
+                false
+            }
+            _ => true,
         }
     }
 
@@ -397,6 +413,41 @@ mod tests {
     }
 
     #[test]
+    fn a_bad_size_hides_no_other_mistakes() {
+        let mut graph = GraphDesc::new("sizes and shapes");
+        let volume = TransientTexture {
+            dimension: TextureDimension::D3,
+            layers: 2,
+            ..sized(TextureSize::Output { scale: 0.0 })
+        };
+        let cube = TransientTexture {
+            dimension: TextureDimension::Cube,
+            layers: 4,
+            ..fixed(0, 4, 1)
+        };
+        let no_layers = TransientTexture {
+            layers: 0,
+            ..fixed(0, 4, 1)
+        };
+        graph.transient_texture("fog", volume);
+        graph.transient_texture("sky", cube);
+        graph.transient_texture("nothing", no_layers);
+
+        assert_eq!(
+            messages(&graph),
+            [
+                "texture \"fog\" is sized by the output with a scale of 0, which must be positive",
+                "texture \"fog\" is 3D, so it needs a fixed size, not the output's",
+                "texture \"fog\" is 3D, so it has one layer, not 2",
+                "texture \"sky\" is 0 × 4 × 1, so it has no texels",
+                "texture \"sky\" is a cube map, so its layers must be a multiple of 6, not 4",
+                "texture \"nothing\" is 0 × 4 × 1, so it has no texels",
+                "texture \"nothing\" has 0 layers",
+            ]
+        );
+    }
+
+    #[test]
     fn bad_mip_and_layer_counts_are_reported() {
         let mut graph = GraphDesc::new("counts");
         let no_mips = TransientTexture {
@@ -444,6 +495,10 @@ mod tests {
             "layered fog",
             volume(TextureSize::Fixed(Extent3d::new_2d(4, 4)), 2),
         );
+        graph.transient_texture(
+            "thin fog",
+            volume(TextureSize::Fixed(Extent3d::new_2d(4, 4)), 0),
+        );
         graph.transient_texture("deep", fixed(4, 4, 4));
         graph.transient_texture("sky", cube(16, 16, 12));
         graph.transient_texture("oblong", cube(16, 8, 6));
@@ -454,6 +509,7 @@ mod tests {
             [
                 "texture \"scaled fog\" is 3D, so it needs a fixed size, not the output's",
                 "texture \"layered fog\" is 3D, so it has one layer, not 2",
+                "texture \"thin fog\" has 0 layers",
                 "texture \"deep\" has a depth of 4, but only a 3D texture can have more than 1",
                 "texture \"oblong\" is a cube map, so its faces must be square, not 16 × 8",
                 "texture \"partial\" is a cube map, so its layers must be a multiple of 6, not 4",
