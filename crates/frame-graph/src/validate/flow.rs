@@ -192,8 +192,8 @@ mod tests {
     use crate::validate::test_support::{inputs, messages};
     use crate::validate::validate;
     use crate::{
-        BufferId, CompileError, ComputeRecorder, ImportDesc, MipCount, TextureId, TextureSize,
-        TransientTexture,
+        BufferId, CompileError, ComputeRecorder, ImportDesc, MipCount, MipDirection, TextureId,
+        TextureSize, TransientTexture,
     };
 
     /// The resources of [`graph`].
@@ -339,7 +339,7 @@ mod tests {
             .write(bloom.mip(0), Access::CopyWrite);
         graph
             .compute_pass("downsample", ComputeRecorder::dispatch("downsample"))
-            .for_each_mip(bloom)
+            .for_each_mip(bloom, MipDirection::Down, ..)
             .write(bloom.current_mip(), Access::ComputeShaderWrite);
         graph
             .compute_pass("composite", ComputeRecorder::dispatch("composite"))

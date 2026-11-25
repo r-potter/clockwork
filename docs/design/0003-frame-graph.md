@@ -129,7 +129,7 @@ A **pass** has a name, a kind, the queue it asks for, and its uses of resources.
 
 **Bindings** are what the graph's own fullscreen and compute passes put in their push data: a texture view's heap index, a sampler's, or a buffer's address, each with the access the shader uses it for, and constants from the technique. The layout is fixed by the order of the bindings (see "Data structures and layout"), so the graph can fill it without knowing the shader, and it's checked against the shader's reflection when the technique loads.
 
-**Repeating a pass for each mip.** A compute or fullscreen pass can be repeated for each mip of a texture after the first, with each repetition's uses and attachments naming the `current` and `previous` mip. Raster passes can't be repeated until a technique needs one, and transfer passes have no need to be. The compiler expands it into a pass per mip, named with the mip, so a mip chain is one entry in the description and its barriers come from the usual rules. A pass can't record barriers between its own draws or dispatches, so this is how a chain is built.
+**Repeating a pass for each mip.** A compute or fullscreen pass can be repeated for each mip of a texture in a range, with each repetition's uses and attachments naming the `current` mip and the `previous` one, which the repetition before made. A pass repeated down the chain, as a downsample is, makes each mip from the one above it, and one repeated up the chain, as an upsample is, makes each from the one below. The first repetition's previous mip is written by an earlier pass. The range names the mips the repetitions make. A closed bound lets a downsample stop short of the smallest mip, or an upsample short of mip 0, and an open bound goes as far as the chain allows. Raster passes can't be repeated until a technique needs one, and transfer passes have no need to be. The compiler expands it into a pass per mip, named with the mip, so a mip chain is one entry in the description and its barriers come from the usual rules. A pass can't record barriers between its own draws or dispatches, so this is how a chain is built.
 
 ### Compiling
 
@@ -293,7 +293,7 @@ name = "bloom downsample"
 kind = "compute"
 queue = "compute"
 program = "downsample"
-for-each-mip = "bloom"
+for-each-mip = { texture = "bloom", direction = "down", first = 1, last = 5 }
 bindings = [
   { texture = "bloom", mip = "previous", access = "compute-shader-sampled-read" },
   { texture = "bloom", mip = "current", access = "compute-shader-write" },
@@ -303,6 +303,7 @@ bindings = [
 dispatch = { mip-of = "bloom", group = [8, 8, 1] }
 ```
 
+- **Repeated passes** name the texture and the direction, `down` or `up`, in `for-each-mip`, and the `first` and `last` mips the repetitions make, both included, as a file reads more plainly than an exclusive end. A bound left out goes as far as the chain allows, as an open bound does in Rust, so the example makes mips 1 to 5, and `{ texture = "bloom", direction = "down" }` every mip after the first.
 - **Names** in files are the RHI's names in kebab case: `Access::FragmentShaderSampledRead` is `fragment-shader-sampled-read`, and `Format::Rgba16Float` is `rgba16-float`. One table maps each, beside the types, with a T0 test that every variant has a name.
 - **Parsing** uses `serde` and the `toml` crate, into types that mirror the file, which are then resolved into a `GraphDesc`. Every error keeps the span of the value it's about, and is reported as `assets/techniques/bloom.toml:14:3: pass "bloom downsample" binds "bloom" as compute-shader-write, which needs a single mip`. Resolving reports every error it finds, not only the first.
 - **Programs** are compiled when the technique loads, by running `slangc` with the options the build scripts use, found by the lookup in `crates/rhi/build/slangc.rs`, which this crate includes as `xtask` does. Shaders find their modules in `assets/shaders/` and the RHI's `crates/rhi/shaders/`, such as `heap.slang`, through a constant `clockwork-rhi` sets from its manifest directory. Programs compile in parallel, on the worker pool.
@@ -855,3 +856,4 @@ Filled in at close-out.
 | 2026-11-25 | Revised during `graph-plan`, after review: a texture sized by the output has one mip or a full chain, not a fixed count above one, which could stop the graph compiling when the window shrinks ("Compiling") |
 | 2026-11-25 | Revised during `graph-plan`, after review: sizes scaled from the output's round up past the scale's own rounding error, relative to the size, rather than past a thousandth of a texel, so 0.3334 of 3 is 2, and a third of 1920 is still 640 ("Compiling") |
 | 2026-11-25 | Revised during `graph-plan`: only compute and fullscreen passes can be repeated for each mip, and their attachments can name a relative mip too. The order of reads and writes is checked after expansion rather than in validation, so a repetition's read of the previous mip is checked against the repetition that wrote it, while a repeated pass's other uses are checked once, as written ("Passes and resources", "Compiling") |
+| 2026-11-25 | Revised during `graph-plan`: a pass is repeated for a range of mips, so a chain can stop short of its ends, and up the chain as well as down it, so an upsample is repeated as a downsample is. A technique file's `for-each-mip` names the direction, and the first and last mips, both included ("Passes and resources", "Techniques") |
