@@ -10,10 +10,6 @@ use crate::desc::{BufferKind, TextureKind};
 use crate::error::Errors;
 use crate::{CompileInputs, GraphDesc, MipCount, OUTPUT, TextureSize, TransientTexture};
 
-/// How far past a whole number of texels a size scaled from the output's
-/// can be, from floating point's rounding, and still be that number.
-const SCALE_TOLERANCE: f64 = 1e-3;
-
 /// Reports each name used by more than one texture, buffer or pass. Each
 /// kind of item has names of its own, so a texture and a buffer may share
 /// one. A texture named after the output is reported as taking its
@@ -163,13 +159,15 @@ impl ShapeCheck<'_> {
     /// `length` times `scale`, rounded up, and at least 1, or `None` if
     /// that's more texels than a size can hold.
     ///
-    /// A scale such as a third isn't exact in floating point, so a product
-    /// within [`SCALE_TOLERANCE`] of a whole number is that number, rather
-    /// than rounding up to the next: a third of 1920 is 640, not 641.
+    /// A scale such as a third isn't exact as an `f32`, so the product may
+    /// be just over the whole number it stands for. A product within the
+    /// scale's own rounding error of a whole number, relative to its size,
+    /// is that number: a third of 1920 is 640, not 641. One further past
+    /// it, however little, rounds up, as 0.3334 of 3 rounds up to 2.
     fn scaled(&mut self, length: u32, scale: f32) -> Option<u32> {
-        let scaled = (f64::from(length) * f64::from(scale) - SCALE_TOLERANCE)
-            .ceil()
-            .max(1.0);
+        let product = f64::from(length) * f64::from(scale);
+        let rounding_error = product * f64::from(f32::EPSILON);
+        let scaled = (product - rounding_error).ceil().max(1.0);
         if scaled > f64::from(u32::MAX) {
             self.report(&format!(
                 "is sized by the output with a scale of {scale}, which makes it too large"
@@ -362,6 +360,21 @@ mod tests {
         assert_eq!(third.extent, Extent3d::new_2d(640, 360));
         let tiny = shape_of(sized(TextureSize::Output { scale: 1e-6 })).unwrap();
         assert_eq!(tiny.extent, Extent3d::new_2d(1, 1));
+    }
+
+    #[test]
+    fn products_just_past_a_whole_number_round_up() {
+        let mut graph = GraphDesc::new("rounding");
+        let texture =
+            graph.transient_texture("third", sized(TextureSize::Output { scale: 0.3334 }));
+        let mut narrow = inputs();
+        narrow.output.extent = Extent2d {
+            width: 3,
+            height: 3,
+        };
+        let validated = validate(&finished(&graph), &narrow).unwrap();
+        let shape = validated.textures[texture.index()].unwrap();
+        assert_eq!(shape.extent, Extent3d::new_2d(2, 2));
     }
 
     #[test]
