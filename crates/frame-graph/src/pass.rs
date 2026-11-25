@@ -8,7 +8,7 @@
 //! texture. Attachments are uses too, with the accesses design 0002's
 //! "Synchronization" gives them.
 
-use std::ops::Range;
+use std::ops::{Bound, Range, RangeBounds};
 
 use clockwork_rhi::{Access, AccessSet, QueueKind, Subresource};
 
@@ -71,8 +71,11 @@ impl TextureId {
         self.relative_mip(RelativeMip::Current)
     }
 
-    /// The mip above the one a pass repeated for each mip of the texture
-    /// is making, in every layer.
+    /// The mip next to the current one on the side the chain is walked
+    /// from, in every layer: the one above in a pass repeated down the
+    /// chain, and the one below in a pass repeated up it. The repetition
+    /// before made it, except in the first repetition, where an earlier
+    /// pass must have.
     pub fn previous_mip(self) -> RepeatedUse {
         self.relative_mip(RelativeMip::Previous)
     }
@@ -92,8 +95,62 @@ impl TextureId {
 pub enum RelativeMip {
     /// The mip the repetition makes.
     Current,
-    /// The mip above it, which the repetition before made.
+    /// The mip next to it on the side the chain is walked from: the one
+    /// above in a pass repeated down the chain, and the one below in a pass
+    /// repeated up it. The repetition before made it, except in the first
+    /// repetition, where an earlier pass must have.
     Previous,
+}
+
+/// Which way a repeated pass walks its texture's mip chain.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum MipDirection {
+    /// From larger mips to smaller, each repetition reading the mip above
+    /// the one it makes, as a downsample does.
+    Down,
+    /// From smaller mips to larger, each repetition reading the mip below
+    /// the one it makes, as an upsample does.
+    Up,
+}
+
+/// How a pass is repeated for each mip of a texture.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) struct Repeat {
+    /// The texture.
+    pub(crate) texture: TextureId,
+    /// The first mip, counting from mip 0, that a repetition makes, or
+    /// `None` for the first that has a previous mip.
+    pub(crate) start: Option<u32>,
+    /// One past the last mip, counting from mip 0, that a repetition makes,
+    /// or `None` for one past the last that has a previous mip.
+    pub(crate) end: Option<u32>,
+    /// Which way the repetitions walk the chain.
+    pub(crate) direction: MipDirection,
+}
+
+impl Repeat {
+    /// Repetitions of `texture`'s mips in `mips`, in `direction`, with
+    /// closed bounds as a start and an exclusive end. A bound that would
+    /// pass `u32::MAX` saturates there, which is past any texture's last
+    /// mip, since a texture has at most 32, so compiling reports it.
+    fn new(texture: TextureId, mips: impl RangeBounds<u32>, direction: MipDirection) -> Self {
+        let start = match mips.start_bound() {
+            Bound::Included(&start) => Some(start),
+            Bound::Excluded(&start) => Some(start.saturating_add(1)),
+            Bound::Unbounded => None,
+        };
+        let end = match mips.end_bound() {
+            Bound::Included(&end) => Some(end.saturating_add(1)),
+            Bound::Excluded(&end) => Some(end),
+            Bound::Unbounded => None,
+        };
+        Self {
+            texture,
+            start,
+            end,
+            direction,
+        }
+    }
 }
 
 /// Part of the texture a pass is repeated for, naming its mip relative to
@@ -268,8 +325,8 @@ pub(crate) struct PassDesc {
     pub(crate) uses: Vec<Use>,
     /// Whether it's kept even if nothing reads what it writes.
     pub(crate) side_effects: bool,
-    /// The texture it's repeated for each mip of after the first, if any.
-    pub(crate) repeat: Option<TextureId>,
+    /// How it's repeated for each mip of a texture, if it is.
+    pub(crate) repeat: Option<Repeat>,
 }
 
 /// A kind of pass, and what records it.
@@ -498,13 +555,30 @@ macro_rules! colour {
 macro_rules! for_each_mip {
     ($name:ident) => {
         impl $name<'_> {
-            /// Repeats the pass for each mip of `texture` after the first,
-            /// so a mip chain is built from one pass. Each repetition is a
-            /// pass of its own, named with its mip, whose uses of
-            /// [`TextureId::current_mip`] and [`TextureId::previous_mip`]
-            /// name the mip it makes and the one above it.
-            pub fn for_each_mip(&mut self, texture: TextureId) -> &mut Self {
-                self.0.pass.repeat = Some(texture);
+            /// Repeats the pass for each mip of `texture` in `mips`, walking
+            /// the chain in `direction`, so a chain is built from one pass.
+            /// Each repetition is a pass of its own, named with its mip,
+            /// whose uses of [`TextureId::current_mip`] and
+            /// [`TextureId::previous_mip`] name the mip it makes and the one
+            /// it makes it from: the mip above it going
+            /// [`Down`](MipDirection::Down), as a downsample does, and the
+            /// one below going [`Up`](MipDirection::Up), as an upsample
+            /// does. Each repetition's previous mip is the one the
+            /// repetition before made, except the first's, which an earlier
+            /// pass must write.
+            ///
+            /// `mips` names the mips the repetitions make, whichever way
+            /// they walk. An open bound goes as far as the chain allows:
+            /// going down, `..` is every mip after the first, and `1..6`
+            /// makes mips 1 to 5; going up, `..` is every mip but the last,
+            /// and `..5` makes mips 4 to 0.
+            pub fn for_each_mip(
+                &mut self,
+                texture: TextureId,
+                direction: MipDirection,
+                mips: impl RangeBounds<u32>,
+            ) -> &mut Self {
+                self.0.pass.repeat = Some(Repeat::new(texture, mips, direction));
                 self
             }
         }
@@ -591,7 +665,7 @@ queue!(
 mod tests {
     //! T0 tests of the pass builders.
 
-    use clockwork_rhi::Format;
+    use clockwork_rhi::{Extent3d, Format};
 
     use super::*;
     use crate::{GraphDesc, TextureSize, TransientTexture};
@@ -602,7 +676,10 @@ mod tests {
         let size = TextureSize::Output { scale: 1.0 };
         let depth =
             graph.transient_texture("depth", TransientTexture::new(Format::Depth32Float, size));
-        let mut chain = TransientTexture::new(Format::Rgba16Float, size);
+        let mut chain = TransientTexture::new(
+            Format::Rgba16Float,
+            TextureSize::Fixed(Extent3d::new_2d(256, 256)),
+        );
         chain.mips = crate::MipCount::Count(4);
         let bloom = graph.transient_texture("bloom", chain);
         let lights = graph.transient_buffer("lights", 1024);
@@ -762,12 +839,12 @@ mod tests {
         let (mut graph, _, bloom, _) = graph();
         graph
             .compute_pass("downsample", ComputeRecorder::dispatch("downsample"))
-            .for_each_mip(bloom)
+            .for_each_mip(bloom, MipDirection::Down, ..)
             .read(bloom.previous_mip(), Access::ComputeShaderSampledRead)
             .write(bloom.current_mip(), Access::ComputeShaderWrite);
         graph
             .fullscreen_pass("upsample", "upsample")
-            .for_each_mip(bloom)
+            .for_each_mip(bloom, MipDirection::Up, ..)
             .colour(bloom.current_mip().attachment(0), Attachment::Discard);
         graph.compute_pass("once", ComputeRecorder::dispatch("once"));
 
@@ -779,7 +856,12 @@ mod tests {
             })
         };
         let downsample = &graph.passes[0];
-        assert_eq!(downsample.repeat, Some(bloom));
+        assert_eq!(
+            downsample
+                .repeat
+                .map(|repeat| (repeat.texture, repeat.direction)),
+            Some((bloom, MipDirection::Down))
+        );
         assert_eq!(
             downsample.uses[0].resource,
             repeated(RelativeMip::Previous, Subresource::ALL.layers)
@@ -789,13 +871,53 @@ mod tests {
             repeated(RelativeMip::Current, Subresource::ALL.layers)
         );
         let upsample = &graph.passes[1];
-        assert_eq!(upsample.repeat, Some(bloom));
+        assert_eq!(
+            upsample
+                .repeat
+                .map(|repeat| (repeat.texture, repeat.direction)),
+            Some((bloom, MipDirection::Up))
+        );
         assert_eq!(
             upsample.uses[0].resource,
             repeated(RelativeMip::Current, 0..1),
             "an attachment is one layer of the mip"
         );
         assert_eq!(graph.passes[2].repeat, None);
+    }
+
+    /// A repeated pass's mips keep their bounds as a start and an exclusive
+    /// end, with an open bound left for compiling to resolve, and a bound
+    /// past `u32::MAX` saturating rather than overflowing.
+    #[test]
+    fn repeated_mips_keep_their_bounds() {
+        let (_, _, bloom, _) = graph();
+        let bounds = |repeat: Repeat| (repeat.start, repeat.end);
+        let down = |mips| bounds(Repeat::new(bloom, mips, MipDirection::Down));
+        assert_eq!(down((Bound::Unbounded, Bound::Unbounded)), (None, None));
+        assert_eq!(
+            down((Bound::Included(1), Bound::Excluded(6))),
+            (Some(1), Some(6))
+        );
+        assert_eq!(
+            down((Bound::Included(2), Bound::Unbounded)),
+            (Some(2), None)
+        );
+        assert_eq!(
+            down((Bound::Excluded(1), Bound::Included(5))),
+            (Some(2), Some(6))
+        );
+        assert_eq!(
+            down((Bound::Excluded(u32::MAX), Bound::Included(u32::MAX))),
+            (Some(u32::MAX), Some(u32::MAX))
+        );
+        assert_eq!(
+            bounds(Repeat::new(bloom, ..5, MipDirection::Up)),
+            (None, Some(5))
+        );
+        assert_eq!(
+            bounds(Repeat::new(bloom, 1..=3, MipDirection::Up)),
+            (Some(1), Some(4))
+        );
     }
 
     /// A plain texture ID used as a resource is the whole texture.

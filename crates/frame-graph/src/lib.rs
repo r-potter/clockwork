@@ -26,6 +26,6 @@ pub use error::{CompileError, CompileErrors};
 pub use inputs::{CompileInputs, OutputDesc, QueueLayout, Schedule};
 pub use pass::{
     Attachment, AttachmentTarget, ComputePassBuilder, ComputeRecorder, FullscreenPassBuilder,
-    PassId, RasterPassBuilder, RelativeMip, RepeatedUse, ResourceUse, TargetMip, TextureUse,
-    TransferPassBuilder,
+    MipDirection, PassId, RasterPassBuilder, RelativeMip, RepeatedUse, ResourceUse, TargetMip,
+    TextureUse, TransferPassBuilder,
 };

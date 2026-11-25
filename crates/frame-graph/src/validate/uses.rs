@@ -31,15 +31,15 @@ pub(super) fn check_uses(
                 errors,
             };
             check.queue();
-            if let Some(texture) = pass.repeat {
-                let message = match desc.textures.get(texture.index()) {
+            if let Some(repeat) = pass.repeat {
+                let message = match desc.textures.get(repeat.texture.index()) {
                     Some(decl) => format!(
                         "is repeated for each mip of \"{}\", which compiling doesn't support yet",
                         decl.name
                     ),
                     None => format!(
                         "is repeated for each mip of texture {}, which this graph doesn't have",
-                        texture.0
+                        repeat.texture.0
                     ),
                 };
                 check.report(&message);
@@ -388,7 +388,8 @@ mod tests {
     use super::*;
     use crate::validate::test_support::messages;
     use crate::{
-        Attachment, BufferId, ComputeRecorder, ImportDesc, MipCount, TextureSize, TransientTexture,
+        Attachment, BufferId, ComputeRecorder, ImportDesc, MipCount, MipDirection, TextureSize,
+        TransientTexture,
     };
 
     /// A graph with a one-mip texture "hdr", a four-mip texture "bloom", an
@@ -422,7 +423,7 @@ mod tests {
         let (mut graph, hdr, bloom, ..) = graph();
         graph
             .compute_pass("downsample", ComputeRecorder::dispatch("downsample"))
-            .for_each_mip(bloom)
+            .for_each_mip(bloom, MipDirection::Down, ..)
             .read(bloom.previous_mip(), Access::ComputeShaderSampledRead)
             .write(bloom.current_mip(), Access::ComputeShaderWrite);
         graph
@@ -431,7 +432,7 @@ mod tests {
             .write(TextureId(9).current_mip(), Access::ComputeShaderWrite);
         graph
             .compute_pass("missing", ComputeRecorder::dispatch("missing"))
-            .for_each_mip(TextureId(9));
+            .for_each_mip(TextureId(9), MipDirection::Down, ..);
 
         assert_eq!(
             messages(&graph),
