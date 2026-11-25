@@ -146,27 +146,37 @@ impl Written {
     /// checks: one naming a resource the graph doesn't have is ignored, and
     /// its mips and layers are limited to those the texture has.
     fn mark(&mut self, resource: &ResourceUse) {
-        match resource {
-            ResourceUse::Texture(part) => {
-                if let Some(Some((cells, layers))) = self.textures.get_mut(part.texture.index()) {
-                    let mips =
-                        u32::try_from(cells.len()).expect("a texture's cells fit a u32") / *layers;
-                    let limit = |range: &Range<u32>, count: u32| {
-                        range.start.min(count)..range.end.min(count)
-                    };
-                    let within = Subresource {
-                        mips: limit(&part.subresource.mips, mips),
-                        layers: limit(&part.subresource.layers, *layers),
-                    };
-                    for cell in Self::cells(&within, *layers) {
-                        cells[cell] = true;
-                    }
-                }
-            }
+        let (texture, part) = match resource {
+            ResourceUse::Texture(part) => (part.texture, part.subresource.clone()),
+            // A relative mip is only in a pass repeated for each mip, which
+            // isn't compiled yet, or one that isn't, which is a mistake.
+            // Either is reported already, so the write counts as writing
+            // every mip it could reach, rather than reads of them being
+            // reported again as unwritten.
+            ResourceUse::Repeated(part) => (
+                part.texture,
+                Subresource {
+                    mips: Subresource::ALL.mips,
+                    layers: part.layers.clone(),
+                },
+            ),
             ResourceUse::Buffer(buffer) => {
                 if let Some(Some(written)) = self.buffers.get_mut(buffer.index()) {
                     *written = true;
                 }
+                return;
+            }
+        };
+        if let Some(Some((cells, layers))) = self.textures.get_mut(texture.index()) {
+            let mips = u32::try_from(cells.len()).expect("a texture's cells fit a u32") / *layers;
+            let limit =
+                |range: &Range<u32>, count: u32| range.start.min(count)..range.end.min(count);
+            let within = Subresource {
+                mips: limit(&part.mips, mips),
+                layers: limit(&part.layers, *layers),
+            };
+            for cell in Self::cells(&within, *layers) {
+                cells[cell] = true;
             }
         }
     }
@@ -315,6 +325,31 @@ mod tests {
         assert_eq!(
             messages(&unwritten),
             ["pass \"kept\" reads \"gbuffer\", which no earlier pass writes"]
+        );
+    }
+
+    /// A write of a mip relative to a repetition, which is reported until
+    /// repeated passes are compiled, counts as writing every mip, so later
+    /// reads of the chain aren't reported as well.
+    #[test]
+    fn a_relative_write_counts_as_writing_every_mip() {
+        let (mut graph, Resources { bloom, .. }) = graph();
+        graph
+            .transfer_pass("fill", "fill")
+            .write(bloom.mip(0), Access::CopyWrite);
+        graph
+            .compute_pass("downsample", ComputeRecorder::dispatch("downsample"))
+            .for_each_mip(bloom)
+            .write(bloom.current_mip(), Access::ComputeShaderWrite);
+        graph
+            .compute_pass("composite", ComputeRecorder::dispatch("composite"))
+            .read(bloom, Access::ComputeShaderSampledRead);
+        assert_eq!(
+            messages(&graph),
+            [
+                "pass \"downsample\" is repeated for each mip of \"bloom\", which compiling \
+                 doesn't support yet"
+            ]
         );
     }
 

@@ -10,7 +10,7 @@ use clockwork_rhi::{Access, AccessSet, Layout, QueueKind, Subresource};
 use super::{Checked, CheckedUse, TextureShape};
 use crate::error::Errors;
 use crate::pass::{PassDesc, Use, UseRole};
-use crate::{GraphDesc, ResourceUse, TextureId};
+use crate::{GraphDesc, RelativeMip, ResourceUse, TextureId};
 
 /// Reports every mistake in each pass's queue and uses, and returns each
 /// pass's uses that have none, for the checks after these. A texture whose
@@ -31,6 +31,20 @@ pub(super) fn check_uses(
                 errors,
             };
             check.queue();
+            if let Some(texture) = pass.repeat {
+                let message = match desc.textures.get(texture.index()) {
+                    Some(decl) => format!(
+                        "is repeated for each mip of \"{}\", which compiling doesn't support yet",
+                        decl.name
+                    ),
+                    None => format!(
+                        "is repeated for each mip of texture {}, which this graph doesn't have",
+                        texture.0
+                    ),
+                };
+                check.report(&message);
+                return Vec::new();
+            }
             let mut checked: Vec<_> = pass
                 .uses
                 .iter()
@@ -100,6 +114,24 @@ impl PassCheck<'_> {
                 };
                 (decl.name.as_str(), None)
             }
+            ResourceUse::Repeated(part) => {
+                let Some(decl) = self.desc.textures.get(part.texture.index()) else {
+                    self.report(&format!(
+                        "uses texture {}, which this graph doesn't have",
+                        part.texture.0
+                    ));
+                    return None;
+                };
+                let mip = match part.mip {
+                    RelativeMip::Current => "current",
+                    RelativeMip::Previous => "previous",
+                };
+                self.report(&format!(
+                    "uses the {mip} mip of \"{}\", but isn't repeated for each mip",
+                    decl.name
+                ));
+                return None;
+            }
         };
         let accesses_ok = self.accesses(name, texture.is_some(), used);
         let role_ok = self.role(name, used);
@@ -117,7 +149,9 @@ impl PassCheck<'_> {
                 Checked::Texture(part.texture, subresource?)
             }
             (None, ResourceUse::Buffer(buffer)) => Checked::Buffer(*buffer),
-            (None, ResourceUse::Texture(_)) => unreachable!("a texture use has its part"),
+            (None, ResourceUse::Texture(_) | ResourceUse::Repeated(_)) => {
+                unreachable!("a texture use has its part, and a repeated one returned")
+            }
         };
         (accesses_ok && role_ok).then_some(CheckedUse {
             resource,
@@ -378,6 +412,38 @@ mod tests {
         let font = graph.import_texture("font", import);
         let lights = graph.transient_buffer("lights", 256);
         (graph, hdr, bloom, font, lights)
+    }
+
+    /// A pass repeated for each mip is reported until compiling supports
+    /// it, and a mip relative to a repetition in a pass that isn't repeated
+    /// is a mistake.
+    #[test]
+    fn relative_mips_need_a_repeated_pass() {
+        let (mut graph, hdr, bloom, ..) = graph();
+        graph
+            .compute_pass("downsample", ComputeRecorder::dispatch("downsample"))
+            .for_each_mip(bloom)
+            .read(bloom.previous_mip(), Access::ComputeShaderSampledRead)
+            .write(bloom.current_mip(), Access::ComputeShaderWrite);
+        graph
+            .compute_pass("once", ComputeRecorder::dispatch("once"))
+            .read(hdr.previous_mip(), Access::ComputeShaderSampledRead)
+            .write(TextureId(9).current_mip(), Access::ComputeShaderWrite);
+        graph
+            .compute_pass("missing", ComputeRecorder::dispatch("missing"))
+            .for_each_mip(TextureId(9));
+
+        assert_eq!(
+            messages(&graph),
+            [
+                "pass \"downsample\" is repeated for each mip of \"bloom\", which compiling \
+                 doesn't support yet",
+                "pass \"once\" uses the previous mip of \"hdr\", but isn't repeated for each mip",
+                "pass \"once\" uses texture 9, which this graph doesn't have",
+                "pass \"missing\" is repeated for each mip of texture 9, which this graph doesn't \
+                 have",
+            ]
+        );
     }
 
     /// Valid uses of every kind of resource, by every kind of pass, report
