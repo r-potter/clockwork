@@ -213,14 +213,49 @@ pub(crate) enum PassKind {
 }
 
 impl PassKind {
+    /// The kind's name, in messages: "raster", "fullscreen", "compute" or
+    /// "transfer".
+    pub(crate) const fn name(&self) -> &'static str {
+        match self {
+            Self::Raster { .. } => "raster",
+            Self::Fullscreen { .. } => "fullscreen",
+            Self::Compute(_) => "compute",
+            Self::Transfer { .. } => "transfer",
+        }
+    }
+
+    /// Whether a pass of this kind may use a resource with `access`, other
+    /// than as an attachment, which only raster and fullscreen passes have.
+    /// Raster passes read through vertex and fragment shaders and as draw
+    /// arguments, compute passes read and write through compute shaders
+    /// and read dispatch arguments, and transfer passes copy. A fullscreen
+    /// pass's bindings arrive with the graph's own passes.
+    pub(crate) fn allows_access(&self, access: Access) -> bool {
+        match self {
+            Self::Raster { .. } => matches!(
+                access,
+                Access::IndirectRead
+                    | Access::IndexRead
+                    | Access::VertexShaderRead
+                    | Access::FragmentShaderRead
+                    | Access::FragmentShaderSampledRead
+            ),
+            Self::Fullscreen { .. } => false,
+            Self::Compute(_) => matches!(
+                access,
+                Access::IndirectRead
+                    | Access::ComputeShaderRead
+                    | Access::ComputeShaderSampledRead
+                    | Access::ComputeShaderWrite
+            ),
+            Self::Transfer { .. } => matches!(access, Access::CopyRead | Access::CopyWrite),
+        }
+    }
+
     /// Whether a pass of this kind can ask for `queue`'s kind of queue:
     /// raster and fullscreen passes only graphics, compute passes graphics
     /// or compute, and transfer passes any. Builders let a pass ask for any,
     /// so that compiling reports a mistake with the rest.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "validation, in the next pull request, calls it")
-    )]
     pub(crate) fn allows_queue(&self, queue: QueueKind) -> bool {
         match self {
             Self::Raster { .. } | Self::Fullscreen { .. } => queue == QueueKind::Graphics,
