@@ -358,6 +358,8 @@ mod tests {
         TransientTexture::new(Format::Rgba16Float, TextureSize::Output { scale: 1.0 })
     }
 
+    /// Transient textures are 2D with one mip and layer by default, and
+    /// can be cube maps or 3D.
     #[test]
     fn transient_textures_can_be_any_shape() {
         let texture = full_size();
@@ -397,6 +399,7 @@ mod tests {
         );
     }
 
+    /// A new graph has its output and nothing else.
     #[test]
     fn a_new_graph_has_only_its_output() {
         let graph = GraphDesc::new("empty");
@@ -408,6 +411,8 @@ mod tests {
         assert!(graph.passes.is_empty());
     }
 
+    /// Textures and buffers get IDs in the order they're added, after the
+    /// output, and keep their kinds.
     #[test]
     fn resources_are_numbered_in_the_order_they_are_added() {
         let mut graph = GraphDesc::new("resources");
@@ -438,6 +443,8 @@ mod tests {
         assert_eq!(graph.buffers[1].kind, BufferKind::Persistent { size: 16 });
     }
 
+    /// Passes keep the written order, on the graphics queue with no side
+    /// effects unless asked.
     #[test]
     fn passes_are_kept_in_the_order_they_are_written() {
         let mut graph = GraphDesc::new("passes");
@@ -463,6 +470,7 @@ mod tests {
         );
     }
 
+    /// Descriptions are plain data, shared freely between threads.
     #[test]
     fn descriptions_are_send_and_sync() {
         /// Compiles only if `T` is `Send` and `Sync`.

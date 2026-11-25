@@ -380,6 +380,8 @@ mod tests {
         (graph, hdr, bloom, font, lights)
     }
 
+    /// Valid uses of every kind of resource, by every kind of pass, report
+    /// nothing.
     #[test]
     fn valid_uses_have_no_errors() {
         let (mut graph, hdr, bloom, font, lights) = graph();
@@ -410,6 +412,7 @@ mod tests {
         assert_eq!(messages(&graph), Vec::<String>::new());
     }
 
+    /// A pass that asks for a queue its kind can't run on is reported.
     #[test]
     fn each_kind_runs_only_on_its_queues() {
         let (mut graph, ..) = graph();
@@ -422,6 +425,7 @@ mod tests {
         );
     }
 
+    /// Uses of textures and buffers the graph doesn't have are reported.
     #[test]
     fn uses_must_name_resources_the_graph_has() {
         let (mut graph, ..) = graph();
@@ -438,6 +442,8 @@ mod tests {
         );
     }
 
+    /// Accesses that don't suit the resource, the kind of pass, or any pass
+    /// at all are reported, each with why.
     #[test]
     fn accesses_must_suit_the_resource_and_the_kind() {
         let (mut graph, hdr, _, _, lights) = graph();
@@ -471,6 +477,7 @@ mod tests {
         );
     }
 
+    /// A read that writes and a write that only reads are reported.
     #[test]
     fn reads_and_writes_are_declared_as_what_they_do() {
         let (mut graph, hdr, ..) = graph();
@@ -489,6 +496,8 @@ mod tests {
         );
     }
 
+    /// Mips and layers past a texture's last are reported, and an empty
+    /// range even for an import.
     #[test]
     fn subresources_must_be_in_the_texture() {
         let (mut graph, hdr, bloom, font, _) = graph();
@@ -519,6 +528,8 @@ mod tests {
         );
     }
 
+    /// A use whose accesses share no layout, and a storage use of more than
+    /// one mip, are reported.
     #[test]
     fn a_use_has_one_layout_and_storage_one_mip() {
         let (mut graph, _, bloom, font, _) = graph();
@@ -543,6 +554,8 @@ mod tests {
         );
     }
 
+    /// A use with another mistake, such as a mip past the end or a read
+    /// that writes, is still checked for a layout its accesses share.
     #[test]
     fn other_mistakes_hide_no_layout_mistakes() {
         let (mut graph, hdr, bloom, ..) = graph();
@@ -568,6 +581,8 @@ mod tests {
         );
     }
 
+    /// Uses of overlapping parts of a texture must share a layout, but
+    /// uses of different mips needn't.
     #[test]
     fn overlapping_uses_share_a_layout() {
         let (mut graph, _, bloom, ..) = graph();

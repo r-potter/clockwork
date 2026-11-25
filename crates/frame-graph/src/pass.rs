@@ -508,6 +508,8 @@ mod tests {
         (graph, depth, bloom, lights)
     }
 
+    /// Attachments get the accesses their start implies: a kept colour
+    /// attachment reads as well as writes.
     #[test]
     fn attachments_have_the_accesses_their_start_implies() {
         let (mut graph, depth, _, _) = graph();
@@ -553,6 +555,8 @@ mod tests {
         );
     }
 
+    /// Clearing or discarding depth writes it, even when the pass doesn't
+    /// write depth.
     #[test]
     fn clearing_or_discarding_depth_writes_it_without_depth_writes() {
         let (mut graph, depth, _, _) = graph();
@@ -573,6 +577,8 @@ mod tests {
         }
     }
 
+    /// An attachment is one mip of one layer, mip 0 of layer 0 for a plain
+    /// texture ID.
     #[test]
     fn attachments_render_to_one_mip_of_one_layer() {
         let (mut graph, depth, bloom, _) = graph();
@@ -593,6 +599,8 @@ mod tests {
         );
     }
 
+    /// The largest mip or layer index gives an empty range for validation
+    /// to report, rather than overflowing.
     #[test]
     fn the_last_mip_index_gives_an_empty_range_rather_than_overflowing() {
         let (_, _, bloom, _) = graph();
@@ -601,6 +609,7 @@ mod tests {
         assert!(target.subresource.mips.is_empty() && target.subresource.layers.is_empty());
     }
 
+    /// Each kind of pass may ask only for the queues it can run on.
     #[test]
     fn each_kind_of_pass_allows_its_queues() {
         let raster = PassKind::Raster {
@@ -622,6 +631,8 @@ mod tests {
         assert_eq!(allowed(&transfer), [true, true, true]);
     }
 
+    /// Reads and writes keep the parts of resources they name and how
+    /// they were declared.
     #[test]
     fn reads_and_writes_keep_their_subresources_and_roles() {
         let (mut graph, _, bloom, lights) = graph();
@@ -640,6 +651,7 @@ mod tests {
         assert_eq!(uses[2].access, Access::ComputeShaderRead.into());
     }
 
+    /// A plain texture ID used as a resource is the whole texture.
     #[test]
     fn a_whole_texture_is_every_mip_of_every_layer() {
         let (_, _, bloom, _) = graph();
@@ -649,6 +661,7 @@ mod tests {
         );
     }
 
+    /// A pass's queue and side effects are kept as asked.
     #[test]
     fn queues_and_side_effects_are_recorded() {
         let (mut graph, _, _, lights) = graph();
