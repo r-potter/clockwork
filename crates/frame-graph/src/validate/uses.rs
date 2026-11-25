@@ -349,7 +349,7 @@ pub(super) fn describe_range(item: &str, range: &Range<u32>) -> String {
 mod tests {
     //! T0 tests of validating passes' queues and uses.
 
-    use clockwork_rhi::{Format, QueueKind};
+    use clockwork_rhi::{Extent3d, Format, QueueKind};
 
     use super::*;
     use crate::validate::test_support::messages;
@@ -365,7 +365,10 @@ mod tests {
         let hdr = graph.transient_texture("hdr", TransientTexture::new(Format::Rgba16Float, size));
         let chain = TransientTexture {
             mips: MipCount::Count(4),
-            ..TransientTexture::new(Format::Rgba16Float, size)
+            ..TransientTexture::new(
+                Format::Rgba16Float,
+                TextureSize::Fixed(Extent3d::new_2d(256, 256)),
+            )
         };
         let bloom = graph.transient_texture("bloom", chain);
         let import = ImportDesc {

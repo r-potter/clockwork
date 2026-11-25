@@ -176,7 +176,7 @@ impl Written {
 mod tests {
     //! T0 tests of validating the order of reads and writes.
 
-    use clockwork_rhi::{Access, Format};
+    use clockwork_rhi::{Access, Extent3d, Format};
 
     use super::*;
     use crate::validate::test_support::{inputs, messages};
@@ -207,7 +207,10 @@ mod tests {
         let texture = TransientTexture::new(Format::Rgba16Float, size);
         let chain = TransientTexture {
             mips: MipCount::Count(4),
-            ..texture
+            ..TransientTexture::new(
+                Format::Rgba16Float,
+                TextureSize::Fixed(Extent3d::new_2d(256, 256)),
+            )
         };
         let import = ImportDesc {
             before: Access::CopyWrite.into(),

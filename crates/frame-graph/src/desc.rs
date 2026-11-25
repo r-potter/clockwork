@@ -91,9 +91,13 @@ pub enum TextureSize {
 }
 
 /// How many mips a texture has.
+///
+/// A texture sized by the output has one mip or a full chain: how many a
+/// size allows changes with the output's, so a fixed count above 1 could
+/// stop compiling when the window shrinks.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum MipCount {
-    /// This many, from 1.
+    /// This many, from 1. Above 1, only for a texture of a fixed size.
     Count(u32),
     /// A full chain, down to 1 × 1, which depends on the texture's size.
     Full,
