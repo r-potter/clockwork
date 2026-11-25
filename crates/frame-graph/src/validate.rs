@@ -6,6 +6,7 @@
 //! as each texture's size and mip count, is kept for the steps after it.
 
 mod resources;
+mod uses;
 
 use clockwork_rhi::{Extent3d, Format, TextureDimension};
 
@@ -52,6 +53,7 @@ pub(crate) fn validate(
     resources::check_names(desc, &mut errors);
     let textures = resources::texture_shapes(desc, inputs, &mut errors);
     resources::check_buffers(desc, &mut errors);
+    uses::check_uses(desc, &textures, &mut errors);
     errors.finish(desc.label(), Validated { textures })
 }
 
