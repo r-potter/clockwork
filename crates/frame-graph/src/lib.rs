@@ -14,11 +14,16 @@
 //! follow, slice by slice.
 
 mod desc;
+mod error;
+mod inputs;
 mod pass;
+mod validate;
 
 pub use desc::{
     BufferId, GraphDesc, ImportDesc, MipCount, OUTPUT, TextureId, TextureSize, TransientTexture,
 };
+pub use error::{CompileError, CompileErrors};
+pub use inputs::{CompileInputs, OutputDesc, QueueLayout, Schedule};
 pub use pass::{
     Attachment, ComputePassBuilder, ComputeRecorder, FullscreenPassBuilder, PassId,
     RasterPassBuilder, ResourceUse, TextureUse, TransferPassBuilder,
