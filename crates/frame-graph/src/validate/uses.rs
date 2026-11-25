@@ -7,40 +7,42 @@ use std::ops::Range;
 
 use clockwork_rhi::{Access, AccessSet, Layout, QueueKind, Subresource};
 
-use super::TextureShape;
+use super::{Checked, CheckedUse, TextureShape};
 use crate::error::Errors;
 use crate::pass::{PassDesc, Use, UseRole};
 use crate::{GraphDesc, ResourceUse, TextureId};
 
-/// Reports every mistake in each pass's queue and uses.
-pub(super) fn check_uses(desc: &GraphDesc, shapes: &[Option<TextureShape>], errors: &mut Errors) {
-    for pass in &desc.passes {
-        let mut check = PassCheck {
-            desc,
-            shapes,
-            pass,
-            errors,
-        };
-        check.queue();
-        let textures: Vec<_> = pass
-            .uses
-            .iter()
-            .filter_map(|used| check.one(used))
-            .collect();
-        check.overlaps(&textures);
-    }
-}
-
-/// A use of part of a texture that passed its checks, with its mips and
-/// layers resolved where the texture's shape is known.
-#[derive(Debug)]
-struct TexturePart {
-    /// The texture.
-    texture: TextureId,
-    /// Its mips and layers used.
-    subresource: Subresource,
-    /// How they're used.
-    access: AccessSet,
+/// Reports every mistake in each pass's queue and uses, and returns each
+/// pass's uses that have none, for the checks after these. A texture whose
+/// overlapping uses share no layout is left out of its pass's, so its
+/// mistake is reported once.
+pub(super) fn check_uses(
+    desc: &GraphDesc,
+    shapes: &[Option<TextureShape>],
+    errors: &mut Errors,
+) -> Vec<Vec<CheckedUse>> {
+    desc.passes
+        .iter()
+        .map(|pass| {
+            let mut check = PassCheck {
+                desc,
+                shapes,
+                pass,
+                errors,
+            };
+            check.queue();
+            let mut checked: Vec<_> = pass
+                .uses
+                .iter()
+                .filter_map(|used| check.one(used))
+                .collect();
+            let conflicting = check.overlaps(&checked);
+            checked.retain(|used| {
+                !matches!(used.resource, Checked::Texture(texture, _) if conflicting.contains(&texture))
+            });
+            checked
+        })
+        .collect()
 }
 
 /// Checks one pass, reporting each mistake with the pass's name.
@@ -74,9 +76,9 @@ impl PassCheck<'_> {
         }
     }
 
-    /// Checks `used`, and returns the part of a texture it uses if it's a
-    /// texture use with no mistakes.
-    fn one(&mut self, used: &Use) -> Option<TexturePart> {
+    /// Checks `used`, and returns it with its subresource resolved if it has
+    /// no mistakes.
+    fn one(&mut self, used: &Use) -> Option<CheckedUse> {
         let (name, texture) = match &used.resource {
             ResourceUse::Texture(part) => {
                 let Some(decl) = self.desc.textures.get(part.texture.index()) else {
@@ -101,19 +103,26 @@ impl PassCheck<'_> {
         };
         let accesses_ok = self.accesses(name, texture.is_some(), used);
         let role_ok = self.role(name, used);
-        let part = texture?;
-        let shape = self.shapes[part.texture.index()];
-        let subresource = self.subresource(name, &part.subresource, shape.as_ref());
-        // The layout is checked only once every access suits a texture, since
-        // one that doesn't gives it none, but it doesn't wait for the rest.
-        let laid_out = accesses_ok && self.layout(name, subresource.as_ref(), used.access);
-        if !(role_ok && laid_out) {
-            return None;
-        }
-        Some(TexturePart {
-            texture: part.texture,
-            subresource: subresource?,
+        let resource = match (texture, &used.resource) {
+            (Some(part), _) => {
+                let shape = self.shapes[part.texture.index()];
+                let subresource = self.subresource(name, &part.subresource, shape.as_ref());
+                // The layout is checked only once every access suits a
+                // texture, since one that doesn't gives it none, but it
+                // doesn't wait for the rest.
+                let laid_out = accesses_ok && self.layout(name, subresource.as_ref(), used.access);
+                if !(role_ok && laid_out) {
+                    return None;
+                }
+                Checked::Texture(part.texture, subresource?)
+            }
+            (None, ResourceUse::Buffer(buffer)) => Checked::Buffer(*buffer),
+            (None, ResourceUse::Texture(_)) => unreachable!("a texture use has its part"),
+        };
+        (accesses_ok && role_ok).then_some(CheckedUse {
+            resource,
             access: used.access,
+            role: used.role,
         })
     }
 
@@ -253,35 +262,46 @@ impl PassCheck<'_> {
     }
 
     /// Checks that uses of overlapping parts of a texture share a layout,
-    /// since a subresource is in one layout at a time. Each texture is
-    /// reported at most once.
-    fn overlaps(&mut self, parts: &[TexturePart]) {
+    /// since a subresource is in one layout at a time, and returns the
+    /// textures whose uses don't, each reported once.
+    fn overlaps(&mut self, uses: &[CheckedUse]) -> Vec<TextureId> {
+        let parts: Vec<_> = uses
+            .iter()
+            .filter_map(|used| match &used.resource {
+                Checked::Texture(texture, subresource) => {
+                    Some((*texture, subresource, used.access))
+                }
+                Checked::Buffer(_) => None,
+            })
+            .collect();
         let mut reported = Vec::new();
-        for part in parts {
-            if reported.contains(&part.texture) {
+        for &(texture, subresource, access) in &parts {
+            if reported.contains(&texture) {
                 continue;
             }
             let together = parts
                 .iter()
-                .filter(|other| other.texture == part.texture && overlap(part, other))
-                .fold(part.access, |access, other| access | other.access);
+                .filter(|&&(other, other_part, _)| {
+                    other == texture && overlap(subresource, other_part)
+                })
+                .fold(access, |access, &(_, _, other)| access | other);
             if together.layout().is_none() {
-                reported.push(part.texture);
-                let name = &self.desc.textures[part.texture.index()].name;
+                reported.push(texture);
+                let name = &self.desc.textures[texture.index()].name;
                 self.report(&format!(
                     "uses overlapping parts of \"{name}\" with {together:?}, which share no \
                      layout"
                 ));
             }
         }
+        reported
     }
 }
 
 /// Whether two parts of a texture share a mip of a layer.
-fn overlap(a: &TexturePart, b: &TexturePart) -> bool {
+pub(super) fn overlap(a: &Subresource, b: &Subresource) -> bool {
     let ranges_meet = |a: &Range<u32>, b: &Range<u32>| a.start < b.end && b.start < a.end;
-    ranges_meet(&a.subresource.mips, &b.subresource.mips)
-        && ranges_meet(&a.subresource.layers, &b.subresource.layers)
+    ranges_meet(&a.mips, &b.mips) && ranges_meet(&a.layers, &b.layers)
 }
 
 /// Whether `access` can never be a pass's use: one that only starts or
@@ -315,7 +335,7 @@ fn queue_name(queue: QueueKind) -> &'static str {
 
 /// `range` of a texture's `item`s (mips or layers) as written in messages:
 /// "mip 2", "mips 2..4" or, for a range to the last, "mips 2..".
-fn describe_range(item: &str, range: &Range<u32>) -> String {
+pub(super) fn describe_range(item: &str, range: &Range<u32>) -> String {
     if range.end == Subresource::REMAINING {
         format!("{item}s {}..", range.start)
     } else if range.end == range.start.saturating_add(1) {
@@ -361,6 +381,10 @@ mod tests {
     fn valid_uses_have_no_errors() {
         let (mut graph, hdr, bloom, font, lights) = graph();
         let output = graph.output();
+        graph
+            .transfer_pass("fill", "fill")
+            .write(bloom.mip(0), Access::CopyWrite)
+            .write(lights, Access::CopyWrite);
         graph
             .compute_pass("downsample", ComputeRecorder::recorder("downsample"))
             .queue(QueueKind::Compute)
@@ -414,8 +438,10 @@ mod tests {
     #[test]
     fn accesses_must_suit_the_resource_and_the_kind() {
         let (mut graph, hdr, _, _, lights) = graph();
+        let output = graph.output();
         graph
             .raster_pass("draw", "draw")
+            .colour(output, Attachment::Discard)
             .read(lights, Access::FragmentShaderSampledRead)
             .read(hdr, Access::IndexRead)
             .read(hdr, Access::ColorAttachmentRead)
@@ -542,6 +568,9 @@ mod tests {
     #[test]
     fn overlapping_uses_share_a_layout() {
         let (mut graph, _, bloom, ..) = graph();
+        graph
+            .transfer_pass("fill", "fill")
+            .write(bloom, Access::CopyWrite);
         graph
             .compute_pass("feedback", ComputeRecorder::recorder("feedback"))
             .read(

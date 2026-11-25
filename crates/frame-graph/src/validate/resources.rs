@@ -275,7 +275,7 @@ mod tests {
     use clockwork_rhi::{Access, Extent2d, Format};
 
     use super::*;
-    use crate::validate::test_support::{inputs, messages};
+    use crate::validate::test_support::{finished, inputs, messages};
     use crate::validate::validate;
     use crate::{ImportDesc, TextureId};
 
@@ -297,7 +297,7 @@ mod tests {
     fn shape_of(created: TransientTexture) -> Option<TextureShape> {
         let mut graph = GraphDesc::new("shapes");
         let texture = graph.transient_texture("texture", created);
-        validate(&graph, &inputs()).ok()?.textures[texture.index()]
+        validate(&finished(&graph), &inputs()).ok()?.textures[texture.index()]
     }
 
     #[test]
@@ -326,8 +326,8 @@ mod tests {
         graph.transient_buffer("hdr", 4);
         graph.transient_buffer("lights", 4);
         graph.transient_buffer("lights", 4);
-        graph.raster_pass("scene", "scene");
-        graph.raster_pass("scene", "scene");
+        graph.transfer_pass("scene", "scene");
+        graph.transfer_pass("scene", "scene");
 
         assert_eq!(
             messages(&graph),
@@ -353,7 +353,7 @@ mod tests {
     #[test]
     fn the_output_has_the_inputs_shape() {
         let graph = GraphDesc::new("output");
-        let validated = validate(&graph, &inputs()).unwrap();
+        let validated = validate(&finished(&graph), &inputs()).unwrap();
         assert_eq!(
             validated.textures[graph.output().index()],
             Some(TextureShape {
@@ -374,7 +374,7 @@ mod tests {
             after: Access::CopyWrite.into(),
         };
         let font = graph.import_texture("font", import);
-        let validated = validate(&graph, &inputs()).unwrap();
+        let validated = validate(&finished(&graph), &inputs()).unwrap();
         assert_eq!(validated.textures[font.index()], None);
     }
 
