@@ -329,6 +329,7 @@ impl GraphDesc {
             queue: QueueKind::Graphics,
             uses: Vec::new(),
             side_effects: false,
+            repeat: None,
         });
         let pass = self.passes.last_mut().expect("a pass was just pushed");
         (id, pass)

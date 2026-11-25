@@ -60,7 +60,60 @@ impl TextureId {
     pub fn attachment(self, mip: u32, layer: u32) -> AttachmentTarget {
         AttachmentTarget {
             texture: self,
+            mip: TargetMip::Index(mip),
+            layer,
+        }
+    }
+
+    /// The mip a pass repeated for each mip of the texture is making, in
+    /// every layer.
+    pub fn current_mip(self) -> RepeatedUse {
+        self.relative_mip(RelativeMip::Current)
+    }
+
+    /// The mip above the one a pass repeated for each mip of the texture
+    /// is making, in every layer.
+    pub fn previous_mip(self) -> RepeatedUse {
+        self.relative_mip(RelativeMip::Previous)
+    }
+
+    /// The texture's mip `mip`, relative to a repetition, in every layer.
+    fn relative_mip(self, mip: RelativeMip) -> RepeatedUse {
+        RepeatedUse {
+            texture: self,
             mip,
+            layers: 0..Subresource::REMAINING,
+        }
+    }
+}
+
+/// A mip of the texture a pass is repeated for, relative to the repetition.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum RelativeMip {
+    /// The mip the repetition makes.
+    Current,
+    /// The mip above it, which the repetition before made.
+    Previous,
+}
+
+/// Part of the texture a pass is repeated for, naming its mip relative to
+/// each repetition.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct RepeatedUse {
+    /// The texture, which must be the one the pass is repeated for.
+    pub texture: TextureId,
+    /// The mip, relative to each repetition.
+    pub mip: RelativeMip,
+    /// The layers used.
+    pub layers: Range<u32>,
+}
+
+impl RepeatedUse {
+    /// Layer `layer` of the mip, for rendering to as an attachment.
+    pub fn attachment(self, layer: u32) -> AttachmentTarget {
+        AttachmentTarget {
+            texture: self.texture,
+            mip: TargetMip::Relative(self.mip),
             layer,
         }
     }
@@ -89,18 +142,35 @@ pub struct AttachmentTarget {
     /// The texture.
     pub texture: TextureId,
     /// The mip rendered to.
-    pub mip: u32,
+    pub mip: TargetMip,
     /// The layer rendered to.
     pub layer: u32,
 }
 
+/// The mip an attachment renders to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum TargetMip {
+    /// This mip.
+    Index(u32),
+    /// A mip relative to each repetition of a pass repeated for each mip of
+    /// the texture.
+    Relative(RelativeMip),
+}
+
 impl AttachmentTarget {
     /// The part of the texture the attachment uses.
-    fn texture_use(self) -> TextureUse {
-        self.texture.subresource(Subresource {
-            mips: one(self.mip),
-            layers: one(self.layer),
-        })
+    fn resource_use(self) -> ResourceUse {
+        match self.mip {
+            TargetMip::Index(mip) => ResourceUse::Texture(self.texture.subresource(Subresource {
+                mips: one(mip),
+                layers: one(self.layer),
+            })),
+            TargetMip::Relative(mip) => ResourceUse::Repeated(RepeatedUse {
+                texture: self.texture,
+                mip,
+                layers: one(self.layer),
+            }),
+        }
     }
 }
 
@@ -119,6 +189,16 @@ pub enum ResourceUse {
     /// A whole buffer. Buffers are tracked whole, since they're reached by
     /// address.
     Buffer(BufferId),
+    /// Part of the texture a pass is repeated for, whose mip is relative to
+    /// each repetition.
+    Repeated(RepeatedUse),
+}
+
+impl From<RepeatedUse> for ResourceUse {
+    /// The part of the repeated texture `texture` names.
+    fn from(texture: RepeatedUse) -> Self {
+        Self::Repeated(texture)
+    }
 }
 
 impl From<TextureUse> for ResourceUse {
@@ -188,6 +268,8 @@ pub(crate) struct PassDesc {
     pub(crate) uses: Vec<Use>,
     /// Whether it's kept even if nothing reads what it writes.
     pub(crate) side_effects: bool,
+    /// The texture it's repeated for each mip of after the first, if any.
+    pub(crate) repeat: Option<TextureId>,
 }
 
 /// A kind of pass, and what records it.
@@ -402,10 +484,27 @@ macro_rules! colour {
                 attachment: Attachment<[f32; 4]>,
             ) -> &mut Self {
                 self.0.add_use(
-                    ResourceUse::Texture(target.into().texture_use()),
+                    target.into().resource_use(),
                     colour_access(attachment),
                     UseRole::Colour(attachment),
                 );
+                self
+            }
+        }
+    };
+}
+
+/// Generates the `for_each_mip` method, for kinds that can be repeated.
+macro_rules! for_each_mip {
+    ($name:ident) => {
+        impl $name<'_> {
+            /// Repeats the pass for each mip of `texture` after the first,
+            /// so a mip chain is built from one pass. Each repetition is a
+            /// pass of its own, named with its mip, whose uses of
+            /// [`TextureId::current_mip`] and [`TextureId::previous_mip`]
+            /// name the mip it makes and the one above it.
+            pub fn for_each_mip(&mut self, texture: TextureId) -> &mut Self {
+                self.0.pass.repeat = Some(texture);
                 self
             }
         }
@@ -450,7 +549,7 @@ impl RasterPassBuilder<'_> {
         write: bool,
     ) -> &mut Self {
         self.0.add_use(
-            ResourceUse::Texture(target.into().texture_use()),
+            target.into().resource_use(),
             depth_access(attachment, write),
             UseRole::Depth(attachment),
         );
@@ -463,6 +562,7 @@ builder! {
     FullscreenPassBuilder
 }
 colour!(FullscreenPassBuilder);
+for_each_mip!(FullscreenPassBuilder);
 
 builder! {
     /// Builds a compute pass: reads and writes through shaders, on the
@@ -470,6 +570,7 @@ builder! {
     ComputePassBuilder
 }
 read_write!(ComputePassBuilder);
+for_each_mip!(ComputePassBuilder);
 queue!(
     ComputePassBuilder,
     "A compute pass may ask for graphics or compute. Compiling reports one that asks for transfer."
@@ -605,7 +706,10 @@ mod tests {
     fn the_last_mip_index_gives_an_empty_range_rather_than_overflowing() {
         let (_, _, bloom, _) = graph();
         assert_eq!(bloom.mip(u32::MAX).subresource.mips, u32::MAX..u32::MAX);
-        let target = bloom.attachment(u32::MAX, u32::MAX).texture_use();
+        let ResourceUse::Texture(target) = bloom.attachment(u32::MAX, u32::MAX).resource_use()
+        else {
+            panic!("an attachment to a mip by index uses part of a texture");
+        };
         assert!(target.subresource.mips.is_empty() && target.subresource.layers.is_empty());
     }
 
@@ -649,6 +753,49 @@ mod tests {
         assert_eq!(uses[1].role, UseRole::Write);
         assert_eq!(uses[2].resource, ResourceUse::Buffer(lights));
         assert_eq!(uses[2].access, Access::ComputeShaderRead.into());
+    }
+
+    /// A repeated pass keeps the texture it's repeated for, and its uses
+    /// and attachments keep their mips relative to each repetition.
+    #[test]
+    fn repeated_passes_name_mips_relative_to_each_repetition() {
+        let (mut graph, _, bloom, _) = graph();
+        graph
+            .compute_pass("downsample", ComputeRecorder::dispatch("downsample"))
+            .for_each_mip(bloom)
+            .read(bloom.previous_mip(), Access::ComputeShaderSampledRead)
+            .write(bloom.current_mip(), Access::ComputeShaderWrite);
+        graph
+            .fullscreen_pass("upsample", "upsample")
+            .for_each_mip(bloom)
+            .colour(bloom.current_mip().attachment(0), Attachment::Discard);
+        graph.compute_pass("once", ComputeRecorder::dispatch("once"));
+
+        let repeated = |mip, layers| {
+            ResourceUse::Repeated(RepeatedUse {
+                texture: bloom,
+                mip,
+                layers,
+            })
+        };
+        let downsample = &graph.passes[0];
+        assert_eq!(downsample.repeat, Some(bloom));
+        assert_eq!(
+            downsample.uses[0].resource,
+            repeated(RelativeMip::Previous, Subresource::ALL.layers)
+        );
+        assert_eq!(
+            downsample.uses[1].resource,
+            repeated(RelativeMip::Current, Subresource::ALL.layers)
+        );
+        let upsample = &graph.passes[1];
+        assert_eq!(upsample.repeat, Some(bloom));
+        assert_eq!(
+            upsample.uses[0].resource,
+            repeated(RelativeMip::Current, 0..1),
+            "an attachment is one layer of the mip"
+        );
+        assert_eq!(graph.passes[2].repeat, None);
     }
 
     /// A plain texture ID used as a resource is the whole texture.
