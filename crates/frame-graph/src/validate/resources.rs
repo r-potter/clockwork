@@ -119,7 +119,7 @@ impl ShapeCheck<'_> {
         let extent = self.extent(desc, inputs);
         let shaped = self.check_dimension(desc, extent);
         let layers = self.layers(desc);
-        let mips = extent.and_then(|extent| self.mips(desc.mips, extent));
+        let mips = self.mips(desc, extent);
         if !shaped {
             return None;
         }
@@ -246,16 +246,30 @@ impl ShapeCheck<'_> {
         Some(desc.layers)
     }
 
-    /// How many mips `mips` gives a texture of `extent`, or `None` if that's
-    /// none, or more than it can have.
-    fn mips(&mut self, mips: MipCount, extent: Extent3d) -> Option<u32> {
-        let most = extent.max_mip_count();
-        match mips {
-            MipCount::Full => Some(most),
+    /// How many mips the texture has at the size `extent`, or `None` if
+    /// that's none, more than it can have, or a fixed count above 1 for a
+    /// texture sized by the output. Such a texture has one mip or a full
+    /// chain, since how many its size allows changes with the window's.
+    /// Only the count's limit waits for the size, if it isn't known.
+    fn mips(&mut self, desc: &TransientTexture, extent: Option<Extent3d>) -> Option<u32> {
+        let scaled = matches!(desc.size, TextureSize::Output { .. });
+        match desc.mips {
             MipCount::Count(0) => {
                 self.report("has 0 mips");
-                None
+                return None;
             }
+            MipCount::Count(count) if count > 1 && scaled => {
+                self.report(&format!(
+                    "is sized by the output, so it has 1 mip or a full chain, not {count}"
+                ));
+                return None;
+            }
+            MipCount::Count(_) | MipCount::Full => {}
+        }
+        let extent = extent?;
+        let most = extent.max_mip_count();
+        match desc.mips {
+            MipCount::Full => Some(most),
             MipCount::Count(count) if count > most => {
                 self.report(&format!(
                     "has {count} mips, but one of {} × {} × {} can have at most {most}",
@@ -472,6 +486,52 @@ mod tests {
                 "texture \"no mips\" has 0 mips",
                 "texture \"too many\" has 5 mips, but one of 8 × 8 × 1 can have at most 4",
                 "texture \"no layers\" has 0 layers",
+            ]
+        );
+    }
+
+    #[test]
+    fn scaled_textures_have_one_mip_or_a_full_chain() {
+        let mut graph = GraphDesc::new("scaled mips");
+        let scaled = |mips| TransientTexture {
+            mips,
+            ..sized(TextureSize::Output { scale: 0.5 })
+        };
+        graph.transient_texture("single", scaled(MipCount::Count(1)));
+        graph.transient_texture("chain", scaled(MipCount::Full));
+        graph.transient_texture("bloom", scaled(MipCount::Count(6)));
+        graph.transient_texture(
+            "fixed",
+            TransientTexture {
+                mips: MipCount::Count(6),
+                ..fixed(64, 64, 1)
+            },
+        );
+
+        assert_eq!(
+            messages(&graph),
+            ["texture \"bloom\" is sized by the output, so it has 1 mip or a full chain, not 6"]
+        );
+    }
+
+    #[test]
+    fn mip_counts_are_checked_without_a_size() {
+        let mut graph = GraphDesc::new("mips without a size");
+        let broken = |mips| TransientTexture {
+            mips,
+            ..sized(TextureSize::Output { scale: 0.0 })
+        };
+        graph.transient_texture("none", broken(MipCount::Count(0)));
+        graph.transient_texture("several", broken(MipCount::Count(3)));
+
+        assert_eq!(
+            messages(&graph),
+            [
+                "texture \"none\" is sized by the output with a scale of 0, which must be positive",
+                "texture \"none\" has 0 mips",
+                "texture \"several\" is sized by the output with a scale of 0, which must be \
+                 positive",
+                "texture \"several\" is sized by the output, so it has 1 mip or a full chain, not 3",
             ]
         );
     }

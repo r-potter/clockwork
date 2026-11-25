@@ -204,7 +204,7 @@ mod tests {
         let output = graph.output();
         let depth = graph.transient_texture("depth", full_size(Format::Depth32Float));
         let chain = TransientTexture {
-            mips: MipCount::Count(2),
+            mips: MipCount::Full,
             ..TransientTexture::new(Format::Rgba16Float, TextureSize::Output { scale: 2.0 })
         };
         let bloom = graph.transient_texture("bloom", chain);
