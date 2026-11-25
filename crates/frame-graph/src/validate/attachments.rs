@@ -198,6 +198,8 @@ mod tests {
         TransientTexture::new(format, TextureSize::Output { scale: 1.0 })
     }
 
+    /// Attachments of the same size, including a mip of a larger texture,
+    /// in formats they can be rendered in, report nothing.
     #[test]
     fn matching_attachments_have_no_errors() {
         let mut graph = GraphDesc::new("attachments");
@@ -216,6 +218,8 @@ mod tests {
         assert_eq!(messages(&graph), Vec::<String>::new());
     }
 
+    /// A render pass with no attachments, or with more colour or depth
+    /// attachments than a render pass has, is reported.
     #[test]
     fn a_render_pass_needs_attachments_and_has_few() {
         let mut graph = GraphDesc::new("counts");
@@ -245,6 +249,8 @@ mod tests {
         );
     }
 
+    /// 3D and block-compressed attachments, and depth and colour
+    /// attachments in each other's formats, are reported.
     #[test]
     fn attachments_must_be_renderable() {
         let mut graph = GraphDesc::new("formats");
@@ -284,6 +290,8 @@ mod tests {
         );
     }
 
+    /// Attachments of different sizes, and two of the same mip and layer,
+    /// are reported, while an import's unknown size is passed over.
     #[test]
     fn attachments_are_distinct_and_the_same_size() {
         let mut graph = GraphDesc::new("sizes");

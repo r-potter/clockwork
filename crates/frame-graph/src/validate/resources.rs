@@ -312,6 +312,7 @@ mod tests {
         validate(&finished(&graph), &inputs()).ok()?.textures[texture.index()]
     }
 
+    /// Transient, persistent and imported resources that are valid report nothing.
     #[test]
     fn a_graph_of_valid_resources_has_no_errors() {
         let mut graph = GraphDesc::new("valid");
@@ -328,6 +329,8 @@ mod tests {
         assert_eq!(messages(&graph), Vec::<String>::new());
     }
 
+    /// A name used more than once among textures, buffers or passes is
+    /// reported once, and a texture may share a buffer's name.
     #[test]
     fn duplicate_names_are_reported_once_each() {
         let mut graph = GraphDesc::new("names");
@@ -352,6 +355,8 @@ mod tests {
         );
     }
 
+    /// Sizes scaled from the output's round up to whole texels, and at
+    /// least one, but a third of a size is exact despite floating point.
     #[test]
     fn sizes_relative_to_the_output_are_rounded_up() {
         let half = shape_of(sized(TextureSize::Output { scale: 0.5 })).unwrap();
@@ -362,6 +367,8 @@ mod tests {
         assert_eq!(tiny.extent, Extent3d::new_2d(1, 1));
     }
 
+    /// Only a product within its scale's rounding error of a whole number
+    /// is taken as that number. Anything further past it rounds up.
     #[test]
     fn products_just_past_a_whole_number_round_up() {
         let mut graph = GraphDesc::new("rounding");
@@ -377,6 +384,7 @@ mod tests {
         assert_eq!(shape.extent, Extent3d::new_2d(2, 2));
     }
 
+    /// The output's shape comes from the compile inputs.
     #[test]
     fn the_output_has_the_inputs_shape() {
         let graph = GraphDesc::new("output");
@@ -393,6 +401,7 @@ mod tests {
         );
     }
 
+    /// An imported texture's shape is the caller's, so validation has none.
     #[test]
     fn imported_textures_have_no_shape() {
         let mut graph = GraphDesc::new("imports");
@@ -405,6 +414,7 @@ mod tests {
         assert_eq!(validated.textures[font.index()], None);
     }
 
+    /// A full chain has a mip for each halving down to one texel.
     #[test]
     fn a_full_chain_reaches_one_texel() {
         let chain = TransientTexture {
@@ -414,6 +424,8 @@ mod tests {
         assert_eq!(shape_of(chain).unwrap().mips, 11);
     }
 
+    /// Scales that aren't positive, sizes too large or empty, and buffers
+    /// of no bytes are reported.
     #[test]
     fn bad_sizes_are_reported() {
         let mut graph = GraphDesc::new("sizes");
@@ -439,6 +451,8 @@ mod tests {
         );
     }
 
+    /// A texture's checks that don't need its size run even when its size
+    /// is a mistake, so every mistake is reported at once.
     #[test]
     fn a_bad_size_hides_no_other_mistakes() {
         let mut graph = GraphDesc::new("sizes and shapes");
@@ -474,6 +488,8 @@ mod tests {
         );
     }
 
+    /// No mips, more mips than the size allows, and no layers are
+    /// reported.
     #[test]
     fn bad_mip_and_layer_counts_are_reported() {
         let mut graph = GraphDesc::new("counts");
@@ -503,6 +519,8 @@ mod tests {
         );
     }
 
+    /// A texture sized by the output has one mip or a full chain, since a
+    /// fixed count could exceed what a smaller window's size allows.
     #[test]
     fn scaled_textures_have_one_mip_or_a_full_chain() {
         let mut graph = GraphDesc::new("scaled mips");
@@ -527,6 +545,8 @@ mod tests {
         );
     }
 
+    /// A count of no mips, or of several on a texture sized by the output,
+    /// is reported even when the size is a mistake.
     #[test]
     fn mip_counts_are_checked_without_a_size() {
         let mut graph = GraphDesc::new("mips without a size");
@@ -549,6 +569,8 @@ mod tests {
         );
     }
 
+    /// 3D textures have a fixed size and one layer, only they have depth,
+    /// and cube maps are square, in whole cubes.
     #[test]
     fn shapes_must_suit_their_dimension() {
         let mut graph = GraphDesc::new("dimensions");
@@ -590,6 +612,7 @@ mod tests {
         );
     }
 
+    /// An output with no texels is reported.
     #[test]
     fn an_empty_output_is_reported() {
         let graph = GraphDesc::new("empty output");

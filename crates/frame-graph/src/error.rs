@@ -100,11 +100,14 @@ mod tests {
 
     use super::*;
 
+    /// With no errors recorded, finishing gives the value.
     #[test]
     fn no_errors_gives_the_value() {
         assert_eq!(Errors::default().finish("empty", 7), Ok(7));
     }
 
+    /// Errors keep their order, and display one per line after a line
+    /// naming the graph.
     #[test]
     fn errors_are_listed_one_per_line_after_the_graph() {
         let mut errors = Errors::default();
@@ -120,6 +123,7 @@ mod tests {
         );
     }
 
+    /// A single error is counted in the singular.
     #[test]
     fn one_error_is_singular() {
         let mut errors = Errors::default();

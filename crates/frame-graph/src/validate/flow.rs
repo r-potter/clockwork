@@ -226,6 +226,8 @@ mod tests {
         (graph, resources)
     }
 
+    /// Reads of what earlier passes wrote, and of persistent and imported
+    /// resources' older contents, report nothing.
     #[test]
     fn reads_after_writes_and_of_older_contents_have_no_errors() {
         let (mut graph, resources) = graph();
@@ -258,6 +260,8 @@ mod tests {
         assert_eq!(messages(&graph), Vec::<String>::new());
     }
 
+    /// Reads of transient contents no earlier pass wrote are reported, per
+    /// mip, and a pass's own writes don't count for its reads.
     #[test]
     fn reads_of_unwritten_transients_are_reported() {
         let (mut graph, resources) = graph();
@@ -292,6 +296,7 @@ mod tests {
         );
     }
 
+    /// A kept attachment reads its contents, and a cleared one doesn't.
     #[test]
     fn a_kept_attachment_reads_and_a_cleared_one_does_not() {
         let (mut graph, Resources { gbuffer, .. }) = graph();
@@ -313,6 +318,8 @@ mod tests {
         );
     }
 
+    /// A write reported for another mistake still counts as writing, so
+    /// later reads of it aren't reported as well.
     #[test]
     fn a_write_with_a_mistake_still_writes() {
         let (mut graph, Resources { gbuffer, .. }) = graph();
@@ -338,6 +345,7 @@ mod tests {
         );
     }
 
+    /// A graph that never writes its output is reported.
     #[test]
     fn the_output_must_be_written() {
         let (graph, _) = graph();
