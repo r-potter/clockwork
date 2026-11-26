@@ -340,16 +340,32 @@ mod tests {
         graph
             .compute_pass("downsample", ComputeRecorder::dispatch("downsample"))
             .for_each_mip(bloom, MipDirection::Down, ..)
-            .write(bloom.current_mip(), Access::ComputeShaderWrite);
+            .bind(bloom.current_mip(), Access::ComputeShaderWrite);
         graph
             .compute_pass("composite", ComputeRecorder::dispatch("composite"))
-            .read(bloom, Access::ComputeShaderSampledRead);
+            .bind(bloom, Access::ComputeShaderSampledRead);
         assert_eq!(
             messages(&graph),
             [
                 "pass \"downsample\" is repeated for each mip of \"bloom\", which compiling \
                  doesn't support yet"
             ]
+        );
+    }
+
+    /// A fullscreen pass's bound read is ordered as any other read is, so
+    /// one of a transient texture no earlier pass writes is reported.
+    #[test]
+    fn bound_reads_must_follow_a_write() {
+        let (mut graph, Resources { gbuffer, .. }) = graph();
+        let output = graph.output();
+        graph
+            .fullscreen_pass("lighting", "lighting")
+            .bind(gbuffer, Access::FragmentShaderSampledRead)
+            .colour(output, Attachment::Discard);
+        assert_eq!(
+            messages(&graph),
+            ["pass \"lighting\" reads \"gbuffer\", which no earlier pass writes"]
         );
     }
 
