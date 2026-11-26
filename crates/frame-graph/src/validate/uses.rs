@@ -1,7 +1,8 @@
 //! Validation of each pass's queue and uses (design 0003, "Compiling",
-//! step 1): that each use names a resource the graph has, with accesses
-//! that suit the resource, the pass's kind and how the use was declared,
-//! and parts of a texture that exist, in one layout.
+//! steps 1 and 2): that each use names a resource the graph has, with
+//! accesses that suit the resource, the pass's kind and how the use was
+//! declared, and parts of a texture that exist, and that a pass's uses of
+//! one subresource share a layout.
 
 use std::ops::Range;
 
@@ -10,9 +11,10 @@ use clockwork_rhi::{Access, AccessSet, Layout, MAX_PUSH_DATA_SIZE, QueueKind, Su
 use super::repeat::{RepeatError, check_repeat};
 use super::{Checked, CheckedUse, TextureShape};
 use crate::error::Errors;
-use crate::pass::{Binding, Constant, PassDesc, PassKind, Use, UseRole};
+use crate::pass::{Binding, Constant, PassDesc, PassKind, Repeat, Use, UseRole};
 use crate::{
-    ComputeRecorder, GraphDesc, RelativeMip, RepeatedUse, ResourceUse, TextureId, TextureUse,
+    ComputeRecorder, GraphDesc, MipDirection, RelativeMip, RepeatedUse, ResourceUse, TextureId,
+    TextureUse,
 };
 
 /// The size, in bytes, of the push data `pass`'s bindings lay out, in order
@@ -52,30 +54,49 @@ pub(super) fn check_uses(
                 desc,
                 shapes,
                 pass,
+                repetition: Repetition::None,
                 errors,
             };
             check.queue();
             check.bindings();
             if let Some(repeat) = pass.repeat {
-                match check_repeat(desc, shapes, pass, repeat) {
-                    Ok(_) => {
+                check.repetition = match check_repeat(desc, shapes, pass, repeat) {
+                    Ok(mips) => {
                         let name = &desc.textures[repeat.texture.index()].name;
                         check.report(&format!(
                             "is repeated for each mip of \"{name}\", which compiling doesn't \
                              support yet"
                         ));
+                        let chain = shapes[repeat.texture.index()]
+                            .expect("a valid repeat's texture has a shape")
+                            .mips;
+                        Repetition::first(repeat, mips, chain)
                     }
-                    Err(RepeatError::Report(message)) => check.report(&message),
-                    Err(RepeatError::Reported) => {}
-                }
-                return Vec::new();
+                    Err(RepeatError::Report(message)) => {
+                        check.report(&message);
+                        Repetition::Mistaken {
+                            texture: repeat.texture,
+                        }
+                    }
+                    Err(RepeatError::Reported) => Repetition::Mistaken {
+                        texture: repeat.texture,
+                    },
+                };
             }
             let mut checked: Vec<_> = pass
                 .uses
                 .iter()
                 .filter_map(|used| check.one(used))
                 .collect();
-            let conflicting = check.overlaps(&checked);
+            // Which mips a repeated pass's uses overlap differs from one
+            // repetition to the next, so whether they share a layout is
+            // checked on the expanded passes, one per repetition (design
+            // 0003, "Compiling", step 2).
+            let conflicting = if pass.repeat.is_none() {
+                check.overlaps(&checked)
+            } else {
+                Vec::new()
+            };
             checked.retain(|used| {
                 !matches!(used.resource, Checked::Texture(texture, _) if conflicting.contains(&texture))
             });
@@ -92,8 +113,56 @@ struct PassCheck<'a> {
     shapes: &'a [Option<TextureShape>],
     /// The pass.
     pass: &'a PassDesc,
+    /// The repetition its relative mips are checked at, if it's repeated.
+    repetition: Repetition,
     /// Where mistakes are reported.
     errors: &'a mut Errors,
+}
+
+/// The repetition a pass's uses of relative mips are checked at. A repeated
+/// pass's uses are each checked once, as written, rather than once per
+/// repetition (design 0003, "Compiling", step 1), so a mistake in one is
+/// reported once. That holds for every repetition, since what's checked of
+/// a use on its own doesn't depend on which mip it is, once the range is
+/// known to have it, so the first repetition stands for the rest. What
+/// depends on several uses' mips is checked on the expanded passes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Repetition {
+    /// The pass isn't repeated.
+    None,
+    /// The pass is repeated for each mip of `texture`, but how has a
+    /// mistake, which is reported, so its relative mips can't be resolved.
+    /// What doesn't need the mip is still checked.
+    Mistaken {
+        /// The texture, which the graph may not have.
+        texture: TextureId,
+    },
+    /// The first repetition of a pass repeated for each mip of `texture`.
+    First {
+        /// The texture.
+        texture: TextureId,
+        /// The mip the first repetition makes.
+        current: u32,
+        /// The mip it makes it from, if the chain has one there.
+        previous: Option<u32>,
+    },
+}
+
+impl Repetition {
+    /// The first repetition of `repeat`, which makes `mips` of a chain of
+    /// `chain` mips: the largest mip of the range going down, and the
+    /// smallest going up.
+    fn first(repeat: Repeat, mips: Range<u32>, chain: u32) -> Self {
+        let (current, previous) = match repeat.direction {
+            MipDirection::Down => (mips.start, mips.start.checked_sub(1)),
+            MipDirection::Up => (mips.end - 1, (mips.end < chain).then_some(mips.end)),
+        };
+        Self::First {
+            texture: repeat.texture,
+            current,
+            previous,
+        }
+    }
 }
 
 impl PassCheck<'_> {
@@ -200,7 +269,7 @@ impl PassCheck<'_> {
                     ));
                     return None;
                 };
-                (decl.name.as_str(), Some(part))
+                (decl.name.as_str(), Some(part.clone()))
             }
             ResourceUse::Buffer(buffer) => {
                 let Some(decl) = self.desc.buffers.get(buffer.index()) else {
@@ -220,15 +289,64 @@ impl PassCheck<'_> {
                     ));
                     return None;
                 };
-                let mip = match part.mip {
+                let relative = match part.mip {
                     RelativeMip::Current => "current",
                     RelativeMip::Previous => "previous",
                 };
-                self.report(&format!(
-                    "uses the {mip} mip of \"{}\", but isn't repeated for each mip",
-                    decl.name
-                ));
-                return None;
+                let (texture, first) = match self.repetition {
+                    Repetition::None => {
+                        self.report(&format!(
+                            "uses the {relative} mip of \"{}\", but isn't repeated for each mip",
+                            decl.name
+                        ));
+                        return None;
+                    }
+                    Repetition::Mistaken { texture } => (texture, None),
+                    Repetition::First {
+                        texture,
+                        current,
+                        previous,
+                    } => (texture, Some((current, previous))),
+                };
+                if texture != part.texture {
+                    // A repeat of a texture the graph doesn't have is
+                    // reported already.
+                    if let Some(repeated) = self.desc.textures.get(texture.index()) {
+                        self.report(&format!(
+                            "uses the {relative} mip of \"{}\", but is repeated for each mip of \
+                             \"{}\"",
+                            decl.name, repeated.name
+                        ));
+                    }
+                    return None;
+                }
+                let Some((current, previous)) = first else {
+                    // The mip can't be resolved, but the accesses, the role
+                    // and whether the accesses share a layout don't need
+                    // it. A relative mip is always one mip, so it suits a
+                    // storage view. The layout waits for the accesses to
+                    // suit a texture, as it does for any use.
+                    let accesses_ok = self.accesses(&decl.name, true, used);
+                    self.role(&decl.name, used);
+                    if accesses_ok {
+                        self.layout(&decl.name, None, used.access);
+                    }
+                    return None;
+                };
+                // Checking the repeat gave a first repetition that reads
+                // the previous mip one.
+                let mip = match part.mip {
+                    RelativeMip::Current => current,
+                    RelativeMip::Previous => previous?,
+                };
+                let resolved = TextureUse {
+                    texture,
+                    subresource: Subresource {
+                        mips: mip..mip + 1,
+                        layers: part.layers.clone(),
+                    },
+                };
+                (decl.name.as_str(), Some(resolved))
             }
         };
         let accesses_ok = self.accesses(name, texture.is_some(), used);
@@ -248,7 +366,7 @@ impl PassCheck<'_> {
             }
             (None, ResourceUse::Buffer(buffer)) => Checked::Buffer(*buffer),
             (None, ResourceUse::Texture(_) | ResourceUse::Repeated(_)) => {
-                unreachable!("a texture use has its part, and a repeated one returned")
+                unreachable!("a texture use, relative or not, has its part")
             }
         };
         (accesses_ok && role_ok).then_some(CheckedUse {
@@ -514,8 +632,8 @@ mod tests {
     }
 
     /// A pass repeated for each mip is reported until compiling supports
-    /// it, and a mip relative to a repetition in a pass that isn't repeated
-    /// is a mistake.
+    /// it, and a mip relative to a repetition is a mistake in a pass that
+    /// isn't repeated, or that's repeated for another texture's mips.
     #[test]
     fn relative_mips_need_a_repeated_pass() {
         let (mut graph, hdr, bloom, ..) = graph();
@@ -528,9 +646,16 @@ mod tests {
             .compute_pass("once", ComputeRecorder::dispatch("once"))
             .bind(hdr.previous_mip(), Access::ComputeShaderSampledRead)
             .bind(TextureId(9).current_mip(), Access::ComputeShaderWrite);
+        // A relative mip of another texture than one the graph doesn't
+        // have, which is reported already, isn't reported again.
         graph
             .compute_pass("missing", ComputeRecorder::dispatch("missing"))
-            .for_each_mip(TextureId(9), MipDirection::Down, ..);
+            .for_each_mip(TextureId(9), MipDirection::Down, ..)
+            .bind(bloom.current_mip(), Access::ComputeShaderWrite);
+        graph
+            .compute_pass("other", ComputeRecorder::dispatch("other"))
+            .for_each_mip(bloom, MipDirection::Down, ..)
+            .bind(hdr.current_mip(), Access::ComputeShaderWrite);
 
         assert_eq!(
             messages(&graph),
@@ -541,8 +666,96 @@ mod tests {
                 "pass \"once\" uses texture 9, which this graph doesn't have",
                 "pass \"missing\" is repeated for each mip of texture 9, which this graph doesn't \
                  have",
+                "pass \"other\" is repeated for each mip of \"bloom\", which compiling doesn't \
+                 support yet",
+                "pass \"other\" uses the current mip of \"hdr\", but is repeated for each mip of \
+                 \"bloom\"",
             ]
         );
+    }
+
+    /// A repeated pass's uses are each checked once, at its first
+    /// repetition, as any other use is. A pass whose repeat has a mistake
+    /// still has its relative uses' accesses checked, and whether they
+    /// share a layout, which need no mip.
+    /// What depends on several uses' mips, such as whether a relative
+    /// write overlaps a fixed read, or what an earlier pass wrote, waits
+    /// for the expanded passes, so isn't reported here.
+    #[test]
+    fn repeated_uses_are_checked_on_their_own() {
+        let (mut graph, hdr, bloom, _, lights) = graph();
+        graph
+            .compute_pass("copy", ComputeRecorder::dispatch("copy"))
+            .for_each_mip(bloom, MipDirection::Down, ..)
+            .bind(bloom.current_mip(), Access::CopyWrite);
+        graph
+            .compute_pass("past", ComputeRecorder::dispatch("past"))
+            .for_each_mip(bloom, MipDirection::Down, 9..)
+            .bind(bloom.current_mip(), Access::CopyWrite)
+            .bind(
+                bloom.previous_mip(),
+                Access::ComputeShaderRead | Access::ComputeShaderSampledRead,
+            )
+            .bind(lights, Access::CopyRead);
+        // Mip 2 is written while it's sampled at the repetition making it,
+        // and nothing wrote mip 0 before the first reads it.
+        graph
+            .compute_pass("overlap", ComputeRecorder::dispatch("overlap"))
+            .for_each_mip(bloom, MipDirection::Down, ..)
+            .bind(bloom.previous_mip(), Access::ComputeShaderSampledRead)
+            .bind(bloom.current_mip(), Access::ComputeShaderWrite)
+            .bind(bloom.mip(2), Access::ComputeShaderSampledRead);
+        // The current mip is never the output's size, but the attachments'
+        // sizes differ by repetition.
+        graph
+            .fullscreen_pass("sizes", "sizes")
+            .for_each_mip(bloom, MipDirection::Down, ..)
+            .colour(bloom.current_mip().attachment(0), Attachment::Discard)
+            .colour(hdr, Attachment::Discard);
+
+        assert_eq!(
+            messages(&graph),
+            [
+                "pass \"copy\" is repeated for each mip of \"bloom\", which compiling doesn't \
+                 support yet",
+                "pass \"copy\" is a compute pass, so it can't use \"bloom\" with CopyWrite",
+                "pass \"past\" is repeated from mip 9 of \"bloom\", whose last mip is 3",
+                "pass \"past\" is a compute pass, so it can't use \"bloom\" with CopyWrite",
+                "pass \"past\" uses \"bloom\" with ComputeShaderRead | ComputeShaderSampledRead, \
+                 which share no layout",
+                "pass \"past\" is a compute pass, so it can't use \"lights\" with CopyRead",
+                "pass \"overlap\" is repeated for each mip of \"bloom\", which compiling doesn't \
+                 support yet",
+                "pass \"sizes\" is repeated for each mip of \"bloom\", which compiling doesn't \
+                 support yet",
+            ]
+        );
+    }
+
+    /// The first repetition makes the largest mip of the range going down,
+    /// from the one above, and the smallest going up, from the one below,
+    /// which the chain may not have.
+    #[test]
+    fn the_first_repetition_starts_the_walk() {
+        let bloom = TextureId(2);
+        let first = |direction, mips: std::ops::Range<u32>| {
+            let repeat = Repeat {
+                texture: bloom,
+                start: Some(mips.start),
+                end: Some(mips.end),
+                direction,
+            };
+            match Repetition::first(repeat, mips, 4) {
+                Repetition::First {
+                    current, previous, ..
+                } => (current, previous),
+                other => panic!("expected a first repetition, not {other:?}"),
+            }
+        };
+        assert_eq!(first(MipDirection::Down, 1..4), (1, Some(0)));
+        assert_eq!(first(MipDirection::Down, 0..2), (0, None));
+        assert_eq!(first(MipDirection::Up, 0..3), (2, Some(3)));
+        assert_eq!(first(MipDirection::Up, 1..4), (3, None));
     }
 
     /// Bindings are only for passes the graph records, name samplers the

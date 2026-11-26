@@ -191,6 +191,12 @@ mod tests {
         repeated(&mut graph, "up", bloom, MipDirection::Up, .., true);
         repeated(&mut graph, "middle", bloom, MipDirection::Down, 2..=3, true);
         repeated(&mut graph, "low", bloom, MipDirection::Up, 1..3, true);
+        // A fullscreen pass draws to the current mip, by its attachment.
+        graph
+            .fullscreen_pass("blur", "blur")
+            .for_each_mip(bloom, MipDirection::Down, ..)
+            .bind(bloom.previous_mip(), Access::FragmentShaderSampledRead)
+            .colour(bloom.current_mip().attachment(0), Attachment::Discard);
         assert_eq!(
             messages(&graph),
             [
@@ -198,6 +204,7 @@ mod tests {
                 unsupported("up"),
                 unsupported("middle"),
                 unsupported("low"),
+                unsupported("blur"),
             ]
         );
     }
