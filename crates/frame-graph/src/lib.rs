@@ -15,6 +15,7 @@
 
 mod desc;
 mod error;
+mod expand;
 mod inputs;
 mod pass;
 mod validate;
