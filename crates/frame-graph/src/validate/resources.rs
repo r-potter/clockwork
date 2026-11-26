@@ -10,16 +10,18 @@ use crate::desc::{BufferKind, TextureKind};
 use crate::error::Errors;
 use crate::{CompileInputs, GraphDesc, MipCount, OUTPUT, TextureSize, TransientTexture};
 
-/// Reports each name used by more than one texture, buffer or pass. Each
-/// kind of item has names of its own, so a texture and a buffer may share
-/// one. A texture named after the output is reported as taking its
+/// Reports each name used by more than one texture, buffer, sampler or
+/// pass. Each kind of item has names of its own, so a texture and a buffer
+/// may share one. A texture named after the output is reported as taking its
 /// reserved name.
 pub(super) fn check_names(desc: &GraphDesc, errors: &mut Errors) {
     let textures = desc.textures.iter().map(|texture| texture.name.as_str());
     let buffers = desc.buffers.iter().map(|buffer| buffer.name.as_str());
+    let samplers = desc.samplers.iter().map(|sampler| sampler.name.as_str());
     let passes = desc.passes.iter().map(|pass| pass.name.as_str());
     report_duplicates("texture", textures, errors);
     report_duplicates("buffer", buffers, errors);
+    report_duplicates("sampler", samplers, errors);
     report_duplicates("pass", passes, errors);
 }
 
@@ -284,12 +286,12 @@ impl ShapeCheck<'_> {
 mod tests {
     //! T0 tests of validating resources.
 
-    use clockwork_rhi::{Access, Extent2d, Format};
+    use clockwork_rhi::{Access, AddressMode, Extent2d, Filter, Format};
 
     use super::*;
     use crate::validate::test_support::{finished, inputs, messages};
     use crate::validate::validate;
-    use crate::{ImportDesc, TextureId};
+    use crate::{ImportDesc, SamplerSettings, TextureId};
 
     /// A texture of `size`, with one mip and one layer.
     fn sized(size: TextureSize) -> TransientTexture {
@@ -329,8 +331,8 @@ mod tests {
         assert_eq!(messages(&graph), Vec::<String>::new());
     }
 
-    /// A name used more than once among textures, buffers or passes is
-    /// reported once, and a texture may share a buffer's name.
+    /// A name used more than once among textures, buffers, samplers or
+    /// passes is reported once, and a texture may share a buffer's name.
     #[test]
     fn duplicate_names_are_reported_once_each() {
         let mut graph = GraphDesc::new("names");
@@ -341,6 +343,10 @@ mod tests {
         graph.transient_buffer("hdr", 4);
         graph.transient_buffer("lights", 4);
         graph.transient_buffer("lights", 4);
+        let linear = SamplerSettings::new(Filter::Linear, AddressMode::ClampToEdge);
+        graph.sampler("linear", linear);
+        graph.sampler("linear", linear);
+        graph.sampler("hdr", linear);
         graph.transfer_pass("scene", "scene");
         graph.transfer_pass("scene", "scene");
 
@@ -350,6 +356,7 @@ mod tests {
                 "more than one texture is named \"hdr\"",
                 "a texture is named \"output\", the name reserved for the output",
                 "more than one buffer is named \"lights\"",
+                "more than one sampler is named \"linear\"",
                 "more than one pass is named \"scene\"",
             ]
         );

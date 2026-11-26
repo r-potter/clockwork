@@ -20,7 +20,8 @@ mod pass;
 mod validate;
 
 pub use desc::{
-    BufferId, GraphDesc, ImportDesc, MipCount, OUTPUT, TextureId, TextureSize, TransientTexture,
+    BufferId, GraphDesc, ImportDesc, MipCount, OUTPUT, SamplerId, SamplerSettings, TextureId,
+    TextureSize, TransientTexture,
 };
 pub use error::{CompileError, CompileErrors};
 pub use inputs::{CompileInputs, OutputDesc, QueueLayout, Schedule};
