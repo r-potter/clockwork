@@ -20,6 +20,7 @@ mod error;
 mod expand;
 mod inputs;
 mod pass;
+mod schedule;
 mod validate;
 
 pub use desc::{
