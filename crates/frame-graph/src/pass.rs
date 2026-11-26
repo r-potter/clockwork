@@ -151,6 +151,30 @@ impl Repeat {
             direction,
         }
     }
+
+    /// The mips the repetitions make, as a start and an exclusive end, for
+    /// a texture of `mips` mips. An open bound goes as far as the chain
+    /// allows while each repetition has a previous mip: going down, from
+    /// mip 1 to the last, and going up, from mip 0 to the one before the
+    /// last.
+    ///
+    /// If `clamp`, a closed end goes no further than an open one would, as
+    /// for a texture sized by the output, whose chain gets shorter as the
+    /// window shrinks, so a range that fits a large window still compiles
+    /// in a small one, making fewer mips. Otherwise the range isn't checked
+    /// against the chain, so it can be empty or pass the last mip.
+    pub(crate) fn resolve(self, mips: u32, clamp: bool) -> Range<u32> {
+        let (start, end) = match self.direction {
+            MipDirection::Down => (1, mips),
+            MipDirection::Up => (0, mips.saturating_sub(1)),
+        };
+        let closed_end = match self.end {
+            Some(closed) if clamp => closed.min(end),
+            Some(closed) => closed,
+            None => end,
+        };
+        self.start.unwrap_or(start)..closed_end
+    }
 }
 
 /// Part of the texture a pass is repeated for, naming its mip relative to
@@ -616,6 +640,15 @@ macro_rules! for_each_mip {
             /// going down, `..` is every mip after the first, and `1..6`
             /// makes mips 1 to 5; going up, `..` is every mip but the last,
             /// and `..5` makes mips 4 to 0.
+            ///
+            /// For a texture sized by the output, whose chain gets shorter
+            /// as the window shrinks, a closed end goes no further than an
+            /// open one would, so a small window makes fewer mips.
+            ///
+            /// Compiling reports a texture that's imported, whose mips the
+            /// graph doesn't know, or that has one mip, and a range that
+            /// passes the chain, makes no mips, or, if the pass reads the
+            /// previous mip, starts where there's none.
             pub fn for_each_mip(
                 &mut self,
                 texture: TextureId,
@@ -1003,6 +1036,32 @@ mod tests {
         assert_eq!(
             bounds(Repeat::new(bloom, 1..=3, MipDirection::Up)),
             (Some(1), Some(4))
+        );
+    }
+
+    /// An open bound resolves to as far as the chain allows while each
+    /// repetition has a previous mip, and a closed one is kept, even when
+    /// it's past the chain, unless its end is clamped, when it goes no
+    /// further than an open one.
+    #[test]
+    fn open_bounds_resolve_to_the_ends_of_the_chain() {
+        let (_, _, bloom, _) = graph();
+        let down = |mips| Repeat::new(bloom, mips, MipDirection::Down).resolve(4, false);
+        let up = |mips| Repeat::new(bloom, mips, MipDirection::Up).resolve(4, false);
+        let clamped = |direction, mips| Repeat::new(bloom, mips, direction).resolve(4, true);
+        assert_eq!(clamped(MipDirection::Down, 1..=9), 1..4);
+        assert_eq!(clamped(MipDirection::Down, 1..=2), 1..3);
+        assert_eq!(clamped(MipDirection::Up, 0..=3), 0..3);
+        assert_eq!(clamped(MipDirection::Up, 3..=5), 3..3);
+        assert_eq!(down((Bound::Unbounded, Bound::Unbounded)), 1..4);
+        assert_eq!(down((Bound::Included(2), Bound::Unbounded)), 2..4);
+        assert_eq!(down((Bound::Included(0), Bound::Excluded(9))), 0..9);
+        assert_eq!(up((Bound::Unbounded, Bound::Unbounded)), 0..3);
+        assert_eq!(up((Bound::Unbounded, Bound::Excluded(2))), 0..2);
+        assert_eq!(up((Bound::Included(3), Bound::Unbounded)), 3..3);
+        assert_eq!(
+            Repeat::new(bloom, .., MipDirection::Up).resolve(1, false),
+            0..0
         );
     }
 

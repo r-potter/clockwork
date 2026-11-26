@@ -13,6 +13,7 @@
 
 mod attachments;
 mod flow;
+mod repeat;
 mod resources;
 mod uses;
 
