@@ -7,6 +7,7 @@ use std::ops::Range;
 
 use clockwork_rhi::{Access, AccessSet, Layout, MAX_PUSH_DATA_SIZE, QueueKind, Subresource};
 
+use super::repeat::{RepeatError, check_repeat};
 use super::{Checked, CheckedUse, TextureShape};
 use crate::error::Errors;
 use crate::pass::{Binding, Constant, PassDesc, PassKind, Use, UseRole};
@@ -56,17 +57,17 @@ pub(super) fn check_uses(
             check.queue();
             check.bindings();
             if let Some(repeat) = pass.repeat {
-                let message = match desc.textures.get(repeat.texture.index()) {
-                    Some(decl) => format!(
-                        "is repeated for each mip of \"{}\", which compiling doesn't support yet",
-                        decl.name
-                    ),
-                    None => format!(
-                        "is repeated for each mip of texture {}, which this graph doesn't have",
-                        repeat.texture.0
-                    ),
-                };
-                check.report(&message);
+                match check_repeat(desc, shapes, pass, repeat) {
+                    Ok(_) => {
+                        let name = &desc.textures[repeat.texture.index()].name;
+                        check.report(&format!(
+                            "is repeated for each mip of \"{name}\", which compiling doesn't \
+                             support yet"
+                        ));
+                    }
+                    Err(RepeatError::Report(message)) => check.report(&message),
+                    Err(RepeatError::Reported) => {}
+                }
                 return Vec::new();
             }
             let mut checked: Vec<_> = pass
