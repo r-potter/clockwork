@@ -1,5 +1,5 @@
 //! Validation of the order of reads and writes (design 0003, "Compiling",
-//! step 1): every read of a transient resource follows, in the written
+//! step 2): every read of a transient resource follows, in the written
 //! order, a pass that writes what it reads, and some pass writes the
 //! output.
 
@@ -29,8 +29,12 @@ pub(super) fn check_flow(
     let mut written = Written::new(desc, shapes);
     for (pass, uses) in desc.passes.iter().zip(checked) {
         // A pass reads what earlier passes wrote, so its own writes count
-        // only from the next pass on.
-        for used in uses.iter().filter(|used| reads_contents(used)) {
+        // only from the next pass on. Which mips a repeated pass reads
+        // differs from one repetition to the next, so its reads are checked
+        // on the expanded passes, one per repetition (design 0003,
+        // "Compiling", step 2).
+        let reads = uses.iter().filter(|_| pass.repeat.is_none());
+        for used in reads.filter(|used| reads_contents(used)) {
             if let Some(name) = written.unwritten(desc, &used.resource) {
                 errors.push(format!(
                     "pass \"{}\" reads {name}, which no earlier pass writes",

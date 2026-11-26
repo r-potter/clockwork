@@ -1,7 +1,7 @@
-//! Validation of render passes' attachments (design 0003, "Compiling", step
-//! 1): that each raster and fullscreen pass renders to something, with no
-//! more attachments than a render pass has, in formats it can render to,
-//! all the same size.
+//! Validation of render passes' attachments (design 0003, "Compiling", steps
+//! 1 and 2): that each raster and fullscreen pass renders to something, with
+//! no more attachments than a render pass has, in formats it can render to,
+//! each a different mip or layer, all the same size.
 
 use clockwork_rhi::{MAX_COLOUR_ATTACHMENTS, TextureDimension};
 
@@ -49,8 +49,14 @@ pub(super) fn check_attachments(
         for &(texture, _, depth) in &attachments {
             check.format(texture, depth);
         }
-        check.distinct(&attachments);
-        check.sizes(&attachments);
+        // Which mips a repeated pass's attachments are differs from one
+        // repetition to the next, so whether they're distinct and the same
+        // size is checked on the expanded passes, one per repetition
+        // (design 0003, "Compiling", step 2).
+        if pass.repeat.is_none() {
+            check.distinct(&attachments);
+            check.sizes(&attachments);
+        }
     }
 }
 
