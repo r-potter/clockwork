@@ -12,7 +12,7 @@ use std::ops::{Bound, Range, RangeBounds};
 
 use clockwork_rhi::{Access, AccessSet, QueueKind, Subresource};
 
-use crate::desc::{BufferId, TextureId};
+use crate::desc::{BufferId, SamplerId, TextureId};
 
 /// A pass in a [`GraphDesc`](crate::GraphDesc): an index into its passes,
 /// in the order they're written.
@@ -327,6 +327,34 @@ pub(crate) struct PassDesc {
     pub(crate) side_effects: bool,
     /// How it's repeated for each mip of a texture, if it is.
     pub(crate) repeat: Option<Repeat>,
+    /// What the graph puts in its push data, in order, for a pass the graph
+    /// records.
+    pub(crate) bindings: Vec<Binding>,
+}
+
+/// A constant a binding puts in a pass's push data.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Constant {
+    /// A 4-byte `float`.
+    Float(f32),
+    /// A 4-byte `int`.
+    Int(i32),
+    /// A 4-byte `uint`.
+    Uint(u32),
+    /// A 16-byte `float4`.
+    Float4([f32; 4]),
+}
+
+/// One entry in the push data of a pass the graph records.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) enum Binding {
+    /// The resource of the pass's use at this index in its uses: a texture
+    /// view's heap index, or a buffer's address.
+    Use(usize),
+    /// A sampler's heap index.
+    Sampler(SamplerId),
+    /// A constant.
+    Constant(Constant),
 }
 
 /// A kind of pass, and what records it.
@@ -367,8 +395,8 @@ impl PassKind {
     /// than as an attachment, which only raster and fullscreen passes have.
     /// Raster passes read through vertex and fragment shaders and as draw
     /// arguments, compute passes read and write through compute shaders
-    /// and read dispatch arguments, and transfer passes copy. A fullscreen
-    /// pass's bindings arrive with the graph's own passes.
+    /// and read dispatch arguments, transfer passes copy, and fullscreen
+    /// passes read through their fragment shader, by their bindings.
     pub(crate) fn allows_access(&self, access: Access) -> bool {
         match self {
             Self::Raster { .. } => matches!(
@@ -379,7 +407,10 @@ impl PassKind {
                     | Access::FragmentShaderRead
                     | Access::FragmentShaderSampledRead
             ),
-            Self::Fullscreen { .. } => false,
+            Self::Fullscreen { .. } => matches!(
+                access,
+                Access::FragmentShaderRead | Access::FragmentShaderSampledRead
+            ),
             Self::Compute(_) => matches!(
                 access,
                 Access::IndirectRead
@@ -466,6 +497,19 @@ impl Builder<'_> {
             access,
             role,
         });
+    }
+
+    /// Binds `resource` with `access` as the next entry of the push data,
+    /// and adds it as a use: a write if `access` writes, and a read if not.
+    fn bind(&mut self, resource: ResourceUse, access: AccessSet) {
+        let role = if access.is_write() {
+            UseRole::Write
+        } else {
+            UseRole::Read
+        };
+        let index = self.pass.uses.len();
+        self.add_use(resource, access, role);
+        self.pass.bindings.push(Binding::Use(index));
     }
 }
 
@@ -585,6 +629,44 @@ macro_rules! for_each_mip {
     };
 }
 
+/// Generates the `bind`, `bind_sampler` and `bind_constant` methods, for
+/// kinds the graph can record.
+macro_rules! bindings {
+    ($name:ident) => {
+        impl $name<'_> {
+            /// Binds `resource` with `access` as the next entry of the
+            /// pass's push data: a texture's view, by its heap index, or a
+            /// buffer's address. It's a use of the resource too: a write if
+            /// `access` writes, and a read if not.
+            ///
+            /// Only a pass the graph records has bindings, since a recorder
+            /// sets its own push data. Compiling reports bindings on a
+            /// compute pass a recorder records.
+            pub fn bind(
+                &mut self,
+                resource: impl Into<ResourceUse>,
+                access: impl Into<AccessSet>,
+            ) -> &mut Self {
+                self.0.bind(resource.into(), access.into());
+                self
+            }
+
+            /// Binds `sampler` as the next entry of the pass's push data, by
+            /// its heap index.
+            pub fn bind_sampler(&mut self, sampler: SamplerId) -> &mut Self {
+                self.0.pass.bindings.push(Binding::Sampler(sampler));
+                self
+            }
+
+            /// Binds `constant` as the next entry of the pass's push data.
+            pub fn bind_constant(&mut self, constant: Constant) -> &mut Self {
+                self.0.pass.bindings.push(Binding::Constant(constant));
+                self
+            }
+        }
+    };
+}
+
 /// Generates the `queue` method, for kinds that may run on another queue,
 /// documented with which kinds of queue the pass may ask for.
 macro_rules! queue {
@@ -632,18 +714,22 @@ impl RasterPassBuilder<'_> {
 }
 
 builder! {
-    /// Builds a fullscreen pass: colour attachments, drawn to by the graph.
+    /// Builds a fullscreen pass: colour attachments, drawn to by the graph,
+    /// and the bindings its program reads.
     FullscreenPassBuilder
 }
 colour!(FullscreenPassBuilder);
+bindings!(FullscreenPassBuilder);
 for_each_mip!(FullscreenPassBuilder);
 
 builder! {
     /// Builds a compute pass: reads and writes through shaders, on the
-    /// graphics or compute queue.
+    /// graphics or compute queue, and the bindings of one the graph
+    /// dispatches.
     ComputePassBuilder
 }
 read_write!(ComputePassBuilder);
+bindings!(ComputePassBuilder);
 for_each_mip!(ComputePassBuilder);
 queue!(
     ComputePassBuilder,
@@ -918,6 +1004,57 @@ mod tests {
             bounds(Repeat::new(bloom, 1..=3, MipDirection::Up)),
             (Some(1), Some(4))
         );
+    }
+
+    /// Bindings keep their order, and a bound resource is a use too: a
+    /// write if its accesses write, and a read if not.
+    #[test]
+    fn bindings_keep_their_order_and_resources_become_uses() {
+        let (mut graph, depth, bloom, lights) = graph();
+        let output = graph.output();
+        let linear = graph.sampler(
+            "linear",
+            crate::SamplerSettings::new(
+                clockwork_rhi::Filter::Linear,
+                clockwork_rhi::AddressMode::ClampToEdge,
+            ),
+        );
+        graph
+            .fullscreen_pass("composite", "composite")
+            .bind(depth, Access::FragmentShaderSampledRead)
+            .bind_sampler(linear)
+            .bind(lights, Access::FragmentShaderRead)
+            .bind_constant(Constant::Float(0.5))
+            .colour(output, Attachment::Discard);
+        graph
+            .compute_pass("blur", ComputeRecorder::dispatch("blur"))
+            .bind(bloom.mip(0), Access::ComputeShaderSampledRead)
+            .bind(bloom.mip(1), Access::ComputeShaderWrite)
+            .bind_constant(Constant::Float4([1.0, 0.0, 0.0, 0.0]));
+
+        let composite = &graph.passes[0];
+        assert_eq!(
+            composite.bindings,
+            [
+                Binding::Use(0),
+                Binding::Sampler(linear),
+                Binding::Use(1),
+                Binding::Constant(Constant::Float(0.5)),
+            ]
+        );
+        let roles: Vec<_> = composite.uses.iter().map(|used| used.role).collect();
+        assert_eq!(
+            roles,
+            [
+                UseRole::Read,
+                UseRole::Read,
+                UseRole::Colour(Attachment::Discard)
+            ]
+        );
+        let blur = &graph.passes[1];
+        assert_eq!(blur.bindings[..2], [Binding::Use(0), Binding::Use(1)]);
+        assert_eq!(blur.uses[1].role, UseRole::Write);
+        assert_eq!(blur.uses[1].resource, ResourceUse::Texture(bloom.mip(1)));
     }
 
     /// A plain texture ID used as a resource is the whole texture.

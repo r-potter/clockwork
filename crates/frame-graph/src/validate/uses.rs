@@ -5,12 +5,35 @@
 
 use std::ops::Range;
 
-use clockwork_rhi::{Access, AccessSet, Layout, QueueKind, Subresource};
+use clockwork_rhi::{Access, AccessSet, Layout, MAX_PUSH_DATA_SIZE, QueueKind, Subresource};
 
 use super::{Checked, CheckedUse, TextureShape};
 use crate::error::Errors;
-use crate::pass::{PassDesc, Use, UseRole};
-use crate::{GraphDesc, RelativeMip, ResourceUse, TextureId};
+use crate::pass::{Binding, Constant, PassDesc, PassKind, Use, UseRole};
+use crate::{
+    ComputeRecorder, GraphDesc, RelativeMip, RepeatedUse, ResourceUse, TextureId, TextureUse,
+};
+
+/// The size, in bytes, of the push data `pass`'s bindings lay out, in order
+/// (design 0003, "Data structures and layout"): a texture view or a sampler
+/// is a 4-byte heap index, a buffer an 8-byte address aligned to 8, and a
+/// constant 4 bytes, or 16 aligned to 16 for a `float4`, as Slang aligns it.
+fn push_data_size(pass: &PassDesc) -> u32 {
+    pass.bindings.iter().fold(0, |offset, binding| {
+        let (size, alignment) = match binding {
+            Binding::Use(index) => match pass.uses[*index].resource {
+                ResourceUse::Buffer(_) => (8, 8),
+                ResourceUse::Texture(_) | ResourceUse::Repeated(_) => (4, 4),
+            },
+            Binding::Sampler(_)
+            | Binding::Constant(Constant::Float(_) | Constant::Int(_) | Constant::Uint(_)) => {
+                (4, 4)
+            }
+            Binding::Constant(Constant::Float4(_)) => (16, 16),
+        };
+        offset.next_multiple_of(alignment).saturating_add(size)
+    })
+}
 
 /// Reports every mistake in each pass's queue and uses, and returns each
 /// pass's uses that have none, for the checks after these. A texture whose
@@ -31,6 +54,7 @@ pub(super) fn check_uses(
                 errors,
             };
             check.queue();
+            check.bindings();
             if let Some(repeat) = pass.repeat {
                 let message = match desc.textures.get(repeat.texture.index()) {
                     Some(decl) => format!(
@@ -76,6 +100,78 @@ impl PassCheck<'_> {
     fn report(&mut self, message: &str) {
         self.errors
             .push(format!("pass \"{}\" {message}", self.pass.name));
+    }
+
+    /// Checks the pass's bindings: that the graph records the pass, since a
+    /// recorder sets its own push data, that each sampler is one the graph
+    /// has, that no resource is bound as indirect arguments, that they fit the RHI's push data, and that a compute pass the
+    /// graph dispatches binds every resource it uses, since its program can
+    /// reach nothing else.
+    fn bindings(&mut self) {
+        let pass = self.pass;
+        if let PassKind::Compute(ComputeRecorder::Recorder(recorder)) = &pass.kind
+            && !pass.bindings.is_empty()
+        {
+            self.report(&format!(
+                "has bindings, but the recorder \"{recorder}\" records it, which sets its own \
+                 push data"
+            ));
+        }
+        for binding in &pass.bindings {
+            match binding {
+                Binding::Sampler(sampler) if self.desc.samplers.get(sampler.index()).is_none() => {
+                    self.report(&format!(
+                        "binds sampler {}, which this graph doesn't have",
+                        sampler.0
+                    ));
+                }
+                // A bound resource is read by the pass's program, through a
+                // shader. The graph's own dispatch takes no arguments from
+                // a buffer, so a bound use read as indirect arguments would
+                // be ordered against the wrong stage.
+                Binding::Use(index) if pass.uses[*index].access.contains(Access::IndirectRead) => {
+                    if let Some(name) = self.resource_name(&pass.uses[*index].resource) {
+                        self.report(&format!(
+                            "binds \"{name}\" with IndirectRead, but its program reads it through \
+                             a shader"
+                        ));
+                    }
+                }
+                _ => {}
+            }
+        }
+        let size = push_data_size(pass);
+        if size > MAX_PUSH_DATA_SIZE {
+            self.report(&format!(
+                "binds {size} bytes of push data, but a pass has at most {MAX_PUSH_DATA_SIZE}"
+            ));
+        }
+        if let PassKind::Compute(ComputeRecorder::Dispatch(_)) = &pass.kind {
+            for (index, used) in pass.uses.iter().enumerate() {
+                let bound = pass.bindings.contains(&Binding::Use(index));
+                // A use of a resource the graph doesn't have is reported
+                // by the checks of each use.
+                if let (false, Some(name)) = (bound, self.resource_name(&used.resource)) {
+                    self.report(&format!(
+                        "uses \"{name}\" without binding it, but the graph dispatches it, so \
+                         its program can't reach it"
+                    ));
+                }
+            }
+        }
+    }
+
+    /// The name of the resource `resource` uses, or `None` if the graph
+    /// doesn't have it.
+    fn resource_name(&self, resource: &ResourceUse) -> Option<&str> {
+        let name = match resource {
+            ResourceUse::Texture(TextureUse { texture, .. })
+            | ResourceUse::Repeated(RepeatedUse { texture, .. }) => {
+                &self.desc.textures.get(texture.index())?.name
+            }
+            ResourceUse::Buffer(buffer) => &self.desc.buffers.get(buffer.index())?.name,
+        };
+        Some(name)
     }
 
     /// Checks that the pass's kind can run on the queue it asks for.
@@ -383,13 +479,13 @@ pub(super) fn describe_range(item: &str, range: &Range<u32>) -> String {
 mod tests {
     //! T0 tests of validating passes' queues and uses.
 
-    use clockwork_rhi::{Extent3d, Format, QueueKind};
+    use clockwork_rhi::{AddressMode, Extent3d, Filter, Format, QueueKind};
 
     use super::*;
     use crate::validate::test_support::messages;
     use crate::{
-        Attachment, BufferId, ComputeRecorder, ImportDesc, MipCount, MipDirection, TextureSize,
-        TransientTexture,
+        Attachment, BufferId, ComputeRecorder, ImportDesc, MipCount, MipDirection, SamplerId,
+        SamplerSettings, TextureSize, TransientTexture,
     };
 
     /// A graph with a one-mip texture "hdr", a four-mip texture "bloom", an
@@ -424,12 +520,12 @@ mod tests {
         graph
             .compute_pass("downsample", ComputeRecorder::dispatch("downsample"))
             .for_each_mip(bloom, MipDirection::Down, ..)
-            .read(bloom.previous_mip(), Access::ComputeShaderSampledRead)
-            .write(bloom.current_mip(), Access::ComputeShaderWrite);
+            .bind(bloom.previous_mip(), Access::ComputeShaderSampledRead)
+            .bind(bloom.current_mip(), Access::ComputeShaderWrite);
         graph
             .compute_pass("once", ComputeRecorder::dispatch("once"))
-            .read(hdr.previous_mip(), Access::ComputeShaderSampledRead)
-            .write(TextureId(9).current_mip(), Access::ComputeShaderWrite);
+            .bind(hdr.previous_mip(), Access::ComputeShaderSampledRead)
+            .bind(TextureId(9).current_mip(), Access::ComputeShaderWrite);
         graph
             .compute_pass("missing", ComputeRecorder::dispatch("missing"))
             .for_each_mip(TextureId(9), MipDirection::Down, ..);
@@ -444,6 +540,100 @@ mod tests {
                 "pass \"missing\" is repeated for each mip of texture 9, which this graph doesn't \
                  have",
             ]
+        );
+    }
+
+    /// Bindings are only for passes the graph records, name samplers the
+    /// graph has, aren't read as indirect arguments, and cover every resource a compute pass the graph
+    /// dispatches uses, while a fullscreen pass reads through its fragment
+    /// shader.
+    #[test]
+    fn bindings_must_suit_the_pass() {
+        let (mut graph, hdr, bloom, font, lights) = graph();
+        let output = graph.output();
+        let linear = graph.sampler(
+            "linear",
+            SamplerSettings::new(Filter::Linear, AddressMode::ClampToEdge),
+        );
+        graph
+            .transfer_pass("fill", "fill")
+            .write(hdr, Access::CopyWrite)
+            .write(lights, Access::CopyWrite);
+        graph
+            .fullscreen_pass("composite", "composite")
+            .bind(hdr, Access::FragmentShaderSampledRead)
+            .bind(font, Access::FragmentShaderSampledRead)
+            .bind_sampler(linear)
+            .bind(lights, Access::FragmentShaderRead)
+            .colour(output, Attachment::Discard);
+        graph
+            .compute_pass("recorded", ComputeRecorder::recorder("recorded"))
+            .bind(lights, Access::ComputeShaderRead);
+        graph
+            .compute_pass("dispatched", ComputeRecorder::dispatch("dispatched"))
+            .bind(bloom.mip(0), Access::ComputeShaderWrite)
+            .bind_sampler(SamplerId(3))
+            .read(lights, Access::ComputeShaderRead);
+        graph
+            .compute_pass("indirect", ComputeRecorder::dispatch("indirect"))
+            .bind(lights, Access::IndirectRead | Access::ComputeShaderRead);
+        graph
+            .fullscreen_pass("wrong stage", "wrong stage")
+            .bind(hdr, Access::ComputeShaderSampledRead)
+            .colour(output, Attachment::Discard);
+
+        assert_eq!(
+            messages(&graph),
+            [
+                "pass \"recorded\" has bindings, but the recorder \"recorded\" records it, which \
+                 sets its own push data",
+                "pass \"dispatched\" binds sampler 3, which this graph doesn't have",
+                "pass \"dispatched\" uses \"lights\" without binding it, but the graph \
+                 dispatches it, so its program can't reach it",
+                "pass \"indirect\" binds \"lights\" with IndirectRead, but its program reads it \
+                 through a shader",
+                "pass \"wrong stage\" is a fullscreen pass, so it can't use \"hdr\" with \
+                 ComputeShaderSampledRead",
+            ]
+        );
+    }
+
+    /// Push data is laid out in binding order, with a buffer's address
+    /// aligned to 8 and a `float4` to 16, and may fill the RHI's 128 bytes
+    /// but not pass them.
+    #[test]
+    fn bindings_must_fit_the_push_data() {
+        let (mut graph, _, _, font, lights) = graph();
+        let output = graph.output();
+        let linear = graph.sampler(
+            "linear",
+            SamplerSettings::new(Filter::Linear, AddressMode::ClampToEdge),
+        );
+        graph
+            .transfer_pass("fill", "fill")
+            .write(lights, Access::CopyWrite);
+        for (name, extra) in [("fits", false), ("overflows", true)] {
+            let mut pass = graph.fullscreen_pass(name, name);
+            // Bytes 0 to 4, then 16 to 32 after padding, then 32 to 36, then
+            // 40 to 48 after padding. Without either padding, the passes
+            // come to 4 or 12 bytes less, and neither overflows.
+            pass.bind(font, Access::FragmentShaderSampledRead)
+                .bind_constant(Constant::Float4([0.0; 4]))
+                .bind_sampler(linear)
+                .bind(lights, Access::FragmentShaderRead);
+            // 20 more of 4 bytes each fill the 128.
+            for _ in 0..20 {
+                pass.bind_sampler(linear);
+            }
+            if extra {
+                pass.bind_constant(Constant::Uint(1));
+            }
+            pass.colour(output, Attachment::Discard);
+        }
+
+        assert_eq!(
+            messages(&graph),
+            ["pass \"overflows\" binds 132 bytes of push data, but a pass has at most 128"]
         );
     }
 

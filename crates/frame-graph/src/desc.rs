@@ -403,6 +403,7 @@ impl GraphDesc {
             uses: Vec::new(),
             side_effects: false,
             repeat: None,
+            bindings: Vec::new(),
         });
         let pass = self.passes.last_mut().expect("a pass was just pushed");
         (id, pass)
