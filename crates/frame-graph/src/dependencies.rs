@@ -49,6 +49,12 @@ pub(crate) struct Dependencies {
     /// and once [`reduce`](Self::reduce)d, only those between kept passes
     /// that no path implies.
     pub(crate) on: Vec<Vec<Dependency>>,
+    /// For each texture, by its index, the passes whose writes of any part
+    /// of it are still visible when the frame ends, in the written order.
+    pub(crate) last_texture_writers: Vec<Vec<usize>>,
+    /// For each buffer, by its index, the passes whose writes of it are
+    /// still visible when the frame ends, in the written order.
+    pub(crate) last_buffer_writers: Vec<Vec<usize>>,
 }
 
 /// The dependency graph of `passes`, the expanded passes of `desc`, which
@@ -105,7 +111,24 @@ pub(crate) fn dependencies(desc: &GraphDesc, passes: &[ExpandedPass]) -> Depende
             .map(|(on, hazards)| Dependency { on, hazards });
         found.push(on.collect());
     }
-    Dependencies { on: found }
+    let last_texture_writers = textures
+        .iter()
+        .map(|grid| {
+            let mut writers: Vec<_> = grid
+                .cells
+                .iter()
+                .flat_map(|cell| cell.writers.iter().copied())
+                .collect();
+            writers.sort_unstable();
+            writers.dedup();
+            writers
+        })
+        .collect();
+    Dependencies {
+        on: found,
+        last_texture_writers,
+        last_buffer_writers: buffers.iter().map(|cell| cell.writers.clone()).collect(),
+    }
 }
 
 /// Where a subresource's state is kept.
@@ -712,6 +735,38 @@ mod tests {
         };
         let chain: Vec<_> = (1..70).map(|pass| (pass - 1, pass, both)).collect();
         assert_eq!(edges(&graph), chain);
+    }
+
+    /// A resource ends the frame with the writes still visible: the last
+    /// that replaced each part's contents, or whose pass read them, and
+    /// every write after it, which may have covered only part of it.
+    #[test]
+    fn the_writes_still_visible_are_kept() {
+        let (mut graph, hdr, bloom, lights) = graph();
+        graph
+            .transfer_pass("fill", "fill")
+            .write(bloom, Access::CopyWrite)
+            .write(lights, Access::CopyWrite);
+        graph
+            .transfer_pass("mip 1", "mip 1")
+            .write(bloom.mip(1), Access::CopyWrite);
+        graph
+            .compute_pass("update", ComputeRecorder::recorder("update"))
+            .read(lights, Access::ComputeShaderRead)
+            .write(lights, Access::ComputeShaderWrite);
+        graph
+            .raster_pass("clear", "clear")
+            .colour(hdr, Attachment::Clear([0.0; 4]));
+        graph
+            .transfer_pass("overlay", "overlay")
+            .write(hdr, Access::CopyWrite);
+        let passes = expand(&graph.passes, &vec![None; 5]);
+        let dependencies = dependencies(&graph, &passes);
+        assert_eq!(
+            dependencies.last_texture_writers,
+            [Vec::new(), vec![3, 4], vec![0, 1]]
+        );
+        assert_eq!(dependencies.last_buffer_writers, [vec![2]]);
     }
 
     /// Each repetition of a repeated pass reads the mip the one before it

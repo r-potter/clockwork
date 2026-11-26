@@ -12,3 +12,4 @@ workspace = true
 # the RHI.
 [dependencies]
 clockwork-rhi.workspace = true
+tracing.workspace = true
