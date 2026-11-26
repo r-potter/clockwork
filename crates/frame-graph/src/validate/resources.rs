@@ -13,7 +13,8 @@ use crate::{CompileInputs, GraphDesc, MipCount, OUTPUT, TextureSize, TransientTe
 /// Reports each name used by more than one texture, buffer, sampler or
 /// pass. Each kind of item has names of its own, so a texture and a buffer
 /// may share one. A texture named after the output is reported as taking its
-/// reserved name.
+/// reserved name, and a pass named as a repetition of a repeated pass would
+/// be is reported as taking that repetition's name.
 pub(super) fn check_names(desc: &GraphDesc, errors: &mut Errors) {
     let textures = desc.textures.iter().map(|texture| texture.name.as_str());
     let buffers = desc.buffers.iter().map(|buffer| buffer.name.as_str());
@@ -23,6 +24,39 @@ pub(super) fn check_names(desc: &GraphDesc, errors: &mut Errors) {
     report_duplicates("buffer", buffers, errors);
     report_duplicates("sampler", samplers, errors);
     report_duplicates("pass", passes, errors);
+    report_repetition_names(desc, errors);
+}
+
+/// Reports each pass named as a repetition of a repeated pass is, "{name}
+/// (mip {m})", for any mip, so the passes stay uniquely named once they're
+/// expanded. Any mip is reserved, not only those the range makes, so the
+/// rule doesn't depend on the chain's size.
+fn report_repetition_names(desc: &GraphDesc, errors: &mut Errors) {
+    let repeated: HashSet<&str> = desc
+        .passes
+        .iter()
+        .filter(|pass| pass.repeat.is_some())
+        .map(|pass| pass.name.as_str())
+        .collect();
+    if repeated.is_empty() {
+        return;
+    }
+    for pass in &desc.passes {
+        let Some((source, mip)) = pass
+            .name
+            .strip_suffix(')')
+            .and_then(|name| name.rsplit_once(" (mip "))
+        else {
+            continue;
+        };
+        let canonical = mip.parse::<u32>().is_ok_and(|m| m.to_string() == mip);
+        if canonical && repeated.contains(source) {
+            errors.push(format!(
+                "a pass is named \"{}\", the name of a repetition of \"{source}\"",
+                pass.name
+            ));
+        }
+    }
 }
 
 /// Reports, once each, the names that more than one of `names` has, in the
@@ -291,7 +325,7 @@ mod tests {
     use super::*;
     use crate::validate::test_support::{finished, inputs, messages};
     use crate::validate::validate;
-    use crate::{ImportDesc, SamplerSettings, TextureId};
+    use crate::{ComputeRecorder, ImportDesc, MipDirection, SamplerSettings, TextureId};
 
     /// A texture of `size`, with one mip and one layer.
     fn sized(size: TextureSize) -> TransientTexture {
@@ -358,6 +392,47 @@ mod tests {
                 "more than one buffer is named \"lights\"",
                 "more than one sampler is named \"linear\"",
                 "more than one pass is named \"scene\"",
+            ]
+        );
+    }
+
+    /// A pass named as a repetition of a repeated pass would be is
+    /// reported, for any mip, whether or not the range makes it, but a name
+    /// that only looks like one, or a repetition's name of a pass that
+    /// isn't repeated, is not.
+    #[test]
+    fn a_repetitions_name_is_reserved() {
+        let mut graph = GraphDesc::new("names");
+        let chain = TransientTexture {
+            mips: MipCount::Count(4),
+            ..fixed(64, 64, 1)
+        };
+        let bloom = graph.transient_texture("bloom", chain);
+        graph
+            .compute_pass("bloom", ComputeRecorder::dispatch("bloom"))
+            .for_each_mip(bloom, MipDirection::Down, ..)
+            .write(bloom.current_mip(), Access::ComputeShaderWrite);
+        for name in [
+            "bloom (mip 2)",
+            "bloom (mip 30)",
+            "bloom (mip 02)",
+            "bloom (mip x)",
+            "bloom(mip 2)",
+            "scene (mip 2)",
+        ] {
+            graph.transfer_pass(name, name);
+        }
+
+        let messages = messages(&graph);
+        let names: Vec<_> = messages
+            .iter()
+            .filter(|message| message.starts_with("a pass is named"))
+            .collect();
+        assert_eq!(
+            names,
+            [
+                "a pass is named \"bloom (mip 2)\", the name of a repetition of \"bloom\"",
+                "a pass is named \"bloom (mip 30)\", the name of a repetition of \"bloom\"",
             ]
         );
     }
