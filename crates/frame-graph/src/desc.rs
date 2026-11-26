@@ -6,7 +6,9 @@
 //! compiling reports every mistake in it at once, so a graph built in Rust is
 //! checked the same way as one loaded from a technique file.
 
-use clockwork_rhi::{AccessSet, Extent3d, Format, QueueKind, TextureDimension};
+use clockwork_rhi::{
+    AccessSet, AddressMode, Extent3d, Filter, Format, QueueKind, TextureDimension,
+};
 
 use crate::pass::{
     ComputePassBuilder, ComputeRecorder, FullscreenPassBuilder, PassDesc, PassId, PassKind,
@@ -43,6 +45,55 @@ impl BufferId {
     pub(crate) const fn index(self) -> usize {
         self.0 as usize
     }
+}
+
+/// A sampler in a [`GraphDesc`]: an index into its samplers.
+///
+/// An ID belongs to the description that made it, as a [`TextureId`] does.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct SamplerId(pub(crate) u32);
+
+impl SamplerId {
+    /// The index of the sampler in its description's samplers.
+    pub(crate) const fn index(self) -> usize {
+        self.0 as usize
+    }
+}
+
+/// How a sampler filters and addresses a texture: the RHI's sampler
+/// description, without the label, which is the sampler's name.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct SamplerSettings {
+    /// Filtering when the texture is magnified.
+    pub mag_filter: Filter,
+    /// Filtering when the texture is minified.
+    pub min_filter: Filter,
+    /// Filtering between mips.
+    pub mip_filter: Filter,
+    /// What coordinates outside 0 to 1 sample, along u, v and w.
+    pub address_modes: [AddressMode; 3],
+}
+
+impl SamplerSettings {
+    /// A sampler that filters with `filter` everywhere, and addresses every
+    /// coordinate with `address`.
+    pub const fn new(filter: Filter, address: AddressMode) -> Self {
+        Self {
+            mag_filter: filter,
+            min_filter: filter,
+            mip_filter: filter,
+            address_modes: [address; 3],
+        }
+    }
+}
+
+/// A sampler's name and settings.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct SamplerDecl {
+    /// Its name, unique among the description's samplers.
+    pub(crate) name: String,
+    /// How it samples.
+    pub(crate) settings: SamplerSettings,
 }
 
 /// A transient or persistent texture's description. Its usage isn't given:
@@ -175,6 +226,8 @@ pub struct GraphDesc {
     pub(crate) textures: Vec<TextureDecl>,
     /// Its buffers, indexed by [`BufferId`].
     pub(crate) buffers: Vec<BufferDecl>,
+    /// Its samplers, indexed by [`SamplerId`].
+    pub(crate) samplers: Vec<SamplerDecl>,
     /// Its passes, in the order they're written, indexed by [`PassId`].
     pub(crate) passes: Vec<PassDesc>,
 }
@@ -189,6 +242,7 @@ impl GraphDesc {
                 kind: TextureKind::Output,
             }],
             buffers: Vec::new(),
+            samplers: Vec::new(),
             passes: Vec::new(),
         }
     }
@@ -236,6 +290,16 @@ impl GraphDesc {
     /// A buffer the caller owns, and gives each frame.
     pub fn import_buffer(&mut self, name: &str, import: ImportDesc) -> BufferId {
         self.add_buffer(name, BufferKind::Imported(import))
+    }
+
+    /// A sampler the graph creates, which the graph's own passes bind.
+    pub fn sampler(&mut self, name: &str, settings: SamplerSettings) -> SamplerId {
+        let id = SamplerId(next_index(self.samplers.len()));
+        self.samplers.push(SamplerDecl {
+            name: name.to_owned(),
+            settings,
+        });
+        id
     }
 
     /// A raster pass, recorded by the recorder registered as `recorder`.
@@ -288,6 +352,15 @@ impl GraphDesc {
     /// Panics if `buffer` isn't one of this description's.
     pub fn buffer_name(&self, buffer: BufferId) -> &str {
         &self.buffers[buffer.index()].name
+    }
+
+    /// The name of `sampler`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `sampler` isn't one of this description's.
+    pub fn sampler_name(&self, sampler: SamplerId) -> &str {
+        &self.samplers[sampler.index()].name
     }
 
     /// The name of `pass`.
@@ -469,6 +542,29 @@ mod tests {
                 .iter()
                 .all(|pass| pass.queue == QueueKind::Graphics && !pass.side_effects)
         );
+    }
+
+    /// Samplers get IDs in the order they're added, and keep their names and
+    /// settings.
+    #[test]
+    fn samplers_are_numbered_in_the_order_they_are_added() {
+        let mut graph = GraphDesc::new("samplers");
+        let linear = SamplerSettings::new(Filter::Linear, AddressMode::ClampToEdge);
+        let nearest = SamplerSettings {
+            mip_filter: Filter::Linear,
+            ..SamplerSettings::new(Filter::Nearest, AddressMode::Repeat)
+        };
+        let first = graph.sampler("linear", linear);
+        let second = graph.sampler("nearest", nearest);
+
+        assert_eq!((first, second), (SamplerId(0), SamplerId(1)));
+        assert_eq!(graph.sampler_name(second), "nearest");
+        assert_eq!(graph.samplers[0].settings, linear);
+        assert_eq!(
+            graph.samplers[1].settings.address_modes,
+            [AddressMode::Repeat; 3]
+        );
+        assert_eq!(graph.samplers[1].settings.mip_filter, Filter::Linear);
     }
 
     /// Descriptions are plain data, shared freely between threads.
