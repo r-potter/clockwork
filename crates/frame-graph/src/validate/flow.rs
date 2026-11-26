@@ -1,51 +1,56 @@
 //! Validation of the order of reads and writes (design 0003, "Compiling",
-//! step 2): every read of a transient resource follows, in the written
-//! order, a pass that writes what it reads, and some pass writes the
-//! output.
+//! step 2): on the expanded passes, every read of a transient resource
+//! follows, in the written order, a pass that writes what it reads, so a
+//! repetition's read of the previous mip follows the repetition that wrote
+//! it, and some pass writes the output.
 
 use std::ops::Range;
 
 use clockwork_rhi::Subresource;
 
 use super::uses::describe_range;
-use super::{Checked, CheckedUse, TextureShape};
+use super::{Checked, CheckedUse, Found, TextureShape};
 use crate::desc::{BufferKind, TextureKind};
 use crate::error::Errors;
+use crate::expand::ExpandedPass;
 use crate::pass::{Attachment, UseRole};
 use crate::{GraphDesc, ResourceUse};
 
-/// Reports each read of a transient resource's contents that no earlier
-/// pass wrote, and a graph that never writes its output. `checked` holds
-/// each pass's uses that passed the checks of uses on their own, and only
-/// those reads are checked here. Every write counts, even one with a
-/// mistake of its own, since that's reported already, and what it writes
-/// shouldn't be reported again as unwritten.
+/// Records in `found` each read of a transient resource's contents that no
+/// earlier pass of `passes`, expanded, wrote. `checked` holds each expanded
+/// pass's uses that passed the checks before these, and only those reads
+/// are checked here. Every write counts, even one with a mistake of its
+/// own, since that's reported already, and what it writes shouldn't be
+/// reported again as unwritten.
 pub(super) fn check_flow(
     desc: &GraphDesc,
     shapes: &[Option<TextureShape>],
+    passes: &[ExpandedPass],
     checked: &[Vec<CheckedUse>],
-    errors: &mut Errors,
+    found: &mut Found,
 ) {
     let mut written = Written::new(desc, shapes);
-    for (pass, uses) in desc.passes.iter().zip(checked) {
+    for (index, (expanded, uses)) in passes.iter().zip(checked).enumerate() {
         // A pass reads what earlier passes wrote, so its own writes count
-        // only from the next pass on. Which mips a repeated pass reads
-        // differs from one repetition to the next, so its reads are checked
-        // on the expanded passes, one per repetition (design 0003,
-        // "Compiling", step 2).
-        let reads = uses.iter().filter(|_| pass.repeat.is_none());
-        for used in reads.filter(|used| reads_contents(used)) {
+        // only from the next pass on.
+        for used in uses.iter().filter(|used| reads_contents(used)) {
             if let Some(name) = written.unwritten(desc, &used.resource) {
-                errors.push(format!(
-                    "pass \"{}\" reads {name}, which no earlier pass writes",
-                    pass.name
-                ));
+                found.push(index, format!("reads {name}, which no earlier pass writes"));
             }
         }
-        for used in pass.uses.iter().filter(|used| used.access.is_write()) {
+        for used in expanded
+            .pass
+            .uses
+            .iter()
+            .filter(|used| used.access.is_write())
+        {
             written.mark(&used.resource);
         }
     }
+}
+
+/// Reports a graph that never writes its output.
+pub(super) fn check_output(desc: &GraphDesc, errors: &mut Errors) {
     let output = desc.output();
     let output_written = desc.passes.iter().flat_map(|pass| &pass.uses).any(|used| {
         used.access.is_write()
@@ -152,11 +157,11 @@ impl Written {
     fn mark(&mut self, resource: &ResourceUse) {
         let (texture, part) = match resource {
             ResourceUse::Texture(part) => (part.texture, part.subresource.clone()),
-            // A relative mip is only in a pass repeated for each mip, which
-            // isn't compiled yet, or one that isn't, which is a mistake.
-            // Either is reported already, so the write counts as writing
-            // every mip it could reach, rather than reads of them being
-            // reported again as unwritten.
+            // Expanding a pass resolves its relative mips, so one is left
+            // only in a pass that isn't repeated, or whose repeat has a
+            // mistake. Either is reported already, so the write counts as
+            // writing every mip it could reach, rather than reads of them
+            // being reported again as unwritten.
             ResourceUse::Repeated(part) => (
                 part.texture,
                 Subresource {
@@ -332,28 +337,46 @@ mod tests {
         );
     }
 
-    /// A write of a mip relative to a repetition, which is reported until
-    /// repeated passes are compiled, counts as writing every mip, so later
-    /// reads of the chain aren't reported as well.
+    /// Each repetition writes only its own mip, and reads the previous one
+    /// after the repetition before wrote it, so a read of a mip past the
+    /// range is reported.
     #[test]
-    fn a_relative_write_counts_as_writing_every_mip() {
+    fn each_repetition_writes_its_own_mip() {
         let (mut graph, Resources { bloom, .. }) = graph();
         graph
             .transfer_pass("fill", "fill")
             .write(bloom.mip(0), Access::CopyWrite);
         graph
             .compute_pass("downsample", ComputeRecorder::dispatch("downsample"))
-            .for_each_mip(bloom, MipDirection::Down, ..)
+            .for_each_mip(bloom, MipDirection::Down, ..3)
+            .bind(bloom.previous_mip(), Access::ComputeShaderSampledRead)
+            .bind(bloom.current_mip(), Access::ComputeShaderWrite);
+        graph
+            .compute_pass("composite", ComputeRecorder::dispatch("composite"))
+            .bind(bloom.mip(2), Access::ComputeShaderSampledRead)
+            .bind(bloom.mip(3), Access::ComputeShaderSampledRead);
+        assert_eq!(
+            messages(&graph),
+            ["pass \"composite\" reads mip 3 of \"bloom\", which no earlier pass writes"]
+        );
+    }
+
+    /// A relative write in a pass whose repeat has a mistake, which is
+    /// reported, counts as writing every mip, so later reads of the chain
+    /// aren't reported as well.
+    #[test]
+    fn a_mistaken_repeats_write_counts_as_writing_every_mip() {
+        let (mut graph, Resources { bloom, .. }) = graph();
+        graph
+            .compute_pass("downsample", ComputeRecorder::dispatch("downsample"))
+            .for_each_mip(bloom, MipDirection::Down, 9..)
             .bind(bloom.current_mip(), Access::ComputeShaderWrite);
         graph
             .compute_pass("composite", ComputeRecorder::dispatch("composite"))
             .bind(bloom, Access::ComputeShaderSampledRead);
         assert_eq!(
             messages(&graph),
-            [
-                "pass \"downsample\" is repeated for each mip of \"bloom\", which compiling \
-                 doesn't support yet"
-            ]
+            ["pass \"downsample\" is repeated from mip 9 of \"bloom\", whose last mip is 3"]
         );
     }
 
