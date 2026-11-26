@@ -104,9 +104,10 @@ impl PassCheck<'_> {
 
     /// Checks the pass's bindings: that the graph records the pass, since a
     /// recorder sets its own push data, that each sampler is one the graph
-    /// has, that no resource is bound as indirect arguments, that they fit the RHI's push data, and that a compute pass the
-    /// graph dispatches binds every resource it uses, since its program can
-    /// reach nothing else.
+    /// has, that no resource is bound as indirect arguments, that they fit
+    /// the RHI's push data, and that a compute pass the graph dispatches
+    /// binds every resource it uses, since its program can reach nothing
+    /// else.
     fn bindings(&mut self) {
         let pass = self.pass;
         if let PassKind::Compute(ComputeRecorder::Recorder(recorder)) = &pass.kind
