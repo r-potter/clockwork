@@ -1,8 +1,8 @@
 //! Expansion, the second step of compiling (design 0003, "Compiling"): each
 //! pass repeated for each mip of a texture becomes a pass per mip, named
 //! with its mip, whose uses name that mip and the one the repetition before
-//! made in place of the relative ones. The steps after it see only plain passes, so a mip
-//! chain's barriers come from the usual rules.
+//! made in place of the relative ones. The steps after it see only plain
+//! passes, so a mip chain's barriers come from the usual rules.
 
 use std::ops::Range;
 
@@ -19,9 +19,10 @@ pub(crate) struct ExpandedPass {
     pub(crate) source: PassId,
     /// The mip it makes, if it's a repetition.
     pub(crate) mip: Option<u32>,
-    /// The pass, with no repeat and no relative mips. A repetition is
-    /// named with its mip, and its uses and bindings keep their order, so a
-    /// binding still names its use by index.
+    /// The pass, with no repeat and no relative mips, unless its repeat has
+    /// a mistake, which validation reports. A repetition is named with its
+    /// mip, and its uses and bindings keep their order, so a binding still
+    /// names its use by index.
     pub(crate) pass: PassDesc,
 }
 
@@ -30,21 +31,20 @@ pub(crate) struct ExpandedPass {
 /// of its range to the highest, each reading the mip numbered one less, and
 /// going up, from the highest-numbered to the lowest, each reading the mip
 /// numbered one more. `mips` holds, for each repeated pass, the mips its
-/// repetitions make, as validation resolved them.
+/// repetitions make, as validation resolved them, or `None` if its repeat
+/// has a mistake, or a relative mip names another texture, which
+/// validation reports. That pass is kept as written, so the checks after
+/// validation's first step still see its other uses.
 ///
 /// # Panics
 ///
-/// Panics if a repeated pass has no range in `mips`, or uses a previous mip
-/// its range doesn't give it, which validation reports.
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "compiling, in a later pull request, calls it")
-)]
+/// Panics if a pass with a range uses a previous mip the range doesn't
+/// give it, which validation reports.
 pub(crate) fn expand(passes: &[PassDesc], mips: &[Option<Range<u32>>]) -> Vec<ExpandedPass> {
     let mut expanded = Vec::new();
     for (index, pass) in passes.iter().enumerate() {
         let source = PassId(u32::try_from(index).expect("pass IDs fit a u32"));
-        let Some(repeat) = pass.repeat else {
+        let (Some(repeat), Some(range)) = (pass.repeat, mips[index].clone()) else {
             expanded.push(ExpandedPass {
                 source,
                 mip: None,
@@ -52,9 +52,6 @@ pub(crate) fn expand(passes: &[PassDesc], mips: &[Option<Range<u32>>]) -> Vec<Ex
             });
             continue;
         };
-        let range = mips[index]
-            .clone()
-            .expect("validation resolves every repeated pass's range");
         for step in 0..range.len() {
             let step = u32::try_from(step).expect("a chain has at most 32 mips");
             let (mip, previous) = match repeat.direction {
@@ -257,6 +254,27 @@ mod tests {
             );
             assert_eq!(pass.bindings, [Binding::Use(0)]);
         }
+    }
+
+    /// A repeated pass with no range, since its repeat has a mistake, is
+    /// kept as written, as one pass.
+    #[test]
+    fn a_pass_with_no_range_is_kept_as_written() {
+        let (mut graph, bloom) = graph();
+        graph
+            .compute_pass("downsample", ComputeRecorder::dispatch("downsample"))
+            .for_each_mip(bloom, MipDirection::Down, 9..)
+            .bind(bloom.current_mip(), Access::ComputeShaderWrite);
+
+        let expanded = expand(&graph.passes, &[None]);
+        assert_eq!(
+            expanded,
+            [ExpandedPass {
+                source: PassId(0),
+                mip: None,
+                pass: graph.passes[0].clone(),
+            }]
+        );
     }
 
     /// A relative use keeps its layers, and a range that starts partway

@@ -173,13 +173,12 @@ mod tests {
         pass.bind(texture.current_mip(), Access::ComputeShaderWrite);
     }
 
-    /// The message a valid repeated pass `name` reports until compiling
-    /// supports it.
-    fn unsupported(name: &str) -> String {
-        format!(
-            "pass \"{name}\" is repeated for each mip of \"bloom\", which compiling doesn't \
-             support yet"
-        )
+    /// Adds a pass that writes every mip of `texture`, so repetitions that
+    /// read the previous mip read what an earlier pass wrote.
+    fn fill(graph: &mut GraphDesc, texture: TextureId) {
+        graph
+            .transfer_pass("fill", "fill")
+            .write(texture, Access::CopyWrite);
     }
 
     /// Open bounds go as far as the chain allows, in either direction, and
@@ -187,6 +186,7 @@ mod tests {
     #[test]
     fn ranges_within_the_chain_are_valid() {
         let (mut graph, bloom) = graph();
+        fill(&mut graph, bloom);
         repeated(&mut graph, "down", bloom, MipDirection::Down, .., true);
         repeated(&mut graph, "up", bloom, MipDirection::Up, .., true);
         repeated(&mut graph, "middle", bloom, MipDirection::Down, 2..=3, true);
@@ -197,16 +197,7 @@ mod tests {
             .for_each_mip(bloom, MipDirection::Down, ..)
             .bind(bloom.previous_mip(), Access::FragmentShaderSampledRead)
             .colour(bloom.current_mip().attachment(0), Attachment::Discard);
-        assert_eq!(
-            messages(&graph),
-            [
-                unsupported("down"),
-                unsupported("up"),
-                unsupported("middle"),
-                unsupported("low"),
-                unsupported("blur"),
-            ]
-        );
+        assert_eq!(messages(&graph), Vec::<String>::new());
     }
 
     /// A range must start within the chain, make at least one mip, and end
@@ -265,6 +256,7 @@ mod tests {
             ..TransientTexture::new(Format::Rgba16Float, TextureSize::Output { scale: 1.0 })
         };
         let bloom = graph.transient_texture("bloom", chain);
+        fill(&mut graph, bloom);
         // The test inputs' 1920 × 1080 output makes a chain of 11 mips.
         repeated(&mut graph, "down", bloom, MipDirection::Down, 1..=20, true);
         repeated(&mut graph, "up", bloom, MipDirection::Up, ..=20, true);
@@ -273,13 +265,9 @@ mod tests {
         assert_eq!(
             messages(&graph),
             [
-                unsupported("down"),
-                unsupported("up"),
                 "pass \"empty\" is repeated for mips 10..10 of \"bloom\", which is none, since \
-                 its end is clamped to its chain, which the output's size makes 11 mips"
-                    .to_owned(),
-                "pass \"past\" is repeated from mip 12 of \"bloom\", whose last mip is 10"
-                    .to_owned(),
+                 its end is clamped to its chain, which the output's size makes 11 mips",
+                "pass \"past\" is repeated from mip 12 of \"bloom\", whose last mip is 10",
             ]
         );
     }
@@ -331,13 +319,9 @@ mod tests {
             messages(&graph),
             [
                 "pass \"from top\" uses the previous mip of \"bloom\", but its first repetition \
-                 makes mip 0, which has none above it"
-                    .to_owned(),
+                 makes mip 0, which has none above it",
                 "pass \"from bottom\" uses the previous mip of \"bloom\", but its first \
-                 repetition makes mip 3, the last, which has none below it"
-                    .to_owned(),
-                unsupported("clear down"),
-                unsupported("clear up"),
+                 repetition makes mip 3, the last, which has none below it",
             ]
         );
     }

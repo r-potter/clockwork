@@ -1,87 +1,113 @@
 //! Validation of render passes' attachments (design 0003, "Compiling", steps
 //! 1 and 2): that each raster and fullscreen pass renders to something, with
 //! no more attachments than a render pass has, in formats it can render to,
-//! each a different mip or layer, all the same size.
+//! and, on the expanded passes, each a different mip or layer, all the same
+//! size.
 
 use clockwork_rhi::{MAX_COLOUR_ATTACHMENTS, TextureDimension};
 
 use super::uses::overlap;
-use super::{Checked, CheckedUse, TextureShape};
+use super::{Checked, CheckedUse, PassUses, TextureShape};
 use crate::GraphDesc;
 use crate::error::Errors;
 use crate::pass::{PassDesc, PassKind, UseRole};
 
-/// Reports every mistake in each raster and fullscreen pass's
-/// attachments. `checked` holds each pass's uses that passed the checks of
-/// uses on their own, and only those are checked here.
+/// Reports every mistake in each raster and fullscreen pass's attachments
+/// that doesn't depend on which mips they are: how many there are, and
+/// whether their textures can be rendered to. `checked` holds what the
+/// checks of uses on their own found of each pass, and only uses that
+/// passed are checked here.
 pub(super) fn check_attachments(
     desc: &GraphDesc,
     shapes: &[Option<TextureShape>],
-    checked: &[Vec<CheckedUse>],
+    checked: &[PassUses],
     errors: &mut Errors,
 ) {
-    for (pass, uses) in desc.passes.iter().zip(checked) {
-        if !matches!(
-            pass.kind,
-            PassKind::Raster { .. } | PassKind::Fullscreen { .. }
-        ) {
+    for (pass, checked) in desc.passes.iter().zip(checked) {
+        if !renders(pass) {
             continue;
         }
         let mut check = AttachmentCheck {
             desc,
             shapes,
             pass,
-            errors,
+            report: |message: String| errors.push(format!("pass \"{}\" {message}", pass.name)),
         };
         check.counts();
-        let attachments: Vec<_> = uses
-            .iter()
-            .filter_map(|used| match (&used.resource, used.role) {
-                (Checked::Texture(texture, subresource), UseRole::Colour(_)) => {
-                    Some((texture.index(), subresource, false))
-                }
-                (Checked::Texture(texture, subresource), UseRole::Depth(_)) => {
-                    Some((texture.index(), subresource, true))
-                }
-                _ => None,
-            })
-            .collect();
-        for &(texture, _, depth) in &attachments {
+        let uses: Vec<_> = checked.uses.iter().flatten().cloned().collect();
+        for (texture, _, depth) in attachments(&uses) {
             check.format(texture, depth);
         }
-        // Which mips a repeated pass's attachments are differs from one
-        // repetition to the next, so whether they're distinct and the same
-        // size is checked on the expanded passes, one per repetition
-        // (design 0003, "Compiling", step 2).
-        if pass.repeat.is_none() {
-            check.distinct(&attachments);
-            check.sizes(&attachments);
-        }
     }
+}
+
+/// Checks that an expanded pass's attachments, among its `uses` that passed
+/// the checks before these, are each a different mip or layer, and the same
+/// size, calling `report` with each mistake, which follows the pass's name.
+pub(super) fn check_together(
+    desc: &GraphDesc,
+    shapes: &[Option<TextureShape>],
+    pass: &PassDesc,
+    uses: &[CheckedUse],
+    report: impl FnMut(String),
+) {
+    if !renders(pass) {
+        return;
+    }
+    let mut check = AttachmentCheck {
+        desc,
+        shapes,
+        pass,
+        report,
+    };
+    let attachments = attachments(uses);
+    check.distinct(&attachments);
+    check.sizes(&attachments);
+}
+
+/// Whether `pass` is a render pass, which has attachments.
+fn renders(pass: &PassDesc) -> bool {
+    matches!(
+        pass.kind,
+        PassKind::Raster { .. } | PassKind::Fullscreen { .. }
+    )
+}
+
+/// The attachments among `uses`.
+fn attachments(uses: &[CheckedUse]) -> Vec<AttachmentUse<'_>> {
+    uses.iter()
+        .filter_map(|used| match (&used.resource, used.role) {
+            (Checked::Texture(texture, subresource), UseRole::Colour(_)) => {
+                Some((texture.index(), subresource, false))
+            }
+            (Checked::Texture(texture, subresource), UseRole::Depth(_)) => {
+                Some((texture.index(), subresource, true))
+            }
+            _ => None,
+        })
+        .collect()
 }
 
 /// An attachment that passed the checks of uses: its texture's index, its
 /// mip and layer, and whether it's the depth attachment.
 type AttachmentUse<'a> = (usize, &'a clockwork_rhi::Subresource, bool);
 
-/// Checks one pass's attachments, reporting each mistake with the pass's
-/// name.
-struct AttachmentCheck<'a> {
+/// Checks one pass's attachments, reporting each mistake with `report`.
+struct AttachmentCheck<'a, R> {
     /// The description the pass is in.
     desc: &'a GraphDesc,
     /// Each texture's shape, where it's known.
     shapes: &'a [Option<TextureShape>],
     /// The pass.
     pass: &'a PassDesc,
-    /// Where mistakes are reported.
-    errors: &'a mut Errors,
+    /// Called with each mistake, as a message that follows the pass's name.
+    report: R,
 }
 
-impl AttachmentCheck<'_> {
+impl<R: FnMut(String)> AttachmentCheck<'_, R> {
     /// Records the error `message`, which follows the pass's name.
     fn report(&mut self, message: &str) {
-        self.errors
-            .push(format!("pass \"{}\" {message}", self.pass.name));
+        (self.report)(message.to_owned());
     }
 
     /// The name of the texture at `index`.

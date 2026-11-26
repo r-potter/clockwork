@@ -1,15 +1,15 @@
 //! Validation of each pass's queue and uses (design 0003, "Compiling",
 //! steps 1 and 2): that each use names a resource the graph has, with
 //! accesses that suit the resource, the pass's kind and how the use was
-//! declared, and parts of a texture that exist, and that a pass's uses of
-//! one subresource share a layout.
+//! declared, and parts of a texture that exist, and, on the expanded
+//! passes, that a pass's uses of one subresource share a layout.
 
 use std::ops::Range;
 
 use clockwork_rhi::{Access, AccessSet, Layout, MAX_PUSH_DATA_SIZE, QueueKind, Subresource};
 
 use super::repeat::{RepeatError, check_repeat};
-use super::{Checked, CheckedUse, TextureShape};
+use super::{Checked, CheckedUse, PassUses, TextureShape};
 use crate::error::Errors;
 use crate::pass::{Binding, Constant, PassDesc, PassKind, Repeat, Use, UseRole};
 use crate::{
@@ -38,15 +38,14 @@ fn push_data_size(pass: &PassDesc) -> u32 {
     })
 }
 
-/// Reports every mistake in each pass's queue and uses, and returns each
-/// pass's uses that have none, for the checks after these. A texture whose
-/// overlapping uses share no layout is left out of its pass's, so its
-/// mistake is reported once.
+/// Reports every mistake in each pass's queue and uses, and returns what
+/// it found of each pass, for the checks after these: its uses that have
+/// none, and, if it's repeated for each mip, the mips its repetitions make.
 pub(super) fn check_uses(
     desc: &GraphDesc,
     shapes: &[Option<TextureShape>],
     errors: &mut Errors,
-) -> Vec<Vec<CheckedUse>> {
+) -> Vec<PassUses> {
     desc.passes
         .iter()
         .map(|pass| {
@@ -59,18 +58,15 @@ pub(super) fn check_uses(
             };
             check.queue();
             check.bindings();
+            let mut mips = None;
             if let Some(repeat) = pass.repeat {
                 check.repetition = match check_repeat(desc, shapes, pass, repeat) {
-                    Ok(mips) => {
-                        let name = &desc.textures[repeat.texture.index()].name;
-                        check.report(&format!(
-                            "is repeated for each mip of \"{name}\", which compiling doesn't \
-                             support yet"
-                        ));
+                    Ok(range) => {
                         let chain = shapes[repeat.texture.index()]
                             .expect("a valid repeat's texture has a shape")
                             .mips;
-                        Repetition::first(repeat, mips, chain)
+                        mips = Some(range.clone());
+                        Repetition::first(repeat, range, chain)
                     }
                     Err(RepeatError::Report(message)) => {
                         check.report(&message);
@@ -83,26 +79,66 @@ pub(super) fn check_uses(
                     },
                 };
             }
-            let mut checked: Vec<_> = pass
-                .uses
-                .iter()
-                .filter_map(|used| check.one(used))
-                .collect();
-            // Which mips a repeated pass's uses overlap differs from one
-            // repetition to the next, so whether they share a layout is
-            // checked on the expanded passes, one per repetition (design
-            // 0003, "Compiling", step 2).
-            let conflicting = if pass.repeat.is_none() {
-                check.overlaps(&checked)
-            } else {
-                Vec::new()
-            };
-            checked.retain(|used| {
-                !matches!(used.resource, Checked::Texture(texture, _) if conflicting.contains(&texture))
+            let mut uses: Vec<_> = pass.uses.iter().map(|used| check.one(used)).collect();
+            // A relative mip of another texture than the one the pass is
+            // repeated for, which is reported, can't be resolved at each
+            // repetition, since the range is the repeated texture's. The
+            // pass isn't expanded, as one whose repeat has a mistake isn't,
+            // and its relative uses aren't checked further.
+            let foreign = pass.uses.iter().any(|used| {
+                matches!(
+                    &used.resource,
+                    ResourceUse::Repeated(part)
+                        if pass.repeat.is_some_and(|repeat| repeat.texture != part.texture)
+                )
             });
-            checked
+            if foreign {
+                mips = None;
+                for (used, checked) in pass.uses.iter().zip(&mut uses) {
+                    if matches!(used.resource, ResourceUse::Repeated(_)) {
+                        *checked = None;
+                    }
+                }
+            }
+            PassUses { uses, mips }
         })
         .collect()
+}
+
+/// Checks that an expanded pass's `uses` of overlapping parts of a texture
+/// share a layout, since a subresource is in one layout at a time, calling
+/// `report` with each mistake, which follows the pass's name, and returns
+/// the textures whose uses don't, each reported once.
+pub(super) fn check_overlaps(
+    desc: &GraphDesc,
+    uses: &[CheckedUse],
+    mut report: impl FnMut(String),
+) -> Vec<TextureId> {
+    let parts: Vec<_> = uses
+        .iter()
+        .filter_map(|used| match &used.resource {
+            Checked::Texture(texture, subresource) => Some((*texture, subresource, used.access)),
+            Checked::Buffer(_) => None,
+        })
+        .collect();
+    let mut reported = Vec::new();
+    for &(texture, subresource, access) in &parts {
+        if reported.contains(&texture) {
+            continue;
+        }
+        let together = parts
+            .iter()
+            .filter(|&&(other, other_part, _)| other == texture && overlap(subresource, other_part))
+            .fold(access, |access, &(_, _, other)| access | other);
+        if together.layout().is_none() {
+            reported.push(texture);
+            let name = &desc.textures[texture.index()].name;
+            report(format!(
+                "uses overlapping parts of \"{name}\" with {together:?}, which share no layout"
+            ));
+        }
+    }
+    reported
 }
 
 /// Checks one pass, reporting each mistake with the pass's name.
@@ -510,42 +546,6 @@ impl PassCheck<'_> {
             (Some(_), _) => true,
         }
     }
-
-    /// Checks that uses of overlapping parts of a texture share a layout,
-    /// since a subresource is in one layout at a time, and returns the
-    /// textures whose uses don't, each reported once.
-    fn overlaps(&mut self, uses: &[CheckedUse]) -> Vec<TextureId> {
-        let parts: Vec<_> = uses
-            .iter()
-            .filter_map(|used| match &used.resource {
-                Checked::Texture(texture, subresource) => {
-                    Some((*texture, subresource, used.access))
-                }
-                Checked::Buffer(_) => None,
-            })
-            .collect();
-        let mut reported = Vec::new();
-        for &(texture, subresource, access) in &parts {
-            if reported.contains(&texture) {
-                continue;
-            }
-            let together = parts
-                .iter()
-                .filter(|&&(other, other_part, _)| {
-                    other == texture && overlap(subresource, other_part)
-                })
-                .fold(access, |access, &(_, _, other)| access | other);
-            if together.layout().is_none() {
-                reported.push(texture);
-                let name = &self.desc.textures[texture.index()].name;
-                self.report(&format!(
-                    "uses overlapping parts of \"{name}\" with {together:?}, which share no \
-                     layout"
-                ));
-            }
-        }
-        reported
-    }
 }
 
 /// Whether two parts of a texture share a mip of a layer.
@@ -631,12 +631,15 @@ mod tests {
         (graph, hdr, bloom, font, lights)
     }
 
-    /// A pass repeated for each mip is reported until compiling supports
-    /// it, and a mip relative to a repetition is a mistake in a pass that
-    /// isn't repeated, or that's repeated for another texture's mips.
+    /// A mip relative to a repetition is valid in a pass repeated for each
+    /// mip of its texture, and a mistake in a pass that isn't repeated, or
+    /// that's repeated for another texture's mips.
     #[test]
     fn relative_mips_need_a_repeated_pass() {
         let (mut graph, hdr, bloom, ..) = graph();
+        graph
+            .transfer_pass("fill", "fill")
+            .write(bloom.mip(0), Access::CopyWrite);
         graph
             .compute_pass("downsample", ComputeRecorder::dispatch("downsample"))
             .for_each_mip(bloom, MipDirection::Down, ..)
@@ -660,14 +663,10 @@ mod tests {
         assert_eq!(
             messages(&graph),
             [
-                "pass \"downsample\" is repeated for each mip of \"bloom\", which compiling \
-                 doesn't support yet",
                 "pass \"once\" uses the previous mip of \"hdr\", but isn't repeated for each mip",
                 "pass \"once\" uses texture 9, which this graph doesn't have",
                 "pass \"missing\" is repeated for each mip of texture 9, which this graph doesn't \
                  have",
-                "pass \"other\" is repeated for each mip of \"bloom\", which compiling doesn't \
-                 support yet",
                 "pass \"other\" uses the current mip of \"hdr\", but is repeated for each mip of \
                  \"bloom\"",
             ]
@@ -675,15 +674,13 @@ mod tests {
     }
 
     /// A repeated pass's uses are each checked once, at its first
-    /// repetition, as any other use is. A pass whose repeat has a mistake
-    /// still has its relative uses' accesses checked, and whether they
-    /// share a layout, which need no mip.
-    /// What depends on several uses' mips, such as whether a relative
-    /// write overlaps a fixed read, or what an earlier pass wrote, waits
-    /// for the expanded passes, so isn't reported here.
+    /// repetition, as any other use is, so a mistake in one is reported
+    /// once, with the pass's name. A pass whose repeat has a mistake still
+    /// has its relative uses' accesses checked, and whether they share a
+    /// layout, which need no mip.
     #[test]
     fn repeated_uses_are_checked_on_their_own() {
-        let (mut graph, hdr, bloom, _, lights) = graph();
+        let (mut graph, _, bloom, _, lights) = graph();
         graph
             .compute_pass("copy", ComputeRecorder::dispatch("copy"))
             .for_each_mip(bloom, MipDirection::Down, ..)
@@ -697,37 +694,16 @@ mod tests {
                 Access::ComputeShaderRead | Access::ComputeShaderSampledRead,
             )
             .bind(lights, Access::CopyRead);
-        // Mip 2 is written while it's sampled at the repetition making it,
-        // and nothing wrote mip 0 before the first reads it.
-        graph
-            .compute_pass("overlap", ComputeRecorder::dispatch("overlap"))
-            .for_each_mip(bloom, MipDirection::Down, ..)
-            .bind(bloom.previous_mip(), Access::ComputeShaderSampledRead)
-            .bind(bloom.current_mip(), Access::ComputeShaderWrite)
-            .bind(bloom.mip(2), Access::ComputeShaderSampledRead);
-        // The current mip is never the output's size, but the attachments'
-        // sizes differ by repetition.
-        graph
-            .fullscreen_pass("sizes", "sizes")
-            .for_each_mip(bloom, MipDirection::Down, ..)
-            .colour(bloom.current_mip().attachment(0), Attachment::Discard)
-            .colour(hdr, Attachment::Discard);
 
         assert_eq!(
             messages(&graph),
             [
-                "pass \"copy\" is repeated for each mip of \"bloom\", which compiling doesn't \
-                 support yet",
                 "pass \"copy\" is a compute pass, so it can't use \"bloom\" with CopyWrite",
                 "pass \"past\" is repeated from mip 9 of \"bloom\", whose last mip is 3",
                 "pass \"past\" is a compute pass, so it can't use \"bloom\" with CopyWrite",
                 "pass \"past\" uses \"bloom\" with ComputeShaderRead | ComputeShaderSampledRead, \
                  which share no layout",
                 "pass \"past\" is a compute pass, so it can't use \"lights\" with CopyRead",
-                "pass \"overlap\" is repeated for each mip of \"bloom\", which compiling doesn't \
-                 support yet",
-                "pass \"sizes\" is repeated for each mip of \"bloom\", which compiling doesn't \
-                 support yet",
             ]
         );
     }
