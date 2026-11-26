@@ -13,7 +13,6 @@ use super::{Checked, CheckedUse, Found, TextureShape};
 use crate::desc::{BufferKind, TextureKind};
 use crate::error::Errors;
 use crate::expand::ExpandedPass;
-use crate::pass::{Attachment, UseRole};
 use crate::{GraphDesc, ResourceUse};
 
 /// Records in `found` each read of a transient resource's contents that no
@@ -61,17 +60,9 @@ pub(super) fn check_output(desc: &GraphDesc, errors: &mut Errors) {
     }
 }
 
-/// Whether `used` reads the resource's contents from before the pass: a
-/// read, a write that also reads, or an attachment that keeps its
-/// contents. An attachment that's cleared or discarded doesn't, though its
-/// accesses include depth testing or blending, since it starts afresh.
+/// Whether `used` reads the resource's contents from before the pass.
 fn reads_contents(used: &CheckedUse) -> bool {
-    match used.role {
-        UseRole::Read => true,
-        UseRole::Write => used.access.iter().any(|access| !access.is_write()),
-        UseRole::Colour(attachment) => matches!(attachment, Attachment::Keep),
-        UseRole::Depth(attachment) => matches!(attachment, Attachment::Keep),
-    }
+    used.role.reads_contents(used.access)
 }
 
 /// Which parts of each transient resource the passes so far have written.
@@ -201,8 +192,8 @@ mod tests {
     use crate::validate::test_support::{inputs, messages};
     use crate::validate::validate;
     use crate::{
-        BufferId, CompileError, ComputeRecorder, ImportDesc, MipCount, MipDirection, TextureId,
-        TextureSize, TransientTexture,
+        Attachment, BufferId, CompileError, ComputeRecorder, ImportDesc, MipCount, MipDirection,
+        TextureId, TextureSize, TransientTexture,
     };
 
     /// The resources of [`graph`].

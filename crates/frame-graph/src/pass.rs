@@ -483,6 +483,35 @@ pub(crate) enum UseRole {
     Depth(Attachment<f32>),
 }
 
+impl UseRole {
+    /// Whether a use declared so, with `access`, reads the resource's
+    /// contents from before the pass: a read, a write that also reads, or
+    /// an attachment that keeps its contents. An attachment that's cleared
+    /// or discarded doesn't, though its accesses include depth testing or
+    /// blending, since it starts afresh.
+    pub(crate) fn reads_contents(self, access: AccessSet) -> bool {
+        match self {
+            Self::Read => true,
+            Self::Write => access.iter().any(|access| !access.is_write()),
+            Self::Colour(attachment) => matches!(attachment, Attachment::Keep),
+            Self::Depth(attachment) => matches!(attachment, Attachment::Keep),
+        }
+    }
+
+    /// Whether a use declared so replaces the resource's contents, whatever
+    /// it covers: an attachment that's cleared or discarded, whose load
+    /// operation drops the contents from before the pass. Any other write,
+    /// such as a copy or a storage write, may cover only part of what it
+    /// names, leaving the rest as it was.
+    pub(crate) fn replaces_contents(self) -> bool {
+        matches!(
+            self,
+            Self::Colour(Attachment::Clear(_) | Attachment::Discard)
+                | Self::Depth(Attachment::Clear(_) | Attachment::Discard)
+        )
+    }
+}
+
 /// The accesses of a colour attachment that starts as `attachment`: a write,
 /// and a read too if the pass keeps the contents.
 fn colour_access(attachment: Attachment<[f32; 4]>) -> AccessSet {
