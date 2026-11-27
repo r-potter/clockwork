@@ -1,6 +1,6 @@
 //! Barrier derivation, the seventh step of compiling (design 0003,
 //! "Deriving barriers"): the barriers the scheduled passes need, recorded
-//! before each group.
+//! before each group, and at the end of the frame.
 //!
 //! It walks the groups in the schedule's order, keeping each subresource's
 //! state: the barriers into it this frame. Reads after reads, in one
@@ -18,7 +18,11 @@
 //! The first use of each subresource in a frame is ordered after the last
 //! use before the frame: the accesses its import or the output gives, or
 //! for a resource the graph creates, the accesses the frame ends with,
-//! which the last frame, running the same plan, left it in.
+//! which the last frame, running the same plan, left it in. At the end of
+//! the frame, the parts of imports and the output that passes used move to
+//! the accesses they must be left in. Parts no pass uses are left as they
+//! were, in the accesses they started in, so the graph needn't know an
+//! import's shape to leave every part of it right.
 
 use std::ops::Range;
 
@@ -77,6 +81,8 @@ pub(crate) struct Barriers {
     /// For each of the schedule's groups, in order, the range of `barriers`
     /// recorded before its first pass.
     pub(crate) groups: Vec<Range<usize>>,
+    /// The range of `barriers` recorded after the last group.
+    pub(crate) end_of_frame: Range<usize>,
 }
 
 /// The barriers into a subresource this frame, by their indices.
@@ -199,17 +205,48 @@ pub(crate) fn barriers(
         groups.push(start..barriers.len());
     }
 
+    let start = barriers.len();
     for (index, texture) in desc.textures.iter().enumerate() {
-        if let TextureKind::Transient(_) | TextureKind::Persistent(_) = texture.kind {
-            carry_over(&mut barriers, &textures[index].cells);
+        let grid = &textures[index];
+        let after = match &texture.kind {
+            TextureKind::Output => output.after,
+            TextureKind::Imported(import) => import.after,
+            TextureKind::Transient(_) | TextureKind::Persistent(_) => {
+                carry_over(&mut barriers, &grid.cells);
+                continue;
+            }
+        };
+        for (cell, used) in grid.cells.iter().enumerate() {
+            if let Some(used) = used {
+                let (mips, layers) = grid.bounds(cell);
+                let target = BarrierTarget::Texture(index, Subresource { mips, layers });
+                leave(&mut barriers, *used, target, after);
+            }
         }
     }
     for (index, buffer) in desc.buffers.iter().enumerate() {
-        if let BufferKind::Transient { .. } | BufferKind::Persistent { .. } = buffer.kind {
-            carry_over(&mut barriers, &buffers[index..=index]);
+        match &buffer.kind {
+            BufferKind::Imported(import) => {
+                if let Some(used) = buffers[index] {
+                    leave(
+                        &mut barriers,
+                        used,
+                        BarrierTarget::Buffer(index),
+                        import.after,
+                    );
+                }
+            }
+            BufferKind::Transient { .. } | BufferKind::Persistent { .. } => {
+                carry_over(&mut barriers, &buffers[index..=index]);
+            }
         }
     }
-    Barriers { barriers, groups }
+    let end_of_frame = start..barriers.len();
+    Barriers {
+        barriers,
+        groups,
+        end_of_frame,
+    }
 }
 
 /// The accesses a texture of `kind` is in before its first use in a
@@ -289,6 +326,22 @@ fn carry_over(barriers: &mut [PlannedBarrier], cells: &[Option<Used>]) {
     }
 }
 
+/// Records in `barriers` the barrier that leaves the subresource `target`,
+/// of an import or the output, in the accesses `after`, from those its
+/// state, `used`, ends the frame with. It needs none if it's already in
+/// them.
+fn leave(barriers: &mut Vec<PlannedBarrier>, used: Used, target: BarrierTarget, after: AccessSet) {
+    let current = barriers[used.latest].after;
+    if current != after {
+        barriers.push(PlannedBarrier {
+            target,
+            before: current,
+            after,
+            from_last_frame: false,
+        });
+    }
+}
+
 #[cfg(test)]
 mod tests {
     //! T0 tests of barrier derivation.
@@ -356,15 +409,23 @@ mod tests {
                 lines.push(format!("pass \"{}\"", passes[pass].pass.name));
             }
         }
+        lines.push("end of frame".to_owned());
+        lines.extend(
+            derived.barriers[derived.end_of_frame.clone()]
+                .iter()
+                .map(line),
+        );
         lines
     }
 
     /// The lines [`derived`] gives for the pass `finished` adds, which
-    /// writes the output.
-    fn output_lines() -> [&'static str; 2] {
+    /// writes the output, and the end of the frame, which presents it.
+    fn output_lines() -> [&'static str; 4] {
         [
             "  output mips 0..1 layers 0..1: Acquired -> CopyWrite",
             "pass \"writes the output\"",
+            "end of frame",
+            "  output mips 0..1 layers 0..1: CopyWrite -> Present",
         ]
     }
 
@@ -570,8 +631,9 @@ mod tests {
 
     /// A persistent resource's first use is ordered after the accesses the
     /// frame ends with, as a transient one's is. An import's is ordered
-    /// after the accesses it starts in. The parts no pass uses, and imports
-    /// no pass uses, have no barriers.
+    /// after the accesses it starts in, and the parts of it passes use are
+    /// left in those it ends in. The parts no pass uses, and imports no
+    /// pass uses, have no barriers, and are left as they were.
     #[test]
     fn first_uses_follow_what_came_before_the_frame() {
         let mut graph = GraphDesc::new("first uses");
@@ -622,7 +684,36 @@ mod tests {
             "pass \"keep\"",
             "  output mips 0..1 layers 0..1: Acquired -> CopyWrite",
             "pass \"writes the output\"",
+            "end of frame",
+            "  output mips 0..1 layers 0..1: CopyWrite -> Present",
+            "  target mips 0..1 layers 0..: CopyWrite -> FragmentShaderSampledRead",
         ];
         assert_eq!(derived(&graph), lines);
+    }
+
+    /// An import whose last use leaves it in the accesses it must be left
+    /// in needs no barrier at the end of the frame.
+    #[test]
+    fn an_import_left_as_it_ends_needs_no_last_barrier() {
+        let mut graph = GraphDesc::new("left as it ends");
+        let lut = graph.import_texture(
+            "lut",
+            ImportDesc {
+                before: Access::CopyWrite.into(),
+                after: Access::ComputeShaderSampledRead.into(),
+            },
+        );
+        graph
+            .compute_pass("grade", ComputeRecorder::recorder("grade"))
+            .read(lut, Access::ComputeShaderSampledRead)
+            .side_effects();
+
+        assert_eq!(
+            derived(&graph),
+            then_output(&[
+                "  lut mips 0.. layers 0..: CopyWrite -> ComputeShaderSampledRead",
+                "pass \"grade\"",
+            ])
+        );
     }
 }
