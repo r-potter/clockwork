@@ -143,7 +143,7 @@ fn queue(kind: QueueKind) -> &'static str {
 
 /// `set`'s accesses, each as its name in lower case with hyphens, joined
 /// with `|`.
-fn accesses(set: AccessSet) -> String {
+pub(crate) fn accesses(set: AccessSet) -> String {
     let names: Vec<_> = set
         .iter()
         .map(|access| kebab(&format!("{access:?}")))
@@ -153,7 +153,7 @@ fn accesses(set: AccessSet) -> String {
 
 /// `name`, in upper camel case, in lower case with a hyphen before each
 /// word after the first.
-fn kebab(name: &str) -> String {
+pub(crate) fn kebab(name: &str) -> String {
     let mut kebab = String::with_capacity(name.len() + 4);
     for (index, letter) in name.chars().enumerate() {
         if letter.is_ascii_uppercase() && index > 0 {

@@ -11,9 +11,11 @@
 //!   translates and submits its passes
 //!
 //! So far the crate has the description and the compiler, [`compile()`],
-//! for one queue. The executor follows.
+//! for one queue, with [`check()`], which checks a plan against the rules
+//! independently of the compiler. The executor follows.
 
 mod barriers;
+mod check;
 mod compile;
 mod cull;
 mod dependencies;
@@ -28,6 +30,7 @@ mod render_passes;
 mod schedule;
 mod validate;
 
+pub use check::{Hazard, check};
 pub use compile::{Plan, compile};
 pub use desc::{
     BufferId, GraphDesc, ImportDesc, MipCount, OUTPUT, SamplerId, SamplerSettings, TextureId,
