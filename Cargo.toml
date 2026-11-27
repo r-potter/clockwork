@@ -53,6 +53,10 @@ criterion = { version = "0.8.2", default-features = false, features = [
     "cargo_bench_support",
 ] }
 glam = { version = "0.34.1", features = ["bytemuck"] }
+# Snapshot tests: a frame graph's plans, described as text and checked
+# against files beside the tests, so a change to a plan shows as a diff in
+# review (design 0003, "Data structures and layout").
+insta = "1.49.0"
 # For tests that log through the `log` crate, as dependencies such as
 # `sctk-adwaita` do.
 log = "0.4.34"

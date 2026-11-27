@@ -217,6 +217,17 @@ A property test checks an invariant over many generated inputs, rather than a fe
 
 Property tests are T0: they run with the unit tests, and need no GPU.
 
+## Snapshot tests
+
+A snapshot test checks a value's text against a file checked in beside the test, using [`insta`](https://insta.rs), rather than against an expected value written in the test. It suits output too long to write out by hand, whose changes a reviewer should see whole: the first are the frame graph's plans, described by `Plan::describe`, in `crates/frame-graph/src/describe.rs`, with their snapshots in `src/snapshots/`.
+
+- **Review a changed snapshot like code.** When a test's output changes, it fails, and `insta` writes the new output beside the old as a `.snap.new` file. Run `cargo insta review`, from [`cargo-insta`](https://crates.io/crates/cargo-insta) (`cargo install cargo-insta`), to see each change as a diff and accept or reject it. Without it, check the `.snap.new` file and rename it over the `.snap` file, or run the test again with `INSTA_UPDATE=always` to accept every change.
+- **Read the diff before accepting it.** A snapshot only catches a mistake if someone reads what changed. In review, a changed snapshot is the plan the change makes, so check that each changed line is one the change should make.
+- **Commit the `.snap` files, never the `.snap.new` ones.** CI sets `CI`, so `insta` writes nothing there, and a missing or changed snapshot fails the test.
+- **Name a snapshot for what it shows,** through its test's name, as with any test.
+
+Snapshot tests are T0 too.
+
 ## Benchmarks
 
 Benchmarks measure hot paths against the budgets in their designs, such as design 0002's "Performance", using [`criterion`](https://docs.rs/criterion). Each is in its crate's `benches/`, a separate crate that can reach only the public API, so it measures what callers pay. There are two:

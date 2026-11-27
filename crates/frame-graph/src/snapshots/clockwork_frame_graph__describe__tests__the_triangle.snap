@@ -1,0 +1,11 @@
+---
+source: crates/frame-graph/src/describe.rs
+expression: described(&graph)
+---
+batch 0 on graphics
+  group 0
+    barrier output: acquired -> color-attachment-write
+    pass "triangle" (raster)
+      render pass: colour output: clear (0.02, 0.05, 0.1, 1), store
+  end of frame
+    barrier output: color-attachment-write -> present

@@ -18,6 +18,7 @@ mod compile;
 mod cull;
 mod dependencies;
 mod desc;
+mod describe;
 mod error;
 mod expand;
 mod grid;

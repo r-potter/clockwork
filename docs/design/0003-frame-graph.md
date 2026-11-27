@@ -663,22 +663,22 @@ recorders.raster("triangle", |pass, triangle: &Triangle, commands| {
 - **Subresource state** is a grid per texture, split at every bound of its uses' mips and layers, so it's no finer than the uses need, and a texture whose shape is the caller's, an import, is split as one the graph creates. It's small for the textures frames use: a full chain of 13 mips with one layer is at most 13 cells. The dependency graph and barrier derivation keep their state in it, and a barrier covers a cell, so a texture used whole has one barrier, not one per mip.
 - **The dependency graph** is a `Vec` of edges per expanded pass, indexed by its place among them, each edge to an earlier pass, with the kinds of each edge kept for `describe` and for messages.
 - **Plans** are flat: a `Vec` of batches, each a range of a `Vec` of groups, each with a range of a `Vec` of barriers and a range of a `Vec` of passes. Executing walks them in order and allocates nothing.
-- **`Plan::describe`** writes one line per batch, group, barrier, pass and wait, in the order they run, so a snapshot's diff shows which barrier changed or which pass moved. A pass that runs somewhere other than its written place says where it was written and which of the schedule's priorities moved it:
+- **`Plan::describe`** writes one line per batch, group, barrier, pass and wait, in the order they run, so a snapshot's diff shows which barrier changed or which pass moved. A barrier names the mips and layers it covers, such as `bloom mip 2`, unless it covers the whole texture, and one that orders a first use after the last frame says so, since the first frame after a compile starts from `none` instead. A render pass names each attachment's role and texture, with its load and store operations. A pass that runs somewhere other than its written place says where it was written and which of the schedule's priorities moved it:
 
   ```
   batch 0 on compute
     group 0
-      barrier occlusion: none -> compute-shader-write
+      barrier occlusion: fragment-shader-sampled-read -> compute-shader-write (after the last frame)
       pass "ambient occlusion" (compute), written 3rd, moved by: work on other queues first
       release occlusion to graphics
   batch 1 on graphics
     group 0
-      barrier depth: none -> depth-attachment-read | depth-attachment-write
-      barrier shadow: none -> depth-attachment-read | depth-attachment-write
+      barrier depth: fragment-shader-sampled-read -> depth-attachment-read | depth-attachment-write (after the last frame)
+      barrier shadow: fragment-shader-sampled-read -> depth-attachment-read | depth-attachment-write (after the last frame)
       pass "depth prepass" (raster)
-        render pass: depth clear, store
+        render pass: depth depth: clear 0, store
       pass "shadow map" (raster), written 4th, moved by: joins the group
-        render pass: shadow clear, store
+        render pass: depth shadow: clear 0, store
     group 1
       wait for batch 0
       acquire occlusion from compute
@@ -874,3 +874,4 @@ Filled in at close-out.
 | 2026-11-27 | Revised during `graph-plan`: the end of the frame's buffer transitions are combined into one global barrier, as a group's are, and a combined global barrier isn't marked as ordering a first use after the last frame, so in the first frame after a compile it's still from the last frame's accesses, not `Access::None`. That only orders buffers, which have no layout, after accesses that didn't happen, and a global barrier can't be from the last frame for some buffers and not others ("Deriving barriers") |
 | 2026-11-27 | Revised during `graph-plan`: every depth attachment is `DepthAttachmentRead | DepthAttachmentWrite`, and `RasterPassBuilder::depth` loses its `write` argument. A depth test that didn't write depth was `DepthAttachmentRead` alone, whose layout is read-only, but the RHI renders every depth attachment in the layout of a depth write, and Vulkan counts its store operation as a write, so the barriers were for the wrong layout and missed a write. Two passes that only depth-test one texture now run one after the other; read-only depth, with the RHI's support, can come back if that's shown to cost ("Passes and resources", "API") |
 | 2026-11-27 | Revised during `graph-plan`: an attachment is stored if a later pass reads what it renders before a cleared or discarded attachment replaces it, rather than if any later pass uses it, so a later write alone doesn't keep it, and the output is stored as persistent and imported textures are ("Compiling") |
+| 2026-11-27 | Revised during `graph-plan`: `Plan::describe`'s example matches what it writes: a first use is from the accesses the frame ends with, marked as after the last frame, rather than from `none`, which is only the first frame after a compile, a barrier names the mips and layers it covers unless it's whole, and a render pass names each attachment's role, texture and clear value ("Data structures and layout") |

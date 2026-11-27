@@ -11,7 +11,7 @@
 
 use std::ops::Range;
 
-use clockwork_rhi::QueueId;
+use clockwork_rhi::{QueueId, QueueKind};
 
 use crate::barriers::{PlannedBarrier, barriers};
 use crate::cull::cull;
@@ -33,9 +33,13 @@ use crate::{CompileErrors, CompileInputs, GraphDesc};
 pub struct Plan {
     /// The graph's label.
     pub(crate) label: String,
+    /// Each texture's name, indexed by `TextureId`.
+    pub(crate) texture_names: Vec<String>,
     /// Each texture's shape, indexed by `TextureId`, or `None` for an
     /// import, whose shape is the caller's.
     pub(crate) textures: Vec<Option<TextureShape>>,
+    /// Each buffer's name, indexed by `BufferId`.
+    pub(crate) buffer_names: Vec<String>,
     /// The description's passes, with each pass repeated for each mip
     /// expanded into its repetitions, culled or not.
     pub(crate) expanded: Vec<ExpandedPass>,
@@ -56,6 +60,8 @@ pub struct Plan {
 pub(crate) struct Batch {
     /// The queue it's submitted to.
     pub(crate) queue: QueueId,
+    /// The kind of queue it's submitted to, which names it.
+    pub(crate) kind: QueueKind,
     /// Its groups, a range of the plan's.
     pub(crate) groups: Range<usize>,
 }
@@ -120,12 +126,23 @@ pub fn compile(desc: &GraphDesc, inputs: &CompileInputs) -> Result<Plan, Compile
     } else {
         vec![Batch {
             queue: inputs.queues.graphics,
+            kind: QueueKind::Graphics,
             groups: 0..groups.len(),
         }]
     };
     Ok(Plan {
         label: desc.label().to_owned(),
+        texture_names: desc
+            .textures
+            .iter()
+            .map(|texture| texture.name.clone())
+            .collect(),
         textures: validated.textures,
+        buffer_names: desc
+            .buffers
+            .iter()
+            .map(|buffer| buffer.name.clone())
+            .collect(),
         expanded,
         batches,
         groups,
@@ -144,7 +161,7 @@ mod tests {
     use super::*;
     use crate::barriers::BarrierTarget;
     use crate::validate::test_support::{OUTPUT_WRITER, finished, inputs};
-    use clockwork_rhi::{QueueKind, Subresource};
+    use clockwork_rhi::Subresource;
 
     use crate::{Attachment, ComputeRecorder, QueueLayout, TextureSize, TransientTexture};
 
@@ -191,6 +208,7 @@ mod tests {
             plan.batches,
             [Batch {
                 queue: inputs.queues.graphics,
+                kind: QueueKind::Graphics,
                 groups: 0..3,
             }]
         );
