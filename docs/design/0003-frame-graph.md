@@ -125,7 +125,7 @@ A **pass** has a name, a kind, the queue it asks for, and its uses of resources.
 | `compute` | A recorder, or the graph: one dispatch of a program from the technique | Reads and writes through shaders, and bindings for the graph's dispatch | Graphics or compute |
 | `transfer` | A recorder | Copy reads and writes, and fills | Any |
 
-**Uses** are RHI `AccessSet`s on a resource, or on a `Subresource` of a texture, so a pass can read mip 2 of a texture while writing mip 3. Attachments are uses too, with the accesses 0002's "Synchronization" gives them: a colour attachment that's cleared or discarded is `ColorAttachmentWrite`, and one that's kept, because the pass blends with it or draws over it, adds `ColorAttachmentRead`. A depth attachment is `DepthAttachmentRead`, with `DepthAttachmentWrite` if the pass writes depth, or clears or discards it, since its load operation then writes it. An attachment is one mip of one layer of a texture, mip 0 of layer 0 unless the pass names another, so a pass can render to one mip of a chain.
+**Uses** are RHI `AccessSet`s on a resource, or on a `Subresource` of a texture, so a pass can read mip 2 of a texture while writing mip 3. Attachments are uses too, with the accesses 0002's "Synchronization" gives them: a colour attachment that's cleared or discarded is `ColorAttachmentWrite`, and one that's kept, because the pass blends with it or draws over it, adds `ColorAttachmentRead`. A depth attachment is `DepthAttachmentRead | DepthAttachmentWrite`, whether or not the pass writes depth, since the RHI renders every depth attachment in the layout of a depth write, and its store operation writes it. An attachment is one mip of one layer of a texture, mip 0 of layer 0 unless the pass names another, so a pass can render to one mip of a chain.
 
 **Bindings** are what the graph's own fullscreen and compute passes put in their push data: a texture view's heap index, a sampler's, or a buffer's address, each with the access the shader uses it for, and constants from the technique. The layout is fixed by the order of the bindings (see "Data structures and layout"), so the graph can fill it without knowing the shader, and it's checked against the shader's reflection when the technique loads. A bound texture or buffer is a use of it too, a write if its accesses write and a read if not, so validation, the order of reads and writes, and barriers see it as they see any other use. A fullscreen pass reads only through its bindings, and a compute pass the graph dispatches binds every resource it uses, since its program can reach nothing else. A compute pass a recorder records has no bindings, since the recorder sets its own push data. Samplers are declared in the description, by name, as resources are.
 
@@ -440,7 +440,7 @@ pub struct ImportDesc {
 
 impl RasterPassBuilder<'_> {
     pub fn colour(&mut self, target: impl Into<AttachmentTarget>, attachment: Attachment<[f32; 4]>) -> &mut Self;
-    pub fn depth(&mut self, target: impl Into<AttachmentTarget>, attachment: Attachment<f32>, write: bool) -> &mut Self;
+    pub fn depth(&mut self, target: impl Into<AttachmentTarget>, attachment: Attachment<f32>) -> &mut Self;
     pub fn read(&mut self, resource: impl Into<ResourceUse>, access: impl Into<AccessSet>) -> &mut Self;
     pub fn write(&mut self, resource: impl Into<ResourceUse>, access: impl Into<AccessSet>) -> &mut Self;
     /// Keeps the pass even if nothing reads what it writes.
@@ -682,7 +682,7 @@ recorders.raster("triangle", |pass, triangle: &Triangle, commands| {
     group 1
       wait for batch 0
       acquire occlusion from compute
-      barrier depth: depth-attachment-write -> depth-attachment-read
+      barrier depth: depth-attachment-read | depth-attachment-write -> fragment-shader-sampled-read
       barrier occlusion: compute-shader-write -> fragment-shader-sampled-read
       ...
     end of frame
@@ -872,3 +872,4 @@ Filled in at close-out.
 | 2026-11-27 | Revised during `graph-plan`: a texture's subresource state is a grid split at its uses' bounds, rather than an entry per mip and layer, so an import, whose shape is the caller's, is tracked as a texture the graph creates, and a texture used whole has one barrier. A group's passes use no subresource in different layouts, since reads in different layouts have no edge but can't share the barriers recorded before the group. After a compile, a persistent resource kept with its contents is moved from the accesses earlier plans left each part in, which the executor keeps, to those the new plan ends with, rather than starting from `Access::None`, which would discard them ("Scheduling", "Deriving barriers", "Data structures and layout") |
 | 2026-11-27 | Revised during `graph-plan`: the end of the frame moves only the parts of an import that a pass used to the accesses it's left in, and leaves the rest in the accesses it started in, since the graph doesn't know an import's shape, and a barrier over a part it doesn't have would cover nothing ("Deriving barriers") |
 | 2026-11-27 | Revised during `graph-plan`: the end of the frame's buffer transitions are combined into one global barrier, as a group's are, and a combined global barrier isn't marked as ordering a first use after the last frame, so in the first frame after a compile it's still from the last frame's accesses, not `Access::None`. That only orders buffers, which have no layout, after accesses that didn't happen, and a global barrier can't be from the last frame for some buffers and not others ("Deriving barriers") |
+| 2026-11-27 | Revised during `graph-plan`: every depth attachment is `DepthAttachmentRead | DepthAttachmentWrite`, and `RasterPassBuilder::depth` loses its `write` argument. A depth test that didn't write depth was `DepthAttachmentRead` alone, whose layout is read-only, but the RHI renders every depth attachment in the layout of a depth write, and Vulkan counts its store operation as a write, so the barriers were for the wrong layout and missed a write. Two passes that only depth-test one texture now run one after the other; read-only depth, with the RHI's support, can come back if that's shown to cost ("Passes and resources", "API") |

@@ -521,16 +521,12 @@ fn colour_access(attachment: Attachment<[f32; 4]>) -> AccessSet {
     }
 }
 
-/// The accesses of a depth attachment that starts as `attachment`: depth
-/// testing, and writing if the pass writes depth, or clears or discards the
-/// contents, which writes them before the pass's first draw.
-fn depth_access(attachment: Attachment<f32>, write: bool) -> AccessSet {
-    let replaces_contents = !matches!(attachment, Attachment::Keep);
-    if write || replaces_contents {
-        Access::DepthAttachmentRead | Access::DepthAttachmentWrite
-    } else {
-        Access::DepthAttachmentRead.into()
-    }
+/// The accesses of a depth attachment: depth testing and writing, whether
+/// or not the pass writes depth. The RHI renders every depth attachment in
+/// the layout of a depth write, and its store operation writes it even when
+/// the pass doesn't, so its barriers must order a write.
+fn depth_access() -> AccessSet {
+    Access::DepthAttachmentRead | Access::DepthAttachmentWrite
 }
 
 /// What every builder shares: the pass being built, and its ID.
@@ -757,18 +753,21 @@ colour!(RasterPassBuilder);
 
 impl RasterPassBuilder<'_> {
     /// Depth-tests against `target`, one mip of one layer, as the depth
-    /// attachment, starting as `attachment` says, and writes depth if
-    /// `write`. A plain `TextureId` is its mip 0 of layer 0. Clearing or
-    /// discarding the contents writes them too, whatever `write` says.
+    /// attachment, starting as `attachment` says. A plain `TextureId` is its
+    /// mip 0 of layer 0.
+    ///
+    /// It's a write of `target`, whether or not the pass writes depth,
+    /// since the RHI renders every depth attachment in the layout of a
+    /// depth write, and its store operation writes it. So two passes that
+    /// only depth-test one texture run one after the other.
     pub fn depth(
         &mut self,
         target: impl Into<AttachmentTarget>,
         attachment: Attachment<f32>,
-        write: bool,
     ) -> &mut Self {
         self.0.add_use(
             target.into().resource_use(),
-            depth_access(attachment, write),
+            depth_access(),
             UseRole::Depth(attachment),
         );
         self
@@ -835,7 +834,8 @@ mod tests {
     }
 
     /// Attachments get the accesses their start implies: a kept colour
-    /// attachment reads as well as writes.
+    /// attachment reads as well as writes, and a depth attachment always
+    /// depth-tests and writes, however it starts.
     #[test]
     fn attachments_have_the_accesses_their_start_implies() {
         let (mut graph, depth, _, _) = graph();
@@ -843,11 +843,11 @@ mod tests {
         graph
             .raster_pass("cleared", "scene")
             .colour(output, Attachment::Clear([0.0; 4]))
-            .depth(depth, Attachment::Clear(0.0), true);
+            .depth(depth, Attachment::Clear(0.0));
         graph
             .raster_pass("kept", "overlay")
             .colour(output, Attachment::Keep)
-            .depth(depth, Attachment::Keep, false);
+            .depth(depth, Attachment::Keep);
         graph
             .fullscreen_pass("discarded", "tone-map")
             .colour(output, Attachment::Discard);
@@ -866,7 +866,7 @@ mod tests {
                 ],
                 vec![
                     Access::ColorAttachmentRead | Access::ColorAttachmentWrite,
-                    Access::DepthAttachmentRead.into(),
+                    Access::DepthAttachmentRead | Access::DepthAttachmentWrite,
                 ],
                 vec![Access::ColorAttachmentWrite.into()],
             ]
@@ -881,28 +881,6 @@ mod tests {
         );
     }
 
-    /// Clearing or discarding depth writes it, even when the pass doesn't
-    /// write depth.
-    #[test]
-    fn clearing_or_discarding_depth_writes_it_without_depth_writes() {
-        let (mut graph, depth, _, _) = graph();
-        graph
-            .raster_pass("cleared", "test only")
-            .depth(depth, Attachment::Clear(0.0), false);
-        graph
-            .raster_pass("discarded", "test only")
-            .depth(depth, Attachment::Discard, false);
-
-        for pass in &graph.passes {
-            assert_eq!(
-                pass.uses[0].access,
-                Access::DepthAttachmentRead | Access::DepthAttachmentWrite,
-                "pass \"{}\"",
-                pass.name
-            );
-        }
-    }
-
     /// An attachment is one mip of one layer, mip 0 of layer 0 for a plain
     /// texture ID.
     #[test]
@@ -911,7 +889,7 @@ mod tests {
         graph
             .raster_pass("upsample", "upsample")
             .colour(bloom.attachment(2, 0), Attachment::Discard)
-            .depth(depth, Attachment::Clear(0.0), true);
+            .depth(depth, Attachment::Clear(0.0));
 
         let uses = &graph.passes[0].uses;
         assert_eq!(

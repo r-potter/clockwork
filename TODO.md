@@ -235,6 +235,27 @@ Outstanding tasks and future work.
       both: the pinned `ash` declares its structures `Send` and `Sync`, though
       `ash` 0.38 didn't, so no `unsafe impl` is needed. A compile-time
       assertion in `crates/rhi/src/vulkan/physical_device.rs` keeps it so.
+- [ ] **Support read-only depth attachments in the RHI.** The RHI renders
+      every depth attachment in the layout of a depth write
+      (`crates/rhi/src/vulkan/render_pass.rs`), and its store operations,
+      `Store` and `DontCare`, both write the attachment. So the frame
+      graph treats every depth attachment as written, and two passes that
+      only depth-test one texture, such as a forward pass and a decal pass
+      after a depth prepass, run one after the other rather than sharing a
+      barrier. Read-only depth needs:
+      - rendering with a depth attachment in a read-only layout when the
+        depth test doesn't write, such as `Layout::ReadOnly`, which maps to
+        `READ_ONLY_OPTIMAL` and already serves sampled depth
+      - `StoreOp::None` (`VK_ATTACHMENT_STORE_OP_NONE`, core in Vulkan
+        1.3), which writes nothing, so the attachment's barriers needn't
+        order a write
+      - a way for the frame graph to declare it, such as bringing back
+        `RasterPassBuilder::depth`'s `write` argument, with
+        `DepthAttachmentRead` alone for a depth test that doesn't write
+
+      Revise design 0002 for the RHI's part and 0003 for the graph's.
+      Measure first: it's worth it if serializing depth-tested passes
+      shows in the example techniques' GPU times.
 
 ## Engine
 
