@@ -10,10 +10,11 @@
 //! - the executor, which creates the plan's resources, and each frame records,
 //!   translates and submits its passes
 //!
-//! So far the crate has the description. The compiler and the executor
-//! follow, slice by slice.
+//! So far the crate has the description and the compiler, [`compile()`],
+//! for one queue. The executor follows.
 
 mod barriers;
+mod compile;
 mod cull;
 mod dependencies;
 mod desc;
@@ -26,6 +27,7 @@ mod render_passes;
 mod schedule;
 mod validate;
 
+pub use compile::{Plan, compile};
 pub use desc::{
     BufferId, GraphDesc, ImportDesc, MipCount, OUTPUT, SamplerId, SamplerSettings, TextureId,
     TextureSize, TransientTexture,

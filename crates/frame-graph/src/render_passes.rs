@@ -49,10 +49,6 @@ pub(crate) struct PlannedRenderPass {
 /// For each pass `scheduled` runs, in the order it runs them, the render
 /// pass it begins, or `None` if it has no attachments. `passes` are the
 /// expanded passes of `desc`.
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "compiling, in a later pull request, calls it")
-)]
 pub(crate) fn render_passes(
     desc: &GraphDesc,
     passes: &[ExpandedPass],

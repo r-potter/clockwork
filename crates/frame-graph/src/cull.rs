@@ -21,10 +21,6 @@ use crate::expand::ExpandedPass;
 /// something it writes, which the graph shows before it's reduced. Each
 /// pass culled is logged at `DEBUG`, since a pass culled because, say, a
 /// debug view isn't shown is normal.
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "compiling, in a later pull request, calls it")
-)]
 pub(crate) fn cull(
     desc: &GraphDesc,
     passes: &[ExpandedPass],
