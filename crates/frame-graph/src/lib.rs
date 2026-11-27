@@ -30,6 +30,7 @@ mod pass;
 #[cfg(test)]
 mod random_graphs;
 mod render_passes;
+mod resources;
 mod schedule;
 mod validate;
 
