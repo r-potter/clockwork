@@ -123,11 +123,14 @@ Outstanding tasks and future work.
       budget to the eight threads' throughput, or give each thread a
       range of the chunk of its own to bump through, and revise
       "Performance" or "Transient memory" to match.
-- [ ] **Run the RHI's benchmarks on the RTX 3090 machine.** Design
-      0002's budgets are for the RTX 3090 machine, but the benchmarks
-      have only run on the Windows desktop's RTX 4090. Run
-      `cargo bench -p clockwork-rhi` there, and update the two items
-      above and the design's "As built" with the results.
+- [ ] **Run the benchmarks on the RTX 3090 machine.** Design 0002's
+      budgets are for the RTX 3090 machine, and design 0003's are for the
+      same machine, but the benchmarks have only run on the Windows
+      desktop's i9-13900K and RTX 4090. Run `cargo bench -p clockwork-rhi`
+      and `cargo bench -p clockwork-frame-graph` there, and update the two
+      items above and design 0002's "As built" with the results. Compiling
+      a 64-pass graph took 119 µs on the desktop, against a budget of
+      1 ms.
 - [ ] **Consider building the uploader's staging on the transient
       allocator.** `Staging` (`crates/rhi/src/upload/staging.rs`) has its
       own bump allocator over 4 MiB upload buffers, with the same

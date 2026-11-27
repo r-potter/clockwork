@@ -230,14 +230,16 @@ Snapshot tests are T0 too.
 
 ## Benchmarks
 
-Benchmarks measure hot paths against the budgets in their designs, such as design 0002's "Performance", using [`criterion`](https://docs.rs/criterion). Each is in its crate's `benches/`, a separate crate that can reach only the public API, so it measures what callers pay. There are two:
+Benchmarks measure hot paths against the budgets in their designs, such as design 0002's "Performance", using [`criterion`](https://docs.rs/criterion). Each is in its crate's `benches/`, a separate crate that can reach only the public API, so it measures what callers pay. There are three:
 
 - `crates/gpu-memory/benches/allocator.rs` times the TLSF suballocator's and the pool's allocations and frees. It needs no GPU.
+- `crates/frame-graph/benches/compile.rs` times compiling a frame graph of 64 passes and 128 resources (design 0003). It needs no GPU.
 - `crates/rhi/benches/rhi/` times the RHI, with a module for each group, such as `recording.rs`. It needs a GPU: every group shares one headless backend, created without validation, since the layers would time themselves, but in a `TestSession`, so a warning still fails the run.
 
 ```
 cargo bench -p clockwork-gpu-memory
 cargo bench -p clockwork-gpu-memory -- tlsf/allocate
+cargo bench -p clockwork-frame-graph
 cargo bench -p clockwork-rhi
 cargo bench -p clockwork-rhi -- recording
 ```
