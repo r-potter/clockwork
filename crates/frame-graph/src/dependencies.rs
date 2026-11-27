@@ -60,10 +60,6 @@ pub(crate) struct Dependencies {
 /// The dependency graph of `passes`, the expanded passes of `desc`, which
 /// validation found have no mistakes, with every dependency, not yet
 /// reduced.
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "compiling, in a later pull request, calls it")
-)]
 pub(crate) fn dependencies(desc: &GraphDesc, passes: &[ExpandedPass]) -> Dependencies {
     let mut textures: Vec<Grid<Cell>> = desc.textures.iter().map(|_| Grid::default()).collect();
     for used in passes.iter().flat_map(|expanded| &expanded.pass.uses) {
@@ -222,7 +218,10 @@ impl Dependencies {
     /// would no longer imply the dependency it stood for.
     #[cfg_attr(
         not(test),
-        expect(dead_code, reason = "compiling, in a later pull request, calls it")
+        expect(
+            dead_code,
+            reason = "the `Overlap` schedule, which `graph-queues` adds, calls it"
+        )
     )]
     pub(crate) fn reduce(&mut self, kept: &[bool]) {
         for (on, &kept_pass) in self.on.iter_mut().zip(kept) {

@@ -29,10 +29,6 @@ pub(crate) struct Scheduled {
 /// topological order of the dependency graph, since every dependency is
 /// on an earlier pass, and puts each in a group of its own, so its
 /// barriers are recorded before it, as they would be by hand.
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "compiling, in a later pull request, calls it")
-)]
 pub(crate) fn schedule(kind: Schedule, kept: &[bool]) -> Scheduled {
     match kind {
         Schedule::AsWritten => {

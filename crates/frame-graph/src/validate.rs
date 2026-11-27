@@ -99,10 +99,6 @@ enum Checked {
 /// # Errors
 ///
 /// Returns every mistake found.
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "compiling, in a later pull request, calls it")
-)]
 pub(crate) fn validate(
     desc: &GraphDesc,
     inputs: &CompileInputs,

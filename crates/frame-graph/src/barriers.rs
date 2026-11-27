@@ -117,10 +117,6 @@ enum Slot {
 /// The barriers the passes `scheduled` runs need, of `passes`, the expanded
 /// passes of `desc`, whose textures' shapes are `shapes`, rendering to the
 /// output `output` describes.
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "compiling, in a later pull request, calls it")
-)]
 pub(crate) fn barriers(
     desc: &GraphDesc,
     output: &OutputDesc,
