@@ -20,7 +20,11 @@
 //! after. Barriers chain: a later barrier whose stages before share one
 //! with an earlier barrier's stages after is ordered after it, as Vulkan's
 //! execution dependencies chain. Each access is in one stage of its own,
-//! which this module gives without reference to how the RHI maps them.
+//! which this module gives without reference to how the RHI maps them. A
+//! global barrier orders only buffers, which it stands for, so a texture
+//! must be ordered by its own barriers. The caller orders what it does
+//! after the frame after the accesses it's left a resource in, as the
+//! frame orders its first uses after those it starts in.
 //!
 //! Resources the graph creates are checked over two frames running the
 //! plan one after the other, so a first use is checked against the last
@@ -354,7 +358,11 @@ impl<'a> Resource<'a> {
                 true
             }
             (BarrierTarget::Buffer(index), Unit::Buffer(buffer)) if *index == buffer => false,
-            (BarrierTarget::Global, _) => false,
+            // A global barrier orders textures' memory too, but a plan's
+            // stands for its group's buffers' barriers. Applying it to them
+            // alone checks that every texture is ordered by its own
+            // barriers, never by chance by a buffer's, which is stricter.
+            (BarrierTarget::Global, Unit::Buffer(_)) => false,
             _ => return None,
         };
         let before = if last_frame && barrier.from_last_frame {
@@ -431,7 +439,22 @@ impl<'a> Resource<'a> {
     /// Whether the events at `earlier` and `later` conflict: two uses where
     /// either writes, or a layout change, which writes, and a use or
     /// another layout change.
+    ///
+    /// The caller's uses are of any kind, so they conflict more. Its use
+    /// after the frame conflicts with every pass's use, since it may write.
+    /// Its accesses before the frame are the only ones what was written
+    /// before the frame is visible to, so they conflict with a pass's use
+    /// that has any other access, which needs that write made visible.
     fn conflict(&self, earlier: usize, later: usize) -> bool {
+        match (self.events[earlier].what, self.events[later].what) {
+            (What::Use(User::Pass(_), _), What::Use(User::End, _)) => return true,
+            (What::Use(User::Start, before), What::Use(User::Pass(_), set))
+                if !set.iter().all(|access| before.contains(access)) =>
+            {
+                return true;
+            }
+            _ => {}
+        }
         let writes = |what: What| match what {
             What::Use(_, set) => Some(set.is_write()),
             What::Barrier(..) if what.changes_layout() => Some(true),
@@ -459,6 +482,11 @@ impl<'a> Resource<'a> {
     /// event wrote, its accesses among that barrier's accesses after, so
     /// the write is visible to it. A later layout change must itself be in
     /// the chain.
+    ///
+    /// The caller's use after the frame is ordered as its own barrier, from
+    /// the accesses it's left in, would order it: after an earlier use
+    /// within those accesses, and after a chain that reaches one of their
+    /// stages.
     fn ordered(&self, earlier: usize, later: usize) -> bool {
         let first = self.events[earlier].what;
         let last = self.events[later].what;
@@ -492,18 +520,41 @@ impl<'a> Resource<'a> {
                 chain.push((index, after));
             }
         }
+        // The caller's accesses before the frame carry what was written
+        // before them, which must be made visible to a use with others.
+        let wrote = match first {
+            What::Use(User::Start, _) => true,
+            What::Use(_, earlier) => earlier.is_write(),
+            What::Barrier(..) => true,
+        };
+        let reaches = |set: AccessSet| {
+            chain.iter().any(|&(_, after)| {
+                stages(set) & !stages(after) == 0
+                    && (!wrote || set.iter().all(|access| after.contains(access)))
+            })
+        };
         match last {
             What::Barrier(..) => chain.iter().any(|&(index, _)| index == later),
-            What::Use(_, set) => {
-                let wrote = match first {
-                    What::Use(_, earlier) => earlier.is_write(),
-                    What::Barrier(..) => true,
+            // The caller orders what it does next after the stages of the
+            // accesses it's left in, and makes their writes available, as
+            // the frame orders its first uses after those it starts in. So
+            // the earlier use needs no barrier if it's within them, and a
+            // chain needs only to reach one of their stages.
+            What::Use(User::End, set) => {
+                let within = match first {
+                    What::Use(_, used) => {
+                        stages(used) & !stages(set) == 0
+                            && writes(used).into_iter().all(|write| set.contains(write))
+                    }
+                    What::Barrier(..) => false,
                 };
-                chain.iter().any(|&(_, after)| {
-                    stages(set) & !stages(after) == 0
-                        && (!wrote || set.iter().all(|access| after.contains(access)))
-                })
+                within
+                    || reaches(set)
+                    || chain
+                        .iter()
+                        .any(|&(_, after)| stages(after) & stages(set) != 0)
             }
+            What::Use(_, set) => reaches(set),
         }
     }
 
@@ -728,25 +779,6 @@ mod tests {
         finished(&graph)
     }
 
-    /// `plan` with its barrier at `index` left out.
-    fn without(plan: &Plan, index: usize) -> Plan {
-        let mut plan = plan.clone();
-        plan.barriers.remove(index);
-        let shift = |range: &mut Range<usize>| {
-            if range.start > index {
-                range.start -= 1;
-            }
-            if range.end > index {
-                range.end -= 1;
-            }
-        };
-        for group in &mut plan.groups {
-            shift(&mut group.barriers);
-        }
-        shift(&mut plan.end_of_frame);
-        plan
-    }
-
     /// The messages of the hazards `check` finds in `plan`, of `desc`.
     fn hazards(desc: &GraphDesc, plan: &Plan) -> Vec<String> {
         match check(desc, plan) {
@@ -780,7 +812,7 @@ mod tests {
             let plan = compile(&desc, &inputs()).expect("the graph is valid");
             for index in 0..plan.barriers.len() {
                 assert!(
-                    !hazards(&desc, &without(&plan, index)).is_empty(),
+                    !hazards(&desc, &plan.without_barrier(index)).is_empty(),
                     "barrier {index} of {}:\n{}",
                     desc.label(),
                     plan.describe()
@@ -809,7 +841,7 @@ mod tests {
         let desc = mixed();
         let plan = compile(&desc, &inputs()).expect("the graph is valid");
         let index = barrier_on(&plan, "colour", Access::ColorAttachmentWrite.into());
-        let found = hazards(&desc, &without(&plan, index));
+        let found = hazards(&desc, &plan.without_barrier(index));
         for expected in [
             "colour: pass \"resolve\" (copy-read) needs the copy-source layout, but it's in \
              attachment",
@@ -868,7 +900,7 @@ mod tests {
         let desc = mixed();
         let plan = compile(&desc, &inputs()).expect("the graph is valid");
         let index = barrier_on(&plan, "history", Access::CopyWrite.into());
-        let found = hazards(&desc, &without(&plan, index));
+        let found = hazards(&desc, &plan.without_barrier(index));
         assert!(
             found.contains(
                 &"history: pass \"shade\" (fragment-shader-sampled-read) isn't ordered after the \
@@ -887,7 +919,7 @@ mod tests {
         let plan = compile(&desc, &inputs()).expect("the graph is valid");
         let index = barrier_on(&plan, "target", Access::CopyWrite.into());
         assert_eq!(
-            hazards(&desc, &without(&plan, index)),
+            hazards(&desc, &plan.without_barrier(index)),
             [
                 "target: the accesses it must end the frame in (fragment-shader-sampled-read) \
                  needs the read-only layout, but it's in copy-destination",
@@ -896,6 +928,95 @@ mod tests {
                 "target: the accesses it must end the frame in (fragment-shader-sampled-read) \
                  isn't ordered after pass \"resolve\" (copy-write)",
             ]
+        );
+    }
+
+    /// The caller's uses at either end of the frame are of any kind. What
+    /// was written before the frame is visible only to the accesses an
+    /// import starts in, so a read with others is ordered after them, and
+    /// the caller orders what it does after the frame only after the
+    /// accesses it's left in, so a read with others is ordered before
+    /// them. A write within those accesses needs no barrier at all.
+    #[test]
+    fn the_callers_uses_order_the_frames_reads() {
+        let mut graph = GraphDesc::new("caller");
+        let lut = graph.import_texture(
+            "lut",
+            ImportDesc {
+                before: Access::FragmentShaderSampledRead.into(),
+                after: Access::FragmentShaderSampledRead.into(),
+            },
+        );
+        let target = graph.import_texture(
+            "target",
+            ImportDesc {
+                before: Access::CopyRead.into(),
+                after: Access::CopyWrite.into(),
+            },
+        );
+        graph
+            .compute_pass("grade", ComputeRecorder::recorder("grade"))
+            .read(lut, Access::ComputeShaderSampledRead)
+            .side_effects();
+        graph
+            .transfer_pass("fill", "fill")
+            .write(target, Access::CopyWrite);
+        let desc = finished(&graph);
+        let plan = compile(&desc, &inputs()).expect("the graph is valid");
+        assert_eq!(hazards(&desc, &plan), Vec::<String>::new());
+        let on_target = |barrier: &PlannedBarrier| {
+            matches!(barrier.target, BarrierTarget::Texture(texture, _)
+                if plan.texture_names[texture] == "target")
+        };
+        assert_eq!(plan.barriers.iter().filter(|&b| on_target(b)).count(), 1);
+
+        let first = barrier_on(&plan, "lut", Access::FragmentShaderSampledRead.into());
+        assert_eq!(
+            hazards(&desc, &plan.without_barrier(first)),
+            [
+                "lut: pass \"grade\" (compute-shader-sampled-read) isn't ordered after the \
+                 accesses it starts the frame in (fragment-shader-sampled-read)"
+            ]
+        );
+        let last = barrier_on(&plan, "lut", Access::ComputeShaderSampledRead.into());
+        assert_eq!(
+            hazards(&desc, &plan.without_barrier(last)),
+            [
+                "lut: the accesses it must end the frame in (fragment-shader-sampled-read) isn't \
+                 ordered after pass \"grade\" (compute-shader-sampled-read)"
+            ]
+        );
+    }
+
+    /// A global barrier stands for its group's buffers' barriers, so it
+    /// orders no texture, though Vulkan's would: every texture is ordered
+    /// by its own barriers.
+    #[test]
+    fn a_global_barrier_orders_only_buffers() {
+        let mut graph = GraphDesc::new("global");
+        let hdr = graph.transient_texture("hdr", texture(Format::Rgba16Float));
+        let lights = graph.transient_buffer("lights", 64);
+        for name in ["first", "second"] {
+            graph
+                .transfer_pass(name, name)
+                .write(hdr, Access::CopyWrite)
+                .write(lights, Access::CopyWrite)
+                .side_effects();
+        }
+        let desc = finished(&graph);
+        let plan = compile(&desc, &inputs()).expect("the graph is valid");
+        let index = plan
+            .barriers
+            .iter()
+            .position(|barrier| {
+                matches!(barrier.target, BarrierTarget::Texture(texture, _)
+                    if plan.texture_names[texture] == "hdr")
+                    && !barrier.from_last_frame
+            })
+            .expect("the second pass's write of hdr has a barrier");
+        assert_eq!(
+            hazards(&desc, &plan.without_barrier(index)),
+            ["hdr: pass \"second\" (copy-write) isn't ordered after pass \"first\" (copy-write)"]
         );
     }
 
