@@ -333,17 +333,12 @@ Outstanding tasks and future work.
 
       Revise design 0003's "Techniques" and "Alternatives considered"
       with the change.
-- [ ] **Skip import barriers past the import's shape in `graph-execute`.**
-      The frame graph's compiler doesn't know an imported texture's mips
-      and layers, which are the caller's, so it splits the texture's state
-      at its uses' bounds as written, where a whole use ends at
-      `Subresource::REMAINING`. A cell from an explicit bound to
-      `REMAINING`, such as mips `1..` of an import used whole and as mip
-      0, covers nothing when the import has only that many mips, and the
-      RHI panics on a barrier over an empty range. When the executor binds
-      each frame's imports, it should skip a planned barrier whose range
-      starts past the import's last mip or layer, with a T0 test of a
-      one-mip import used both ways.
+- [x] **Skip import barriers past the import's shape in `graph-execute`.**
+      Done in `crates/frame-graph/src/commands.rs`: turning a plan's
+      barriers into the RHI's each frame leaves out one that starts past
+      its texture's last mip or layer, such as mips `1..` of a one-mip
+      import used whole and as mip 0, which would cover nothing, and on
+      which the RHI panics.
 - [ ] **Leave out the barriers a plan doesn't need.** The property test
       `the_checker_finds_any_missing_barrier`
       (`crates/frame-graph/src/random_graphs.rs`) found barriers the

@@ -179,7 +179,7 @@ See "Documentation and lints" in design 0001 for what each kind of doc comment m
 
 ## Test tiers
 
-Tests are unit tests inside the crate they test, so they can reach its private items (ADR 0006). A crate may also have `tests/`, for tests of its public API, and `benches/`, for benchmarks (see "Benchmarks"). Fixtures another crate's tests need sit behind a `test-support` feature, which that crate enables in its `[dev-dependencies]`: `TestSession` is in `clockwork-diagnostics`'s.
+Tests are unit tests inside the crate they test, so they can reach its private items (ADR 0006). A crate may also have `tests/`, for tests of its public API, and `benches/`, for benchmarks (see "Benchmarks"). Fixtures another crate's tests need sit behind a `test-support` feature, which that crate enables in its `[dev-dependencies]`: `TestSession` is in `clockwork-diagnostics`'s, and `unissued_texture` and `unissued_buffer`, handles no backend issued, for T0 tests that build and compare commands naming resources with no device, are in `clockwork-rhi`'s.
 
 | Tier | Kind | Needs | How to run |
 |---|---|---|---|

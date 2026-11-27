@@ -64,6 +64,20 @@ pub(crate) struct Handle {
     generation: u32,
 }
 
+#[cfg(any(test, feature = "test-support"))]
+impl Handle {
+    /// A handle no table issued, to slot `index`, for tests that build
+    /// commands naming objects but never translate them. Its generation is
+    /// `u32::MAX`, which no object a table holds has, since a slot that
+    /// reaches it is never reused, so looking it up always fails.
+    pub(crate) fn unissued(index: u32) -> Self {
+        Self {
+            index,
+            generation: u32::MAX,
+        }
+    }
+}
+
 /// A table of objects of one kind, indexed by [`Handle`]s.
 #[derive(Debug)]
 pub(crate) struct HandleTable<T> {
@@ -477,6 +491,22 @@ mod tests {
             );
         }
         assert!(table.lookup(handle).is_ok());
+    }
+
+    /// A handle no table issued is invalid, even for a slot that holds an
+    /// object, so it never names one.
+    #[test]
+    fn unissued_handles_are_invalid() {
+        let mut table = HandleTable::new("texture");
+        table.insert("scene", ());
+        let unissued = Handle::unissued(0);
+        assert_eq!(
+            table.lookup(unissued),
+            Err(HandleError::Invalid {
+                kind: "texture",
+                handle: unissued
+            }),
+        );
     }
 
     /// A slot whose generation runs out is retired rather than reused, so

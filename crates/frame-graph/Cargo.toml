@@ -15,6 +15,9 @@ clockwork-rhi.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]
+# Handles no backend issued, for T0 tests of the commands the executor
+# builds.
+clockwork-rhi = { workspace = true, features = ["test-support"] }
 criterion.workspace = true
 insta.workspace = true
 proptest.workspace = true
