@@ -129,7 +129,7 @@ impl Scheduled {
 /// first, as barrier derivation joins them, so the layouts compared are
 /// those its barriers move the part to.
 #[cfg(test)]
-fn layout_clash(first: &ExpandedPass, second: &ExpandedPass) -> Option<usize> {
+pub(crate) fn layout_clash(first: &ExpandedPass, second: &ExpandedPass) -> Option<usize> {
     use clockwork_rhi::{AccessSet, Layout, Subresource};
 
     use crate::{ResourceUse, TextureUse};
