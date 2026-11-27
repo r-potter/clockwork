@@ -305,6 +305,18 @@ impl CommandList {
         &self.label
     }
 
+    /// How many commands the list holds: one for each call that records
+    /// one, so a call that records nothing, such as `barrier` with no
+    /// barriers, adds none.
+    ///
+    /// It's a measure of the work translating the list takes, for a caller
+    /// that groups lists into command buffers by size, as the frame graph
+    /// does (design 0003, "Coalescing"). It reveals nothing of what the
+    /// commands are, so callers can't come to depend on lists being data.
+    pub fn command_count(&self) -> usize {
+        self.commands.len()
+    }
+
     /// Removes every command, and forgets the program, state, index buffer
     /// and render pass they set, as if the list were new, but keeps its label
     /// and its memory. A list reset and recorded again each frame
@@ -1800,6 +1812,24 @@ mod tests {
         assert!(list.commands.capacity() > 0);
         assert!(list.render_states.capacity() > 0);
         assert!(list.push_data.capacity() > 0);
+    }
+
+    /// A list's command count is one for each call that records a
+    /// command, none for an empty barrier, and none once it's reset.
+    #[test]
+    fn lists_count_their_commands() {
+        assert_eq!(CommandList::new("empty").command_count(), 0);
+        let mut list = ready_to_draw();
+        list.draw(3, 1);
+        list.end_render_pass();
+        list.barrier(&[]);
+        assert_eq!(list.command_count(), list.recorded().len());
+        // Five to get ready to draw (binding the program, setting render
+        // state, viewport and scissor, and beginning the render pass), the
+        // draw and the end of the render pass. The empty barrier is none.
+        assert_eq!(list.command_count(), 7);
+        list.reset();
+        assert_eq!(list.command_count(), 0);
     }
 
     /// A reset list forgets the program and state it set, so drawing
