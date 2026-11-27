@@ -450,6 +450,7 @@ name = "clockwork-frame-graph"
 version = "0.1.0"
 dependencies = [
  "clockwork-rhi",
+ "criterion",
  "insta",
  "proptest",
  "tracing",
