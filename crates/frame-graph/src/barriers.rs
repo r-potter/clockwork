@@ -18,7 +18,10 @@
 //! The first use of each subresource in a frame is ordered after the last
 //! use before the frame: the accesses its import or the output gives, or
 //! for a resource the graph creates, the accesses the frame ends with,
-//! which the last frame, running the same plan, left it in. At the end of
+//! which the last frame, running the same plan, left it in. First reads
+//! among the reads an import or the output starts in need no barrier, nor
+//! do a buffer's among the reads the last frame ended with, since what was
+//! written before is visible to them already. At the end of
 //! the frame, the parts of imports and the output that passes used move to
 //! the accesses they must be left in. Parts no pass uses are left as they
 //! were, in the accesses they started in, so the graph needn't know an
@@ -274,6 +277,9 @@ fn combine(recorded: &[PlannedBarrier], combined: &mut Vec<PlannedBarrier>) -> R
     let mut before = None;
     let mut after = None;
     for barrier in recorded {
+        if orders_nothing(barrier) {
+            continue;
+        }
         match barrier.target {
             BarrierTarget::Texture(..) => combined.push(barrier.clone()),
             BarrierTarget::Buffer(_) | BarrierTarget::Global => {
@@ -393,11 +399,20 @@ fn apply(
 ) {
     let Some(state) = used else {
         // The frame's last accesses aren't known until the walk ends, so the
-        // barrier from them is completed then.
+        // barrier from them is completed then. Reads among the reads it
+        // starts in need no barrier: what was written before is visible to
+        // them already. So their barrier is to those reads, and orders
+        // nothing, so combining leaves it out, unless later reads widen it.
+        // It keeps them for the next barrier, which is then from the
+        // caller's accesses too.
+        let after = match start {
+            Some(before) if within(accesses, before, texture) => before,
+            _ => accesses,
+        };
         barriers.push(PlannedBarrier {
             target,
             before: start.unwrap_or(Access::None.into()),
-            after: accesses,
+            after,
             from_last_frame: start.is_none(),
         });
         let index = barriers.len() - 1;
@@ -409,10 +424,8 @@ fn apply(
     };
     let latest = &mut barriers[state.latest];
     let since = latest.after;
-    let joined = since | accesses;
-    let reads = !since.is_write() && !accesses.is_write();
-    if reads && (!texture || joined.layout() == since.layout()) {
-        latest.after = joined;
+    if takes_in(since, accesses, texture) {
+        latest.after = since | accesses;
         return;
     }
     barriers.push(PlannedBarrier {
@@ -422,6 +435,45 @@ fn apply(
         from_last_frame: false,
     });
     state.latest = barriers.len() - 1;
+}
+
+/// Whether a use with `accesses`, after uses with `since`, needs no barrier
+/// between them: both only read, and if they're of part of a texture, in
+/// one layout. An access that's only valid alone, such as `Access::None`,
+/// never takes in another.
+fn takes_in(since: AccessSet, accesses: AccessSet, texture: bool) -> bool {
+    let reads = !since.is_write() && !accesses.is_write();
+    let alone = since.iter().any(Access::is_alone_only);
+    reads && !alone && (!texture || (since | accesses).layout() == since.layout())
+}
+
+/// Whether a use with `accesses` is among `since`, all of them reads, so a
+/// barrier between them would order nothing: what was written before is
+/// visible to the reads already. If they're of part of a texture, the use
+/// must need the layout `since` is in too, since reads that share one
+/// layout together may each need another alone. An access that's only
+/// valid alone, such as `Access::None`, is never among another's.
+fn within(accesses: AccessSet, since: AccessSet, texture: bool) -> bool {
+    !since.is_write()
+        && !since.iter().any(Access::is_alone_only)
+        && accesses.iter().all(|access| since.contains(access))
+        && (!texture || accesses.layout() == since.layout())
+}
+
+/// Whether `barrier` orders nothing, so a plan needn't record it: from
+/// reads to the same reads. It's either recorded while walking from the
+/// reads an import or the output starts in, which took in the frame's
+/// first reads, or from the last frame's reads of a buffer only read.
+/// Every other barrier orders a write or a change of layout.
+///
+/// A texture's barrier from the last frame's reads is kept, since in the
+/// first frame after a compile it's from `Access::None`, and gives the
+/// texture its layout. A buffer has none, so it orders nothing then too.
+fn orders_nothing(barrier: &PlannedBarrier) -> bool {
+    let texture = matches!(barrier.target, BarrierTarget::Texture(..));
+    !(texture && barrier.from_last_frame)
+        && barrier.before == barrier.after
+        && within(barrier.after, barrier.before, texture)
 }
 
 /// Completes the first barrier of each of `cells`, the subresources of a
@@ -822,6 +874,70 @@ mod tests {
                 "pass \"grade\"",
             ])
         );
+    }
+
+    /// Reads among the accesses an import starts in need no barrier, and
+    /// nor do a buffer's among the reads the last frame ended with, since
+    /// what was written before is visible to them already. A read with
+    /// another access needs one, to make it visible to it, and so does a
+    /// later write, which is from the caller's reads too.
+    #[test]
+    fn reads_among_the_accesses_before_need_no_barrier() {
+        let mut graph = GraphDesc::new("reads before");
+        let lut = graph.import_texture(
+            "lut",
+            ImportDesc {
+                before: Access::ComputeShaderSampledRead | Access::FragmentShaderSampledRead,
+                after: Access::ComputeShaderSampledRead | Access::FragmentShaderSampledRead,
+            },
+        );
+        let noise = graph.import_texture(
+            "noise",
+            ImportDesc {
+                before: Access::FragmentShaderSampledRead.into(),
+                after: Access::FragmentShaderSampledRead.into(),
+            },
+        );
+        let counters = graph.persistent_buffer("counters", 64);
+        graph
+            .compute_pass("grade", ComputeRecorder::recorder("grade"))
+            .read(lut, Access::ComputeShaderSampledRead)
+            .read(noise, Access::ComputeShaderSampledRead)
+            .read(counters, Access::ComputeShaderRead)
+            .side_effects();
+        graph
+            .transfer_pass("refill", "refill")
+            .write(lut, Access::CopyWrite);
+
+        let mut expected = then_output(&[
+            "  noise mips 0.. layers 0..: FragmentShaderSampledRead -> ComputeShaderSampledRead",
+            "pass \"grade\"",
+            "  lut mips 0.. layers 0..: FragmentShaderSampledRead | ComputeShaderSampledRead -> \
+             CopyWrite",
+            "pass \"refill\"",
+        ]);
+        expected.extend(
+            [
+                "  lut mips 0.. layers 0..: CopyWrite -> FragmentShaderSampledRead | \
+                 ComputeShaderSampledRead",
+                "  noise mips 0.. layers 0..: ComputeShaderSampledRead -> FragmentShaderSampledRead",
+            ]
+            .map(str::to_owned),
+        );
+        assert_eq!(derived(&graph), expected);
+    }
+
+    /// A texture's reads are among the reads before them only if they need
+    /// the layout those are in: a depth test shares the attachment layout
+    /// with a colour attachment read, but alone needs the read-only one. A
+    /// buffer has no layout.
+    #[test]
+    fn reads_within_a_textures_accesses_share_their_layout() {
+        let both = Access::ColorAttachmentRead | Access::DepthAttachmentRead;
+        let depth = Access::DepthAttachmentRead.into();
+        assert!(within(depth, both, false));
+        assert!(!within(depth, both, true));
+        assert!(within(both, both, true));
     }
 
     /// Barriers of neighbouring mips, or neighbouring layers, with the same
