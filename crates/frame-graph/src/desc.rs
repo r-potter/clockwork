@@ -161,7 +161,8 @@ pub struct ImportDesc {
     /// The accesses it's in when the frame starts, which its first use is
     /// ordered after.
     pub before: AccessSet,
-    /// The accesses it must be left in when the frame ends.
+    /// The accesses it must be left in when the frame ends. The parts of
+    /// it no pass uses are left as they were, in `before`.
     pub after: AccessSet,
 }
 
