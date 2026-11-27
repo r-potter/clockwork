@@ -59,14 +59,15 @@ If none has it, the build fails with a message naming all three. Changing `SLANG
 3. **Clippy**, in debug and release: `cargo clippy --workspace --all-targets -- -D warnings`, so every warning, including the lints below, fails the check.
 4. **Rustdoc:** `cargo doc --workspace --no-deps --document-private-items`, with `RUSTDOCFLAGS=-D warnings`, so broken intra-doc links fail the check.
 5. **Each crate on its own:** `cargo check --package <crate>`, then the same with `--all-targets`, for the engine's crates and the application (the workspace's default members). A workspace build turns on, for each dependency, every feature any crate asks for, so a crate can build there and fail on its own, as in `cargo test --package <crate>`. Dev-dependencies' features apply only to builds with tests, hence the build without them first. Fix a failure by asking for the feature in the crate that needs it, or on the workspace dependency.
-6. **Tests that need no GPU:** `cargo test --workspace -- --skip gpu_tests`. With `--gpu`, every tier instead (see "GPU tests" below).
-7. **Smoke runs**, with `--gpu` only: the application in a window under each window system (see "Smoke runs" below).
+6. **Benchmarks that need no GPU, once:** `cargo test` with each by name (`--bench allocator --bench compile`), which runs each benchmark once, untimed, in debug, so one whose setup stops working fails the check (see "Benchmarks" below).
+7. **Tests that need no GPU:** `cargo test --workspace -- --skip gpu_tests`. With `--gpu`, every tier instead (see "GPU tests" below).
+8. **Smoke runs**, with `--gpu` only: the application in a window under each window system (see "Smoke runs" below).
 
 Options:
 
 | Option | Effect |
 |---|---|
-| `--gpu` | Run the GPU (T1) tests too, with `CLOCKWORK_REQUIRED_CAPABILITIES=all`: `cargo test --workspace` in place of step 6. Then the smoke runs. Needs a Vulkan 1.4 driver, the validation layer, and a display for each window system. |
+| `--gpu` | Run the GPU (T1) tests too, with `CLOCKWORK_REQUIRED_CAPABILITIES=all`: `cargo test --workspace` in place of step 7. Then the smoke runs. Needs a Vulkan 1.4 driver, the validation layer, and a display for each window system. |
 | `--no-window` | With `--gpu`: leave out the smoke runs, on purpose, for example over SSH. |
 | `--virtual-displays` | Linux, with `--gpu`: run the smoke runs on virtual displays, so they work with no desktop session (see "Virtual displays" below). |
 | `--lavapipe` | Linux, with `--gpu`: run the GPU tests and smoke runs on the pinned lavapipe alone, requiring only the capabilities it has (see "Lavapipe" below). This is how CI runs them. |
@@ -246,7 +247,7 @@ cargo bench -p clockwork-rhi -- recording
 
 A filter after `--` runs only the benchmarks whose names contain it: the second command runs the TLSF allocation benchmark, and the last the RHI's recording benchmarks. Results are printed, and kept in `target/criterion/`, so the next run reports the change from the last. To compare a branch with `main`, run the benchmarks on `main` with `-- --save-baseline main`, then on the branch with `-- --baseline main`.
 
-- **Benchmarks are run on demand,** not by `cargo xtask check` or CI, whose shared runners are too noisy for timings. The check builds them, through clippy's `--all-targets`, so they can't stop compiling. Run them when changing the code they cover, and give the numbers, and the machine, in the PR.
+- **Benchmarks are timed on demand,** not by `cargo xtask check` or CI, whose shared runners are too noisy for timings. The check builds them, through clippy's `--all-targets`, so they can't stop compiling, and runs those that need no GPU once, untimed, so their setup can't stop working. Add a new one that needs no GPU to that step, in `xtask/src/check.rs`. Run them when changing the code they cover, and give the numbers, and the machine, in the PR.
 - **Budgets are for the reference machine** a design names, the RTX 3090 machine for design 0002. Elsewhere, compare against `main` on the same machine rather than against the budget.
 - **Measure a steady state,** not an empty structure: the allocator's benchmarks fragment the block first, and every batch frees what it allocated, so each iteration sees the same state.
 - **Make the work repeatable,** with fixed seeds for anything random, so that two runs measure the same thing.
