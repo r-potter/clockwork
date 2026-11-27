@@ -214,8 +214,9 @@ mod tests {
     }
 
     /// Two kept passes that both write a texture stay ordered once the pass
-    /// between them is culled, since the graph is reduced after culling,
-    /// so the culled pass's path doesn't stand in for their dependency.
+    /// between them is culled, since the kept passes' graph is built after
+    /// culling, so the culled pass's path doesn't stand in for their
+    /// dependency.
     #[test]
     fn kept_passes_stay_ordered_around_a_culled_one() {
         let (mut graph, hdr, bloom) = graph();
@@ -236,11 +237,11 @@ mod tests {
             .write(output, Access::CopyWrite);
         let desc = finished(&graph);
         let validated = validate(&desc, &inputs()).expect("the graph is valid");
-        let mut dependencies = dependencies(&desc, &validated.passes);
+        let dependencies = dependencies(&desc, &validated.passes);
         let kept = cull(&desc, &validated.passes, &dependencies);
         assert_eq!(kept, [true, false, true, true, true]);
 
-        dependencies.reduce(&kept);
+        let dependencies = Dependencies::of_kept(&desc, &validated.passes, &kept);
         let second: Vec<_> = dependencies.on[2]
             .iter()
             .map(|dependency| (dependency.on, dependency.hazards.write_after_write))
