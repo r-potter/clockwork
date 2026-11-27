@@ -8,6 +8,8 @@ use std::ops::Range;
 use crate::Schedule;
 #[cfg(test)]
 use crate::dependencies::Dependencies;
+#[cfg(test)]
+use crate::expand::ExpandedPass;
 
 /// The order the kept passes run in, and their groups.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -43,16 +45,22 @@ pub(crate) fn schedule(kind: Schedule, kept: &[bool]) -> Scheduled {
 
 #[cfg(test)]
 impl Scheduled {
-    /// Why this isn't a valid schedule of the passes `kept` keeps, whose
-    /// dependency graph, reduced, is `dependencies`, if it isn't: each kept
-    /// pass runs once, after every pass it depends on, and the groups cover
-    /// the passes in order, with no dependency between two passes of one
-    /// group.
+    /// Why this isn't a valid schedule of the passes `kept` keeps, of
+    /// `passes`, whose dependency graph, reduced, is `dependencies`, if it
+    /// isn't: each kept pass runs once, after every pass it depends on, and
+    /// the groups cover the passes in order, with no dependency between two
+    /// passes of one group, and no part of a texture used by two of them in
+    /// different layouts.
     ///
     /// The design also puts a group's passes on one queue. Until queues are
     /// assigned, in the `graph-queues` slice, every pass is on one queue, so
     /// there's nothing to check; that slice adds the check.
-    pub(crate) fn mistake(&self, dependencies: &Dependencies, kept: &[bool]) -> Option<String> {
+    pub(crate) fn mistake(
+        &self,
+        passes: &[ExpandedPass],
+        dependencies: &Dependencies,
+        kept: &[bool],
+    ) -> Option<String> {
         let mut place = vec![None; kept.len()];
         for (at, &pass) in self.passes.iter().enumerate() {
             match kept.get(pass) {
@@ -101,8 +109,87 @@ impl Scheduled {
                 }
             }
         }
+        for range in &self.groups {
+            let members = &self.passes[range.clone()];
+            for (at, &first) in members.iter().enumerate() {
+                for &second in &members[at + 1..] {
+                    if let Some(texture) = layout_clash(&passes[first], &passes[second]) {
+                        return Some(format!(
+                            "passes {first} and {second} share a group, but use texture \
+                             {texture} in different layouts"
+                        ));
+                    }
+                }
+            }
+        }
         None
     }
+}
+
+/// The index of a texture that `first` and `second` use overlapping parts
+/// of in different layouts, if there's one: such passes can't share a
+/// group, since its barriers, recorded before all of its passes, can leave
+/// the part in only one layout. Each pass's uses of the part are joined
+/// first, as barrier derivation joins them, so the layouts compared are
+/// those its barriers move the part to.
+#[cfg(test)]
+fn layout_clash(first: &ExpandedPass, second: &ExpandedPass) -> Option<usize> {
+    use clockwork_rhi::{AccessSet, Layout, Subresource};
+
+    use crate::{ResourceUse, TextureUse};
+
+    /// Whether two ranges share a mip or layer.
+    fn overlap(a: &Range<u32>, b: &Range<u32>) -> bool {
+        a.start < b.end && b.start < a.end
+    }
+    /// The part both `a` and `b` cover, or `None` if they're of different
+    /// textures or don't overlap.
+    fn shared(a: &TextureUse, b: &TextureUse) -> Option<TextureUse> {
+        let (a_part, b_part) = (&a.subresource, &b.subresource);
+        let both = a.texture == b.texture
+            && overlap(&a_part.mips, &b_part.mips)
+            && overlap(&a_part.layers, &b_part.layers);
+        both.then(|| TextureUse {
+            texture: a.texture,
+            subresource: Subresource {
+                mips: a_part.mips.start.max(b_part.mips.start)
+                    ..a_part.mips.end.min(b_part.mips.end),
+                layers: a_part.layers.start.max(b_part.layers.start)
+                    ..a_part.layers.end.min(b_part.layers.end),
+            },
+        })
+    }
+    /// The layout the accesses of `pass`'s uses that overlap `area` join
+    /// into.
+    fn layout(pass: &ExpandedPass, area: &TextureUse) -> Option<Layout> {
+        pass.pass
+            .uses
+            .iter()
+            .filter_map(|used| match &used.resource {
+                ResourceUse::Texture(part) if shared(part, area).is_some() => Some(used.access),
+                _ => None,
+            })
+            .reduce(AccessSet::union)
+            .and_then(AccessSet::layout)
+    }
+
+    /// The parts of textures `pass` uses.
+    fn textures(pass: &ExpandedPass) -> impl Iterator<Item = &TextureUse> {
+        pass.pass
+            .uses
+            .iter()
+            .filter_map(|used| match &used.resource {
+                ResourceUse::Texture(part) => Some(part),
+                _ => None,
+            })
+    }
+
+    textures(first).find_map(|a| {
+        textures(second).find_map(|b| {
+            let area = shared(a, b)?;
+            (layout(first, &area) != layout(second, &area)).then(|| a.texture.index())
+        })
+    })
 }
 
 #[cfg(test)]
@@ -121,14 +208,44 @@ mod tests {
     };
 
     /// `desc`, a valid description, compiled as far as scheduling it as
-    /// written: its schedule, its reduced dependency graph, and which of
-    /// its passes are kept.
-    fn compiled(desc: &GraphDesc) -> (Scheduled, Dependencies, Vec<bool>) {
+    /// written.
+    struct Compiled {
+        /// Its schedule.
+        scheduled: Scheduled,
+        /// Its expanded passes.
+        passes: Vec<ExpandedPass>,
+        /// Its dependency graph, reduced.
+        dependencies: Dependencies,
+        /// Which of its passes are kept.
+        kept: Vec<bool>,
+    }
+
+    /// `desc`, a valid description, compiled as far as scheduling it as
+    /// written.
+    fn compiled(desc: &GraphDesc) -> Compiled {
         let validated = validate(desc, &inputs()).expect("the graph is valid");
         let mut dependencies = dependencies(desc, &validated.passes);
         let kept = cull(desc, &validated.passes, &dependencies);
         dependencies.reduce(&kept);
-        (schedule(Schedule::AsWritten, &kept), dependencies, kept)
+        Compiled {
+            scheduled: schedule(Schedule::AsWritten, &kept),
+            passes: validated.passes,
+            dependencies,
+            kept,
+        }
+    }
+
+    impl Compiled {
+        /// Why the schedule of `passes` and `groups` isn't valid for the
+        /// graph, with `kept` in place of the passes culling keeps.
+        fn mistake(
+            &self,
+            passes: Vec<usize>,
+            groups: Vec<Range<usize>>,
+            kept: &[bool],
+        ) -> Option<String> {
+            Scheduled { passes, groups }.mistake(&self.passes, &self.dependencies, kept)
+        }
     }
 
     /// `AsWritten` runs the kept passes in the written order, each in a
@@ -161,18 +278,21 @@ mod tests {
             .bind(bloom, Access::ComputeShaderSampledRead)
             .side_effects();
 
-        let (scheduled, dependencies, kept) = compiled(&finished(&graph));
+        let compiled = compiled(&finished(&graph));
+        let scheduled = &compiled.scheduled;
         // Pass 1 is culled, passes 2 to 4 are the downsample's
         // repetitions, and pass 6 writes the output.
         assert_eq!(scheduled.passes, [0, 2, 3, 4, 5, 6]);
         assert_eq!(scheduled.groups, [0..1, 1..2, 2..3, 3..4, 4..5, 5..6]);
-        assert_eq!(scheduled.mistake(&dependencies, &kept), None);
+        let mistake = scheduled.mistake(&compiled.passes, &compiled.dependencies, &compiled.kept);
+        assert_eq!(mistake, None);
     }
 
     /// The check of a schedule finds a pass that runs before one it depends
     /// on or depends on one that doesn't run, a pass that runs twice, is
-    /// missing, is culled or isn't in the graph, groups that don't cover the passes in order, and two passes of
-    /// one group with a dependency between them.
+    /// missing, is culled or isn't in the graph, groups that don't cover
+    /// the passes in order, and two passes of one group with a dependency
+    /// between them.
     #[test]
     fn invalid_schedules_are_found() {
         let mut graph = GraphDesc::new("invalid");
@@ -185,12 +305,11 @@ mod tests {
             .transfer_pass("read", "b")
             .read(hdr, Access::CopyRead)
             .side_effects();
-        let (valid, dependencies, kept) = compiled(&finished(&graph));
-        assert_eq!(valid.passes, [0, 1, 2]);
+        let compiled = compiled(&finished(&graph));
+        assert_eq!(compiled.scheduled.passes, [0, 1, 2]);
 
-        let mistake = |passes: Vec<usize>, groups: Vec<Range<usize>>, kept: &[bool]| {
-            Scheduled { passes, groups }.mistake(&dependencies, kept)
-        };
+        let kept = compiled.kept.clone();
+        let mistake = |passes, groups, kept: &[bool]| compiled.mistake(passes, groups, kept);
         let singles = || vec![0..1, 1..2, 2..3];
         let message = |text: &str| Some(text.to_owned());
         assert_eq!(
@@ -236,6 +355,43 @@ mod tests {
         assert_eq!(
             mistake(vec![0, 1, 2], vec![0..2, 2..3], &kept),
             message("pass 1 shares a group with pass 0, which it depends on")
+        );
+    }
+
+    /// The check of a schedule finds two passes of one group that use a
+    /// part of a texture in different layouts, though they have no
+    /// dependency between them, and allows two that share a layout.
+    #[test]
+    fn a_group_uses_a_texture_in_one_layout() {
+        let mut graph = GraphDesc::new("layouts");
+        let size = TextureSize::Fixed(Extent3d::new_2d(16, 16));
+        let hdr = graph.transient_texture("hdr", TransientTexture::new(Format::Rgba16Float, size));
+        graph
+            .transfer_pass("write", "a")
+            .write(hdr, Access::CopyWrite);
+        graph
+            .transfer_pass("copy", "b")
+            .read(hdr, Access::CopyRead)
+            .side_effects();
+        graph
+            .compute_pass("sample", ComputeRecorder::recorder("c"))
+            .read(hdr, Access::ComputeShaderSampledRead)
+            .side_effects();
+        graph
+            .compute_pass("sample again", ComputeRecorder::recorder("d"))
+            .read(hdr, Access::ComputeShaderSampledRead)
+            .side_effects();
+        let compiled = compiled(&finished(&graph));
+        let kept = &compiled.kept;
+        assert_eq!(compiled.scheduled.passes, [0, 1, 2, 3, 4]);
+
+        assert_eq!(
+            compiled.mistake(vec![0, 1, 2, 3, 4], vec![0..1, 1..3, 3..4, 4..5], kept),
+            Some("passes 1 and 2 share a group, but use texture 1 in different layouts".to_owned())
+        );
+        assert_eq!(
+            compiled.mistake(vec![0, 1, 2, 3, 4], vec![0..1, 1..2, 2..4, 4..5], kept),
+            None
         );
     }
 }

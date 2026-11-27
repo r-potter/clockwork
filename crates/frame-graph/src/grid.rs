@@ -68,6 +68,16 @@ impl<T: Clone + Default> Grid<T> {
         intervals(&self.mips, mips)
             .flat_map(move |mip| layers.clone().map(move |layer| mip * columns + layer))
     }
+
+    /// The mips and layers of the cell at `index`.
+    pub(crate) fn bounds(&self, index: usize) -> (Range<u32>, Range<u32>) {
+        let columns = self.layers.len() - 1;
+        let (mip, layer) = (index / columns, index % columns);
+        (
+            self.mips[mip]..self.mips[mip + 1],
+            self.layers[layer]..self.layers[layer + 1],
+        )
+    }
 }
 
 #[cfg(test)]
@@ -77,7 +87,7 @@ mod tests {
     use super::*;
 
     /// A texture is split at every bound of its uses, and each use covers
-    /// the cells between its bounds.
+    /// the cells between its bounds, which give back their own bounds.
     #[test]
     fn uses_cover_the_cells_between_their_bounds() {
         let mut grid = Grid::<()>::default();
@@ -88,5 +98,7 @@ mod tests {
         assert_eq!(grid.cells.len(), 6);
         assert_eq!(grid.cells(&(1..2), &(0..2)).collect::<Vec<_>>(), [2, 3]);
         assert_eq!(grid.cells(&(0..4), &(1..2)).collect::<Vec<_>>(), [1, 3, 5]);
+        assert_eq!(grid.bounds(5), (2..4, 1..2));
+        assert_eq!(grid.bounds(0), (0..1, 0..1));
     }
 }
