@@ -152,7 +152,7 @@ fn transient_data_reaches_shaders() {
         )]);
         // Every list that uses the frame's allocations is translated before
         // the frame ends.
-        let command_buffer = graphics.translate(&list).unwrap();
+        let command_buffer = graphics.translate_lists(&[&list]).unwrap();
         resources.end_transient_frame(frame);
         let done = graphics
             .submit(SubmitDesc::new(vec![command_buffer]))
@@ -197,7 +197,7 @@ fn chunks_wait_for_lists_translated_in_their_frame() {
     let frame = resources.begin_transient_frame();
     let first = frame.allocate(16, 16).unwrap().address();
     let command_buffer = graphics
-        .translate(&CommandList::new("uses the frame"))
+        .translate_lists(&[&CommandList::new("uses the frame")])
         .unwrap();
     resources.end_transient_frame(frame);
     resources.collect_garbage();
@@ -336,7 +336,7 @@ fn render_colour(backend: &VulkanTestBackend, address: GpuAddress) -> [f32; 4] {
         Access::HostRead,
     )]);
     let graphics = backend.queue(QueueKind::Graphics);
-    let command_buffer = graphics.translate(&list).unwrap();
+    let command_buffer = graphics.translate_lists(&[&list]).unwrap();
     let done = graphics
         .submit(SubmitDesc::new(vec![command_buffer]))
         .unwrap();

@@ -28,7 +28,7 @@ fn create_buffer(resources: &dyn GpuResources) -> (Buffer, GpuAddress) {
 /// returning the timepoint it reached.
 fn run(backend: &VulkanTestBackend, list: &CommandList) -> GpuTimepoint {
     let graphics = backend.queue(QueueKind::Graphics);
-    let command_buffer = graphics.translate(list).unwrap();
+    let command_buffer = graphics.translate_lists(&[list]).unwrap();
     let done = graphics
         .submit(SubmitDesc::new(vec![command_buffer]))
         .unwrap();
@@ -129,7 +129,10 @@ fn unsubmitted_command_buffers_recycle_their_chunks() {
     let mut list = CommandList::new("dropped");
     list.begin_timing("nothing");
     list.end_timing();
-    let command_buffer = backend.queue(QueueKind::Graphics).translate(&list).unwrap();
+    let command_buffer = backend
+        .queue(QueueKind::Graphics)
+        .translate_lists(&[&list])
+        .unwrap();
     assert_eq!(backend.core.query_pools.free_len(), 0);
     drop(command_buffer);
     assert_eq!(backend.core.query_pools.free_len(), 1);

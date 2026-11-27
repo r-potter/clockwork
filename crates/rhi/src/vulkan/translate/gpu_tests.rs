@@ -44,16 +44,16 @@ fn create(
 /// waits for it.
 fn run(backend: &VulkanTestBackend, kind: QueueKind, list: &CommandList) {
     let queue = backend.queue(kind);
-    let command_buffer = queue.translate(list).unwrap();
+    let command_buffer = queue.translate_lists(&[list]).unwrap();
     let done = queue.submit(SubmitDesc::new(vec![command_buffer])).unwrap();
     queue.wait(done).unwrap();
 }
 
-/// The message `translate` panics with, translating `list` for the queue
+/// The message translation panics with, translating `list` for the queue
 /// `kind`'s work goes to.
 fn translation_panic(backend: &VulkanTestBackend, kind: QueueKind, list: &CommandList) -> String {
     let queue = backend.queue(kind);
-    let panic = panic::catch_unwind(AssertUnwindSafe(|| queue.translate(list)))
+    let panic = panic::catch_unwind(AssertUnwindSafe(|| queue.translate_lists(&[list])))
         .expect_err("translation should panic");
     panic
         .downcast_ref::<String>()
@@ -504,6 +504,115 @@ fn dispatches_need_a_compute_program() {
         "command list \"draw\" dispatches with no compute program bound",
     );
     resources.destroy_program(program);
+}
+
+/// The message translation panics with, translating `lists` together for
+/// the graphics queue.
+fn lists_panic(backend: &VulkanTestBackend, lists: &[&CommandList]) -> String {
+    let graphics = backend.queue(QueueKind::Graphics);
+    let panic = panic::catch_unwind(AssertUnwindSafe(|| graphics.translate_lists(lists)))
+        .expect_err("translation should panic");
+    panic
+        .downcast_ref::<String>()
+        .cloned()
+        .or_else(|| panic.downcast_ref::<&str>().map(|text| (*text).to_owned()))
+        .expect("the panic has a message")
+}
+
+/// Lists translated together run in order in one command buffer, named for
+/// them all: a fill, then a copy of what it filled, which is read back.
+/// Each list's timing scopes are reported in it, as they would be alone.
+#[test]
+fn lists_translate_into_one_command_buffer() {
+    let session = TestSession::new();
+    let backend = VulkanTestBackend::headless(&session);
+    let resources = backend.resources();
+    let filled = create(&**resources, "filled", 16, MemoryLocation::Device);
+    let copied = create(&**resources, "copied", 16, MemoryLocation::Readback);
+    let (from, to) = (
+        resources.buffer_address(filled),
+        resources.buffer_address(copied),
+    );
+
+    let mut fill = CommandList::new("fill");
+    fill.begin_timing("fill");
+    fill.fill_buffer(from, 16, 0x1111_1111);
+    fill.end_timing();
+    let mut copy = CommandList::new("copy");
+    copy.begin_timing("copy");
+    copy.barrier(&[Barrier::buffer(filled, Access::CopyWrite, Access::CopyRead)]);
+    copy.copy_buffer(from, to, 16);
+    copy.barrier(&[Barrier::buffer(copied, Access::CopyWrite, Access::HostRead)]);
+    copy.end_timing();
+
+    let graphics = backend.queue(QueueKind::Graphics);
+    let command_buffer = graphics.translate_lists(&[&fill, &copy]).unwrap();
+    let done = graphics
+        .submit(SubmitDesc::new(vec![command_buffer]))
+        .unwrap();
+    graphics.wait(done).unwrap();
+    let mut value = [0; 16];
+    resources.read_buffer(copied, 0, &mut value).unwrap();
+    assert_eq!(value, [0x11; 16]);
+
+    let timings = graphics.take_timings(done).unwrap().unwrap();
+    assert_eq!(timings.command_buffers.len(), 1);
+    let command_buffer = &timings.command_buffers[0];
+    assert_eq!(command_buffer.label, "fill + copy");
+    let scopes: Vec<_> = command_buffer
+        .scopes
+        .iter()
+        .map(|scope| (scope.label.as_str(), scope.depth, scope.duration.is_some()))
+        .collect();
+    assert_eq!(scopes, [("fill", 0, true), ("copy", 0, true)]);
+    resources.destroy_buffer(filled);
+    resources.destroy_buffer(copied);
+}
+
+/// Each list translated together is checked on its own: a compute program
+/// one list binds isn't bound for the next, whose dispatch panics, naming
+/// it.
+#[test]
+fn programs_dont_carry_into_the_next_list() {
+    let session = TestSession::new();
+    let backend = VulkanTestBackend::headless(&session);
+    let resources = backend.resources();
+    let compute = resources
+        .create_program(&test_shaders::write_value().desc())
+        .unwrap();
+    let graphics = resources
+        .create_program(&test_shaders::triangle().desc())
+        .unwrap();
+    let mut binds = CommandList::new("binds");
+    binds.bind_program(compute);
+    let mut dispatches = CommandList::new("dispatches");
+    dispatches.bind_program(graphics);
+    dispatches.dispatch([1, 1, 1]);
+    assert_eq!(
+        lists_panic(&backend, &[&binds, &dispatches]),
+        "command list \"dispatches\" dispatches with no compute program bound",
+    );
+    resources.destroy_program(compute);
+    resources.destroy_program(graphics);
+}
+
+/// Translating no lists together panics, and so does translating a list
+/// with a timing scope open, though an earlier list is complete, naming it.
+#[test]
+fn lists_translated_together_are_each_complete() {
+    let session = TestSession::new();
+    let backend = VulkanTestBackend::headless(&session);
+    assert_eq!(
+        lists_panic(&backend, &[]),
+        "no command lists are translated together"
+    );
+    let complete = CommandList::new("complete");
+    let mut open = CommandList::new("open");
+    open.begin_timing("open");
+    assert_eq!(
+        lists_panic(&backend, &[&complete, &open]),
+        "command list \"open\" is translated with 1 timing scope still open",
+    );
 }
 
 /// Binding a vertex and fragment program binds only its own stages, so a
@@ -1783,7 +1892,7 @@ fn cross_queue_wait() {
     upload_list.barrier(std::slice::from_ref(&handover));
     let uploaded = transfer
         .submit(SubmitDesc::new(vec![
-            transfer.translate(&upload_list).unwrap(),
+            transfer.translate_lists(&[&upload_list]).unwrap(),
         ]))
         .unwrap();
 
@@ -1797,7 +1906,7 @@ fn cross_queue_wait() {
     )]);
     let read = graphics
         .submit(SubmitDesc {
-            command_buffers: vec![graphics.translate(&read_list).unwrap()],
+            command_buffers: vec![graphics.translate_lists(&[&read_list]).unwrap()],
             wait_for: &[uploaded],
         })
         .unwrap();
@@ -1845,7 +1954,7 @@ fn parallel_translation() {
             .iter()
             .map(|list| {
                 let span = session.span().clone();
-                scope.spawn(move || span.in_scope(|| graphics.translate(list).unwrap()))
+                scope.spawn(move || span.in_scope(|| graphics.translate_lists(&[list]).unwrap()))
             })
             .collect();
         threads
@@ -1859,7 +1968,7 @@ fn parallel_translation() {
         Access::CopyWrite,
         Access::HostRead,
     )]);
-    command_buffers.push(graphics.translate(&last).unwrap());
+    command_buffers.push(graphics.translate_lists(&[&last]).unwrap());
     let done = graphics.submit(SubmitDesc::new(command_buffers)).unwrap();
     graphics.wait(done).unwrap();
 
@@ -2061,7 +2170,7 @@ fn subresources_outside_their_texture_panic() {
         Access::None,
         Access::FragmentShaderSampledRead,
     )]);
-    let _ = backend.queue(QueueKind::Graphics).translate(&list);
+    let _ = backend.queue(QueueKind::Graphics).translate_lists(&[&list]);
 }
 
 /// The whole of mip 0, layer 0, of `texture`, which is `extent` there.
@@ -2337,7 +2446,7 @@ fn texture_copies_are_checked_when_translated() {
         },
         whole(texture, extent),
     );
-    let _ = backend.queue(QueueKind::Graphics).translate(&list);
+    let _ = backend.queue(QueueKind::Graphics).translate_lists(&[&list]);
 }
 
 /// A command buffer's pool is claimed again for its next command buffer
@@ -2353,17 +2462,17 @@ fn command_pools_are_reused() {
     let pool =
         |command_buffer: &crate::CommandBuffer| command_buffer.0.commands.as_ref().unwrap().pool();
 
-    let submitted = graphics.translate(&list).unwrap();
+    let submitted = graphics.translate_lists(&[&list]).unwrap();
     let first = pool(&submitted);
     let done = graphics.submit(SubmitDesc::new(vec![submitted])).unwrap();
-    let pending = graphics.translate(&list).unwrap();
+    let pending = graphics.translate_lists(&[&list]).unwrap();
     assert_eq!(pool(&pending), first);
     drop(pending);
     graphics.wait(done).unwrap();
-    let dropped = graphics.translate(&list).unwrap();
+    let dropped = graphics.translate_lists(&[&list]).unwrap();
     assert_eq!(pool(&dropped), first);
     drop(dropped);
-    assert_eq!(pool(&graphics.translate(&list).unwrap()), first);
+    assert_eq!(pool(&graphics.translate_lists(&[&list]).unwrap()), first);
 }
 
 /// A command buffer can only be submitted to the queue it was translated
@@ -2378,7 +2487,7 @@ fn command_buffers_belong_to_their_queue() {
     let backend = VulkanTestBackend::headless(&session);
     let command_buffer = backend
         .queue(QueueKind::Graphics)
-        .translate(&CommandList::new("copies"))
+        .translate_lists(&[&CommandList::new("copies")])
         .unwrap();
     command_buffer.0.check_queue(QueueId::new(1));
 }

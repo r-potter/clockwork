@@ -36,7 +36,11 @@ pub(crate) fn bench(criterion: &mut Criterion, context: &Context) {
         "translation/parallel",
         &lists,
         1,
-        |list| queue.translate(list).expect("translation succeeds"),
+        |list| {
+            queue
+                .translate_lists(&[list])
+                .expect("translation succeeds")
+        },
         || {},
     );
 
@@ -62,7 +66,7 @@ fn translate(queue: &dyn Queue, list: &CommandList, iters: u64) -> Duration {
     let mut total = Duration::ZERO;
     for _ in 0..iters {
         let start = Instant::now();
-        let commands = queue.translate(list);
+        let commands = queue.translate_lists(&[list]);
         total += start.elapsed();
         drop(commands.expect("translation succeeds"));
     }

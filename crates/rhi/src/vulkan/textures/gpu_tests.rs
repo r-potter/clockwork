@@ -276,7 +276,10 @@ fn attachment_views_are_cached() {
             depth: None,
         });
         list.end_render_pass();
-        backend.queue(QueueKind::Graphics).translate(&list).unwrap();
+        backend
+            .queue(QueueKind::Graphics)
+            .translate_lists(&[&list])
+            .unwrap();
     };
     assert_eq!(attachment_views(), 0);
     render(0, 0..2);
@@ -474,7 +477,7 @@ fn surface_images_are_owned_by_their_swapchain() {
     });
     list.end_render_pass();
     let graphics = backend.queue(QueueKind::Graphics);
-    let command_buffer = graphics.translate(&list).unwrap();
+    let command_buffer = graphics.translate_lists(&[&list]).unwrap();
     let timepoint = graphics
         .submit(SubmitDesc {
             command_buffers: vec![command_buffer],
