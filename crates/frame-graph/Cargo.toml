@@ -13,3 +13,6 @@ workspace = true
 [dependencies]
 clockwork-rhi.workspace = true
 tracing.workspace = true
+
+[dev-dependencies]
+insta.workspace = true

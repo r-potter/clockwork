@@ -1,0 +1,44 @@
+---
+source: crates/frame-graph/src/describe.rs
+expression: described(&graph)
+---
+batch 0 on graphics
+  group 0
+    barrier scene: fragment-shader-sampled-read | compute-shader-sampled-read -> color-attachment-write (after the last frame)
+    pass "scene" (raster)
+      render pass: colour scene: clear (0, 0, 0, 1), store
+  group 1
+    barrier scene: color-attachment-write -> fragment-shader-sampled-read | compute-shader-sampled-read
+    barrier bloom mip 0: fragment-shader-sampled-read -> compute-shader-write (after the last frame)
+    pass "bright" (compute)
+  group 2
+    barrier bloom mip 0: compute-shader-write -> compute-shader-sampled-read
+    barrier bloom mip 1: compute-shader-sampled-read -> compute-shader-write (after the last frame)
+    pass "downsample (mip 1)" (compute)
+  group 3
+    barrier bloom mip 1: compute-shader-write -> compute-shader-sampled-read
+    barrier bloom mip 2: compute-shader-sampled-read -> compute-shader-write (after the last frame)
+    pass "downsample (mip 2)" (compute)
+  group 4
+    barrier bloom mip 2: compute-shader-write -> compute-shader-sampled-read
+    barrier bloom mip 3: compute-shader-sampled-read -> compute-shader-write (after the last frame)
+    pass "downsample (mip 3)" (compute)
+  group 5
+    barrier bloom mip 2: compute-shader-sampled-read -> compute-shader-read | compute-shader-write
+    barrier bloom mip 3: compute-shader-write -> compute-shader-sampled-read
+    pass "upsample (mip 2)" (compute)
+  group 6
+    barrier bloom mip 1: compute-shader-sampled-read -> compute-shader-read | compute-shader-write
+    barrier bloom mip 2: compute-shader-read | compute-shader-write -> compute-shader-sampled-read
+    pass "upsample (mip 1)" (compute)
+  group 7
+    barrier bloom mip 0: compute-shader-sampled-read -> compute-shader-read | compute-shader-write
+    barrier bloom mip 1: compute-shader-read | compute-shader-write -> compute-shader-sampled-read
+    pass "upsample (mip 0)" (compute)
+  group 8
+    barrier output: acquired -> color-attachment-write
+    barrier bloom mip 0: compute-shader-read | compute-shader-write -> fragment-shader-sampled-read
+    pass "composite" (fullscreen)
+      render pass: colour output: don't care, store
+  end of frame
+    barrier output: color-attachment-write -> present

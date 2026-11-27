@@ -1,0 +1,15 @@
+---
+source: crates/frame-graph/src/describe.rs
+expression: described(&graph)
+---
+batch 0 on graphics
+  group 0
+    barrier all memory: fragment-shader-read -> compute-shader-write
+    pass "cull lights" (compute)
+  group 1
+    barrier output: acquired -> color-attachment-write
+    barrier all memory: compute-shader-write -> fragment-shader-read
+    pass "shade" (raster)
+      render pass: colour output: clear (0, 0, 0, 1), store
+  end of frame
+    barrier output: color-attachment-write -> present

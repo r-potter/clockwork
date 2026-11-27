@@ -1,0 +1,34 @@
+---
+source: crates/frame-graph/src/describe.rs
+expression: described(&graph)
+---
+batch 0 on graphics
+  group 0
+    barrier depth: fragment-shader-sampled-read -> depth-attachment-read | depth-attachment-write (after the last frame)
+    pass "depth prepass" (raster)
+      render pass: depth depth: clear 0, store
+  group 1
+    barrier depth: depth-attachment-read | depth-attachment-write -> depth-attachment-read | depth-attachment-write
+    barrier albedo: fragment-shader-sampled-read -> color-attachment-write (after the last frame)
+    barrier normals: fragment-shader-sampled-read -> color-attachment-write (after the last frame)
+    pass "g-buffer" (raster)
+      render pass: colour albedo: don't care, store; colour normals: don't care, store; depth depth: load, store
+  group 2
+    barrier shadow: fragment-shader-sampled-read -> depth-attachment-read | depth-attachment-write (after the last frame)
+    pass "shadow map" (raster)
+      render pass: depth shadow: clear 0, store
+  group 3
+    barrier depth: depth-attachment-read | depth-attachment-write -> fragment-shader-sampled-read
+    barrier albedo: color-attachment-write -> fragment-shader-sampled-read
+    barrier normals: color-attachment-write -> fragment-shader-sampled-read
+    barrier shadow: depth-attachment-read | depth-attachment-write -> fragment-shader-sampled-read
+    barrier hdr: fragment-shader-sampled-read -> color-attachment-write (after the last frame)
+    pass "lighting" (fullscreen)
+      render pass: colour hdr: don't care, store
+  group 4
+    barrier output: acquired -> color-attachment-write
+    barrier hdr: color-attachment-write -> fragment-shader-sampled-read
+    pass "tone map" (fullscreen)
+      render pass: colour output: don't care, store
+  end of frame
+    barrier output: color-attachment-write -> present

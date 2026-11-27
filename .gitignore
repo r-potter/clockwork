@@ -1,1 +1,5 @@
 /target
+# Snapshots insta writes when a snapshot test fails, for review
+# (docs/testing.md, "Snapshot tests"). Never committed.
+*.snap.new
+*.pending-snap
