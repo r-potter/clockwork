@@ -473,9 +473,8 @@ mod tests {
         let inputs = inputs();
         let validated = validate(&desc, &inputs).expect("the graph is valid");
         let passes = &validated.passes;
-        let mut dependencies = dependencies(&desc, passes);
+        let dependencies = dependencies(&desc, passes);
         let kept = cull(&desc, passes, &dependencies);
-        dependencies.reduce(&kept);
         let scheduled = schedule(Schedule::AsWritten, &kept);
         let derived = barriers(
             &desc,

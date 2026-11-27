@@ -45,9 +45,10 @@ pub(crate) struct Dependency {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Dependencies {
     /// For each expanded pass, by its index, the earlier passes it depends
-    /// on, in the written order: every one at first, which culling follows,
-    /// and once [`reduce`](Self::reduce)d, only those between kept passes
-    /// that no path implies.
+    /// on, in the written order: every one, as [`dependencies`] builds the
+    /// graph for culling to follow, or only those between the passes it
+    /// keeps that no path implies, as [`of_kept`](Self::of_kept) builds it
+    /// for a schedule.
     pub(crate) on: Vec<Vec<Dependency>>,
     /// For each texture, by its index, the passes whose writes of any part
     /// of it are still visible when the frame ends, in the written order.
@@ -61,6 +62,17 @@ pub(crate) struct Dependencies {
 /// validation found have no mistakes, with every dependency, not yet
 /// reduced.
 pub(crate) fn dependencies(desc: &GraphDesc, passes: &[ExpandedPass]) -> Dependencies {
+    build(desc, passes, |_| true)
+}
+
+/// The dependency graph of `passes`, the expanded passes of `desc`, with
+/// only the uses of those `includes` takes, by their indices. The others
+/// depend on nothing, and nothing depends on them.
+fn build(
+    desc: &GraphDesc,
+    passes: &[ExpandedPass],
+    includes: impl Fn(usize) -> bool,
+) -> Dependencies {
     let mut textures: Vec<Grid<Cell>> = desc.textures.iter().map(|_| Grid::default()).collect();
     for used in passes.iter().flat_map(|expanded| &expanded.pass.uses) {
         if let ResourceUse::Texture(part) = &used.resource {
@@ -76,7 +88,12 @@ pub(crate) fn dependencies(desc: &GraphDesc, passes: &[ExpandedPass]) -> Depende
     let mut covered = Vec::new();
     for (index, expanded) in passes.iter().enumerate() {
         covered.clear();
-        for used in &expanded.pass.uses {
+        let uses = if includes(index) {
+            expanded.pass.uses.as_slice()
+        } else {
+            &[]
+        };
+        for used in uses {
             match &used.resource {
                 ResourceUse::Texture(part) => {
                     let texture = part.texture.index();
@@ -210,12 +227,15 @@ impl Cell {
 }
 
 impl Dependencies {
-    /// Leaves the graph of the passes `kept` keeps, by their indices,
-    /// transitively reduced, so it stays small: a pass that isn't kept
-    /// loses its dependencies, and so does each pass on it, and a
-    /// dependency that a path through other kept passes implies is dropped.
-    /// Culling comes first, since a path through a pass it then removed
-    /// would no longer imply the dependency it stood for.
+    /// The dependency graph of the passes `kept` keeps, of `passes`, the
+    /// expanded passes of `desc`, transitively reduced, as a schedule needs
+    /// it.
+    ///
+    /// It's built again from the kept passes' uses alone, rather than taken
+    /// from the graph culling followed, since that graph orders a write
+    /// only after the latest write before it, and a read only after the
+    /// writes it sees. Where the pass between two kept ones is culled, their
+    /// dependency was only through it, and would be lost with it.
     #[cfg_attr(
         not(test),
         expect(
@@ -223,10 +243,15 @@ impl Dependencies {
             reason = "the `Overlap` schedule, which `graph-queues` adds, calls it"
         )
     )]
-    pub(crate) fn reduce(&mut self, kept: &[bool]) {
-        for (on, &kept_pass) in self.on.iter_mut().zip(kept) {
-            on.retain(|dependency| kept_pass && kept[dependency.on]);
-        }
+    pub(crate) fn of_kept(desc: &GraphDesc, passes: &[ExpandedPass], kept: &[bool]) -> Self {
+        let mut graph = build(desc, passes, |pass| kept[pass]);
+        graph.reduce();
+        graph
+    }
+
+    /// Leaves the graph transitively reduced, so it stays small: a
+    /// dependency that a path through other passes implies is dropped.
+    fn reduce(&mut self) {
         let count = self.on.len();
         let mut dependents = vec![Vec::new(); count];
         for (pass, on) in self.on.iter().enumerate() {
@@ -361,9 +386,11 @@ mod tests {
     /// kept, with its passes expanded as `mips` gives each.
     fn edges_with(graph: &GraphDesc, mips: &[Option<Range<u32>>]) -> Vec<(usize, usize, Hazards)> {
         let passes = expand(&graph.passes, mips);
-        let mut dependencies = dependencies(graph, &passes);
-        dependencies.reduce(&vec![true; passes.len()]);
-        listed(&dependencies)
+        listed(&Dependencies::of_kept(
+            graph,
+            &passes,
+            &vec![true; passes.len()],
+        ))
     }
 
     /// The edges of `graph`'s dependency graph, whose passes aren't
@@ -653,9 +680,27 @@ mod tests {
         graph
             .transfer_pass("read", "read")
             .read(hdr, Access::CopyRead);
-        let mut dependencies = unreduced(&graph);
-        dependencies.reduce(&[true, false, true, true]);
+        let passes = expand(&graph.passes, &vec![None; graph.passes.len()]);
+        let dependencies = Dependencies::of_kept(&graph, &passes, &[true, false, true, true]);
         assert_eq!(listed(&dependencies), [(0, 2, WAW), (2, 3, RAW)]);
+    }
+
+    /// A write follows only the latest write before it, so where that write
+    /// is culled, the kept passes' graph, built without it, has the write
+    /// follow the kept write before, which the full graph reached only
+    /// through the culled one.
+    #[test]
+    fn kept_writes_stay_ordered_around_a_culled_write() {
+        let (mut graph, hdr, ..) = graph();
+        for name in ["first", "culled", "second"] {
+            graph
+                .transfer_pass(name, name)
+                .write(hdr, Access::CopyWrite);
+        }
+        assert_eq!(listed(&unreduced(&graph)), [(0, 1, WAW), (1, 2, WAW)]);
+        let passes = expand(&graph.passes, &vec![None; graph.passes.len()]);
+        let dependencies = Dependencies::of_kept(&graph, &passes, &[true, false, true]);
+        assert_eq!(listed(&dependencies), [(0, 2, WAW)]);
     }
 
     /// Reduction works across more passes than one word of its sets holds:

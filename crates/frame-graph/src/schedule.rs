@@ -220,13 +220,12 @@ mod tests {
     /// written.
     fn compiled(desc: &GraphDesc) -> Compiled {
         let validated = validate(desc, &inputs()).expect("the graph is valid");
-        let mut dependencies = dependencies(desc, &validated.passes);
+        let dependencies = dependencies(desc, &validated.passes);
         let kept = cull(desc, &validated.passes, &dependencies);
-        dependencies.reduce(&kept);
         Compiled {
             scheduled: schedule(Schedule::AsWritten, &kept),
+            dependencies: Dependencies::of_kept(desc, &validated.passes, &kept),
             passes: validated.passes,
-            dependencies,
             kept,
         }
     }
