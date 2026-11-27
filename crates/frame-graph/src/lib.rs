@@ -26,6 +26,8 @@ mod expand;
 mod grid;
 mod inputs;
 mod pass;
+#[cfg(test)]
+mod random_graphs;
 mod render_passes;
 mod schedule;
 mod validate;

@@ -166,6 +166,13 @@ enum Frame {
 /// The mips and layers of the texture at `texture`: its shape's, or for an
 /// import, whose shape is the caller's, as many as the plan names.
 fn extent(plan: &Plan, texture: usize) -> (u32, u32) {
+    named(plan, texture, true)
+}
+
+/// The mips and layers of the texture at `texture`: its shape's, or for an
+/// import, as many as the plan's passes name, and its barriers too if
+/// `barriers`.
+fn named(plan: &Plan, texture: usize, barriers: bool) -> (u32, u32) {
     if let Some(shape) = plan.textures[texture] {
         return (shape.mips, shape.layers);
     }
@@ -190,7 +197,7 @@ fn extent(plan: &Plan, texture: usize) -> (u32, u32) {
             }
         }
     }
-    for barrier in &plan.barriers {
+    for barrier in plan.barriers.iter().filter(|_| barriers) {
         if let BarrierTarget::Texture(index, part) = &barrier.target
             && *index == texture
         {
@@ -198,6 +205,22 @@ fn extent(plan: &Plan, texture: usize) -> (u32, u32) {
         }
     }
     extent
+}
+
+/// Whether the barrier at `index` of `plan`'s covers any part of a
+/// resource that a pass uses. One on an import may cover none, starting
+/// past the mips or layers the passes name, such as mips `1..` of a
+/// one-mip import used whole and as mip 0, so leaving it out changes
+/// nothing a pass sees.
+#[cfg(test)]
+pub(crate) fn covers_anything(plan: &Plan, index: usize) -> bool {
+    match &plan.barriers[index].target {
+        BarrierTarget::Texture(texture, part) => {
+            let (mips, layers) = named(plan, *texture, false);
+            part.mips.start < mips && part.layers.start < layers
+        }
+        BarrierTarget::Buffer(_) | BarrierTarget::Global => true,
+    }
 }
 
 /// Whether `range` includes `index`.
