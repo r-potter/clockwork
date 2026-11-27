@@ -341,6 +341,27 @@ Outstanding tasks and future work.
       each frame's imports, it should skip a planned barrier whose range
       starts past the import's last mip or layer, with a T0 test of a
       one-mip import used both ways.
+- [ ] **Leave out the barriers a plan doesn't need.** The property test
+      `the_checker_finds_any_missing_barrier`
+      (`crates/frame-graph/src/random_graphs.rs`) found barriers the
+      compiler records that order nothing that another barrier, or the
+      caller, doesn't order already, and skips them:
+      - a global barrier whose buffers an earlier group's global barrier
+        orders already, since each orders every buffer
+      - one at the end of the frame, in one layout, whose accesses before
+        are in the stages of those it leaves the resource in, such as
+        `compute-shader-read` to `compute-shader-write`, which the
+        caller's own barrier from them covers. The compiler would need
+        each access's stage, which only the RHI's Vulkan backend has
+      - one from the last frame's reads to the same reads of a persistent
+        texture. Before the first frame after a compile the executor moves
+        the texture to the accesses the frame ends with, so it orders
+        nothing, but the checker starts that frame from `Access::None`.
+        Model that in the checker first, with transient textures still
+        starting from `Access::None`
+
+      Each costs a little recording and translating, not correctness.
+      Narrow the test's exceptions as each is left out.
 - [ ] **Add frame pacing.** The `winit` event loop runs in
       `ControlFlow::Poll` mode so the engine can pace frames itself. For now,
       the swapchain's FIFO present mode limits the frame rate to the

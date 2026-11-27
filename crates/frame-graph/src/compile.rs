@@ -15,10 +15,10 @@ use clockwork_rhi::{QueueId, QueueKind};
 
 use crate::barriers::{PlannedBarrier, barriers};
 use crate::cull::cull;
-use crate::dependencies::dependencies;
+use crate::dependencies::{Dependencies, dependencies};
 use crate::expand::ExpandedPass;
 use crate::render_passes::{PlannedRenderPass, render_passes};
-use crate::schedule::schedule;
+use crate::schedule::{Scheduled, schedule};
 use crate::validate::{TextureShape, validate};
 use crate::{CompileErrors, CompileInputs, GraphDesc, OutputDesc};
 
@@ -95,11 +95,55 @@ pub(crate) struct PlannedPass {
 /// Returns every mistake found in `desc`, each naming the passes and
 /// resources involved.
 pub fn compile(desc: &GraphDesc, inputs: &CompileInputs) -> Result<Plan, CompileErrors> {
+    compile_scheduled(desc, inputs, |_, _, kept| schedule(inputs.schedule, kept))
+}
+
+/// Compiles `desc` into a plan for `inputs`, as [`compile`] does, but runs
+/// its passes in the order and groups `choose` picks, given the expanded
+/// passes, the dependency graph of those culling keeps, reduced, and which
+/// they are, rather than as `inputs.schedule` says.
+///
+/// It's how tests compile a graph in any valid order, as a schedule might
+/// choose one, so barrier derivation is checked for every order rather than
+/// only those the schedules choose (design 0003, "Test plan").
+///
+/// # Errors
+///
+/// Returns every mistake found in `desc`, as [`compile`] does.
+///
+/// # Panics
+///
+/// Panics if `choose` picks a schedule that isn't valid, naming what's
+/// wrong with it.
+#[cfg(test)]
+pub(crate) fn compile_in_order(
+    desc: &GraphDesc,
+    inputs: &CompileInputs,
+    choose: impl FnOnce(&[ExpandedPass], &Dependencies, &[bool]) -> Scheduled,
+) -> Result<Plan, CompileErrors> {
+    compile_scheduled(desc, inputs, |passes, _, kept| {
+        let reduced = Dependencies::of_kept(desc, passes, kept);
+        let scheduled = choose(passes, &reduced, kept);
+        if let Some(mistake) = scheduled.mistake(passes, &reduced, kept) {
+            panic!("the schedule {scheduled:?} isn't valid: {mistake}");
+        }
+        scheduled
+    })
+}
+
+/// Compiles `desc` into a plan for `inputs`, running its passes in the
+/// order and groups `choose` picks, given the expanded passes, their
+/// dependency graph, and which of them culling keeps.
+fn compile_scheduled(
+    desc: &GraphDesc,
+    inputs: &CompileInputs,
+    choose: impl FnOnce(&[ExpandedPass], &Dependencies, &[bool]) -> Scheduled,
+) -> Result<Plan, CompileErrors> {
     let validated = validate(desc, inputs)?;
     let expanded = validated.passes;
     let dependencies = dependencies(desc, &expanded);
     let kept = cull(desc, &expanded, &dependencies);
-    let scheduled = schedule(inputs.schedule, &kept);
+    let scheduled = choose(&expanded, &dependencies, &kept);
     let derived = barriers(
         desc,
         &inputs.output,
