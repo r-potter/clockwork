@@ -246,7 +246,7 @@ mod tests {
             .raster_pass("scene", "scene")
             .colour(output, Attachment::Clear([0.0; 4]))
             .colour(bloom.attachment(1, 0), Attachment::Clear([0.0; 4]))
-            .depth(depth, Attachment::Clear(0.0), true);
+            .depth(depth, Attachment::Clear(0.0));
         assert_eq!(messages(&graph), Vec::<String>::new());
     }
 
@@ -265,8 +265,8 @@ mod tests {
         for &colour in &colours {
             many.colour(colour, Attachment::Clear([0.0; 4]));
         }
-        many.depth(depth, Attachment::Clear(0.0), true)
-            .depth(depth, Attachment::Keep, false);
+        many.depth(depth, Attachment::Clear(0.0))
+            .depth(depth, Attachment::Keep);
 
         let messages = messages(&graph);
         assert_eq!(
@@ -306,7 +306,7 @@ mod tests {
         graph
             .raster_pass("swapped", "c")
             .colour(depth, Attachment::Discard)
-            .depth(hdr, Attachment::Clear(0.0), true);
+            .depth(hdr, Attachment::Clear(0.0));
 
         let messages = messages(&graph);
         assert_eq!(
