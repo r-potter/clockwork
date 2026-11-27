@@ -14,6 +14,7 @@ use std::ops::Range;
 use clockwork_rhi::{QueueId, QueueKind};
 
 use crate::barriers::{PlannedBarrier, barriers};
+use crate::check::check;
 use crate::cull::cull;
 use crate::dependencies::{Dependencies, dependencies};
 use crate::expand::ExpandedPass;
@@ -94,6 +95,12 @@ pub(crate) struct PlannedPass {
 ///
 /// Returns every mistake found in `desc`, each naming the passes and
 /// resources involved.
+///
+/// # Panics
+///
+/// In debug builds, every plan is checked with [`check()`], and compiling
+/// panics if it finds a hazard, which is a bug in the compiler, naming each
+/// hazard and describing the plan.
 pub fn compile(desc: &GraphDesc, inputs: &CompileInputs) -> Result<Plan, CompileErrors> {
     compile_scheduled(desc, inputs, |_, _, kept| schedule(inputs.schedule, kept))
 }
@@ -177,7 +184,7 @@ fn compile_scheduled(
             groups: 0..groups.len(),
         }]
     };
-    Ok(Plan {
+    let plan = Plan {
         label: desc.label().to_owned(),
         texture_names: desc
             .textures
@@ -197,7 +204,33 @@ fn compile_scheduled(
         barriers: derived.barriers,
         passes,
         end_of_frame: derived.end_of_frame,
-    })
+    };
+    if cfg!(debug_assertions) {
+        assert_no_hazards(desc, &plan);
+    }
+    Ok(plan)
+}
+
+/// Checks `plan`, compiled from `desc`, with the plan checker, as debug
+/// builds do after every compile (design 0003, "Deriving barriers").
+///
+/// # Panics
+///
+/// Panics if the checker finds a hazard, which is a bug in the compiler,
+/// naming each hazard and describing the plan.
+fn assert_no_hazards(desc: &GraphDesc, plan: &Plan) {
+    if let Err(hazards) = check(desc, plan) {
+        let mut message = format!(
+            "the frame graph compiler made a plan of \"{}\" with hazards, which is a bug in the \
+             compiler:\n",
+            plan.label
+        );
+        for hazard in &hazards {
+            message.push_str(&format!("- {hazard}\n"));
+        }
+        message.push_str(&plan.describe());
+        panic!("{message}");
+    }
 }
 
 #[cfg(test)]
@@ -234,7 +267,9 @@ mod tests {
     use crate::validate::test_support::{OUTPUT_WRITER, finished, inputs};
     use clockwork_rhi::Subresource;
 
-    use crate::{Attachment, ComputeRecorder, QueueLayout, TextureSize, TransientTexture};
+    use crate::{
+        Attachment, ComputeRecorder, ImportDesc, QueueLayout, TextureSize, TransientTexture,
+    };
 
     /// The names of the passes `plan` runs, in order.
     fn names(plan: &Plan) -> Vec<&str> {
@@ -369,6 +404,66 @@ mod tests {
         assert_eq!(plan.batches.len(), 1);
         assert_eq!(plan.batches[0].queue, graphics);
         assert_eq!(names(&plan), ["cull", "light", OUTPUT_WRITER]);
+    }
+
+    /// A graph that copies to an import, which must be left sampled.
+    fn import() -> GraphDesc {
+        let mut graph = GraphDesc::new("import");
+        let target = graph.import_texture(
+            "target",
+            ImportDesc {
+                before: Access::CopyRead.into(),
+                after: Access::FragmentShaderSampledRead.into(),
+            },
+        );
+        graph
+            .transfer_pass("fill", "fill")
+            .write(target, Access::CopyWrite);
+        finished(&graph)
+    }
+
+    /// A compiled plan passes the check debug builds run after every
+    /// compile.
+    #[test]
+    fn compiled_plans_pass_the_debug_check() {
+        for desc in [scene(), import()] {
+            let plan = compile(&desc, &inputs()).expect("the graph is valid");
+            assert_no_hazards(&desc, &plan);
+        }
+    }
+
+    /// A plan with a hazard panics in the check debug builds run after
+    /// every compile, naming each hazard and describing the plan: here, an
+    /// import not left in the accesses the caller asks for.
+    #[test]
+    #[should_panic(expected = "the frame graph compiler made a plan of \"import\" with \
+                               hazards, which is a bug in the compiler:
+- target: the accesses it must end the frame in (fragment-shader-sampled-read) needs the \
+                               read-only layout, but it's in copy-destination
+- target: the accesses it must end the frame in (fragment-shader-sampled-read) isn't ordered \
+                               after layout change to copy-destination
+- target: the accesses it must end the frame in (fragment-shader-sampled-read) isn't ordered \
+                               after pass \"fill\" (copy-write)
+batch 0 on graphics
+  group 0
+    barrier target: copy-read -> copy-write
+    pass \"fill\" (transfer)
+  group 1
+    barrier output: acquired -> copy-write
+    pass \"writes the output\" (transfer)
+  end of frame
+    barrier output: copy-write -> present
+")]
+    fn a_plan_with_hazards_panics() {
+        let desc = import();
+        let plan = compile(&desc, &inputs()).expect("the graph is valid");
+        let index = plan
+            .barriers
+            .iter()
+            .position(|barrier| barrier.after == Access::FragmentShaderSampledRead.into())
+            .expect("the import is left sampled");
+        let broken = plan.without_barrier(index);
+        assert_no_hazards(&desc, &broken);
     }
 
     /// Plans and their inputs are plain data, shared freely between

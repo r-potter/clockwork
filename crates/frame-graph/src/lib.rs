@@ -12,7 +12,8 @@
 //!
 //! So far the crate has the description and the compiler, [`compile()`],
 //! for one queue, with [`check()`], which checks a plan against the rules
-//! independently of the compiler. The executor follows.
+//! independently of the compiler, after every compile in debug builds. The
+//! executor follows.
 
 mod barriers;
 mod check;
