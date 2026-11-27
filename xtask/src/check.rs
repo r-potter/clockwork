@@ -223,6 +223,23 @@ pub(crate) fn steps(
         },
     ];
     steps.extend(packages.iter().flat_map(|package| Step::alone(package)));
+    // Benchmarks are timed on demand, but each that needs no GPU runs once,
+    // in debug, so one whose setup stops working fails here rather than on
+    // its next run.
+    steps.push(Step::cargo(
+        "benchmarks without a GPU, once",
+        &[
+            "test",
+            "--package",
+            "clockwork-gpu-memory",
+            "--package",
+            "clockwork-frame-graph",
+            "--bench",
+            "allocator",
+            "--bench",
+            "compile",
+        ],
+    ));
     steps.push(tests);
     if options.smoke_runs() {
         steps.extend(
@@ -432,9 +449,23 @@ mod tests {
                 "clockwork on its own, with every target",
                 "clockwork-rhi on its own",
                 "clockwork-rhi on its own, with every target",
+                "benchmarks without a GPU, once",
                 "tests without a GPU",
             ]
         );
+    }
+
+    /// The benchmarks that need no GPU run once, as tests, by name, so the
+    /// libraries' own tests don't run twice.
+    #[test]
+    fn benchmarks_without_a_gpu_run_once() {
+        let args = step("benchmarks without a GPU, once").args;
+        assert_eq!(args[0], "test");
+        assert!(ends_with(
+            &args,
+            &["--bench", "allocator", "--bench", "compile"]
+        ));
+        assert!(!has(&args, "--benches"), "{args:?}");
     }
 
     /// Clippy warnings, including the workspace's lints, fail the check in
