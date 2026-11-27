@@ -157,6 +157,29 @@ pub fn compile(desc: &GraphDesc, inputs: &CompileInputs) -> Result<Plan, Compile
 }
 
 #[cfg(test)]
+impl Plan {
+    /// The plan with its barrier at `index` left out, as a broken plan for
+    /// the plan checker to find.
+    pub(crate) fn without_barrier(&self, index: usize) -> Self {
+        let mut plan = self.clone();
+        plan.barriers.remove(index);
+        let shift = |range: &mut Range<usize>| {
+            if range.start > index {
+                range.start -= 1;
+            }
+            if range.end > index {
+                range.end -= 1;
+            }
+        };
+        for group in &mut plan.groups {
+            shift(&mut group.barriers);
+        }
+        shift(&mut plan.end_of_frame);
+        plan
+    }
+}
+
+#[cfg(test)]
 mod tests {
     //! T0 tests of compiling.
 
