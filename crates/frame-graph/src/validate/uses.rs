@@ -11,32 +11,12 @@ use clockwork_rhi::{Access, AccessSet, Layout, MAX_PUSH_DATA_SIZE, QueueKind, Su
 use super::repeat::{RepeatError, check_repeat};
 use super::{Checked, CheckedUse, PassUses, TextureShape};
 use crate::error::Errors;
-use crate::pass::{Binding, Constant, PassDesc, PassKind, Repeat, Use, UseRole};
+use crate::pass::{Binding, PassDesc, PassKind, Repeat, Use, UseRole};
+use crate::push_data;
 use crate::{
     ComputeRecorder, GraphDesc, MipDirection, RelativeMip, RepeatedUse, ResourceUse, TextureId,
     TextureUse,
 };
-
-/// The size, in bytes, of the push data `pass`'s bindings lay out, in order
-/// (design 0003, "Data structures and layout"): a texture view or a sampler
-/// is a 4-byte heap index, a buffer an 8-byte address aligned to 8, and a
-/// constant 4 bytes, or 16 aligned to 16 for a `float4`, as Slang aligns it.
-fn push_data_size(pass: &PassDesc) -> u32 {
-    pass.bindings.iter().fold(0, |offset, binding| {
-        let (size, alignment) = match binding {
-            Binding::Use(index) => match pass.uses[*index].resource {
-                ResourceUse::Buffer(_) => (8, 8),
-                ResourceUse::Texture(_) | ResourceUse::Repeated(_) => (4, 4),
-            },
-            Binding::Sampler(_)
-            | Binding::Constant(Constant::Float(_) | Constant::Int(_) | Constant::Uint(_)) => {
-                (4, 4)
-            }
-            Binding::Constant(Constant::Float4(_)) => (16, 16),
-        };
-        offset.next_multiple_of(alignment).saturating_add(size)
-    })
-}
 
 /// Reports every mistake in each pass's queue and uses, and returns what
 /// it found of each pass, for the checks after these: its uses that have
@@ -247,7 +227,7 @@ impl PassCheck<'_> {
                 _ => {}
             }
         }
-        let size = push_data_size(pass);
+        let size = push_data::size(pass);
         if size > MAX_PUSH_DATA_SIZE {
             self.report(&format!(
                 "binds {size} bytes of push data, but a pass has at most {MAX_PUSH_DATA_SIZE}"
@@ -604,8 +584,8 @@ mod tests {
     use super::*;
     use crate::validate::test_support::messages;
     use crate::{
-        Attachment, BufferId, ComputeRecorder, ImportDesc, MipCount, MipDirection, SamplerId,
-        SamplerSettings, TextureSize, TransientTexture,
+        Attachment, BufferId, ComputeRecorder, Constant, ImportDesc, MipCount, MipDirection,
+        SamplerId, SamplerSettings, TextureSize, TransientTexture,
     };
 
     /// A graph with a one-mip texture "hdr", a four-mip texture "bloom", an
