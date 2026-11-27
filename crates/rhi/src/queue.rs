@@ -129,8 +129,20 @@ pub trait Queue: Debug + Send + Sync {
     /// dedicated transfer queue may only copy coarser ones.
     fn transfer_granularity(&self) -> TransferGranularity;
 
-    /// Translates `commands` into a command buffer for this queue. May be
-    /// called on any thread, any number at once.
+    /// Translates `lists`, in order, into one command buffer for this queue,
+    /// named for them all. May be called on any thread, any number at once.
+    ///
+    /// Each list is checked as a whole, as if translated alone: a render
+    /// pass, debug region or timing scope must end in the list that began
+    /// it, and a list's bound programs don't carry into the next. Nor may a
+    /// list rely on push data an earlier list wrote: it's undefined when
+    /// the list is translated alone, though nothing checks it, since Vulkan
+    /// keeps push data for the whole command buffer. Translating several at
+    /// once only saves what each command buffer costs, such as claiming a
+    /// command pool and binding the descriptor heaps. Nothing is merged,
+    /// reordered or removed, and each list's timing scopes are reported as
+    /// they would be alone (design 0002, "Keeping the recording model
+    /// reversible").
     ///
     /// # Errors
     ///
@@ -138,9 +150,9 @@ pub trait Queue: Debug + Send + Sync {
     ///
     /// # Panics
     ///
-    /// Panics if `commands` names a stale handle, or has a debug region or
-    /// timing scope still open.
-    fn translate(&self, commands: &CommandList) -> RhiResult<CommandBuffer>;
+    /// Panics if `lists` is empty, or if a list names a stale handle, or has
+    /// a render pass, debug region or timing scope still open.
+    fn translate_lists(&self, lists: &[&CommandList]) -> RhiResult<CommandBuffer>;
 
     /// Submits command buffers, which run once every timepoint in
     /// `desc.wait_for` is reached, and returns the timepoint their completion

@@ -212,10 +212,10 @@ impl Uploader {
     ) -> RhiResult<GpuTimepoint> {
         // Translating both first means a failed translation submits nothing.
         let transfer = transfer
-            .map(|list| self.transfer.translate(&list))
+            .map(|list| self.transfer.translate_lists(&[&list]))
             .transpose()?;
         let graphics = graphics
-            .map(|list| self.graphics.translate(&list))
+            .map(|list| self.graphics.translate_lists(&[&list]))
             .transpose()?;
         let mut last = None;
         if let Some(command_buffer) = transfer {

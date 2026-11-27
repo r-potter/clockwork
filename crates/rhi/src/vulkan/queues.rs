@@ -794,8 +794,8 @@ impl Queue for VulkanQueue {
         self.core.queues.granularity(self.id)
     }
 
-    fn translate(&self, commands: &CommandList) -> RhiResult<CommandBuffer> {
-        self.core.translate(self.id, commands)
+    fn translate_lists(&self, lists: &[&CommandList]) -> RhiResult<CommandBuffer> {
+        self.core.translate(self.id, lists)
     }
 
     /// Then frees what retired objects it can, as design 0002's "Deferred

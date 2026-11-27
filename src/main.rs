@@ -395,7 +395,9 @@ fn draw_frame(
         Access::Acquired,
         Access::Present,
     );
-    let command_buffer = rhi.queue(QueueKind::Graphics).translate(&commands)?;
+    let command_buffer = rhi
+        .queue(QueueKind::Graphics)
+        .translate_lists(&[&commands])?;
     let wait_for: Vec<_> = upload.into_iter().collect();
     let timepoint = rhi.present(PresentDesc {
         image,

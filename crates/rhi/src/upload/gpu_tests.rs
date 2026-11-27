@@ -72,7 +72,7 @@ fn run_after(backend: &VulkanTestBackend, upload: &Upload, list: &CommandList) {
     let graphics = backend.queue(QueueKind::Graphics);
     let done = graphics
         .submit(SubmitDesc {
-            command_buffers: vec![graphics.translate(list).unwrap()],
+            command_buffers: vec![graphics.translate_lists(&[list]).unwrap()],
             wait_for: &[upload.timepoint],
         })
         .unwrap();
@@ -260,7 +260,9 @@ fn streamed_buffers_reach_the_graphics_queue() {
     let mut fill = CommandList::new("fill before the offset");
     fill.fill_buffer(address(device), OFFSET, FILL);
     let filled = graphics
-        .submit(SubmitDesc::new(vec![graphics.translate(&fill).unwrap()]))
+        .submit(SubmitDesc::new(vec![
+            graphics.translate_lists(&[&fill]).unwrap(),
+        ]))
         .unwrap();
     graphics.wait(filled).unwrap();
     let mut uploader = uploader(&backend);

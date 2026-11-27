@@ -55,7 +55,9 @@ fn destroy_while_in_flight() {
     let graphics = backend.queue(QueueKind::Graphics);
     let target = buffer(&**resources, "in flight");
 
-    let command_buffer = graphics.translate(&fill(&**resources, target)).unwrap();
+    let command_buffer = graphics
+        .translate_lists(&[&fill(&**resources, target)])
+        .unwrap();
     let done = graphics
         .submit(SubmitDesc::new(vec![command_buffer]))
         .unwrap();
@@ -105,7 +107,7 @@ fn destruction_during_translation_on_another_thread() {
             let mut list = CommandList::new("names the churned buffer");
             list.fill_buffer(address, 256, 0);
             list.barrier(&[Barrier::buffer(target, Access::CopyWrite, Access::CopyRead)]);
-            match panic::catch_unwind(AssertUnwindSafe(|| graphics.translate(&list))) {
+            match panic::catch_unwind(AssertUnwindSafe(|| graphics.translate_lists(&[&list]))) {
                 Ok(command_buffer) => submitted.push(
                     graphics
                         .submit(SubmitDesc::new(vec![command_buffer.unwrap()]))
@@ -140,7 +142,9 @@ fn lists_translated_before_a_destruction_keep_what_they_use() {
     let graphics = backend.queue(QueueKind::Graphics);
     let target = buffer(&**resources, "translated");
 
-    let command_buffer = graphics.translate(&fill(&**resources, target)).unwrap();
+    let command_buffer = graphics
+        .translate_lists(&[&fill(&**resources, target)])
+        .unwrap();
     resources.destroy_buffer(target);
     resources.collect_garbage();
     assert_eq!(retired(&backend), 1);
@@ -170,7 +174,7 @@ fn dropped_lists_keep_nothing() {
 
     let command_buffer = backend
         .queue(QueueKind::Graphics)
-        .translate(&fill(&**resources, target))
+        .translate_lists(&[&fill(&**resources, target)])
         .unwrap();
     resources.destroy_buffer(target);
     resources.collect_garbage();
@@ -230,7 +234,9 @@ fn retired_objects_are_freed_at_drop() {
     let resources = backend.resources();
     let graphics = backend.queue(QueueKind::Graphics);
     let target = buffer(&**resources, "retired at drop");
-    let command_buffer = graphics.translate(&fill(&**resources, target)).unwrap();
+    let command_buffer = graphics
+        .translate_lists(&[&fill(&**resources, target)])
+        .unwrap();
     graphics
         .submit(SubmitDesc::new(vec![command_buffer]))
         .unwrap();

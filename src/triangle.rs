@@ -282,7 +282,7 @@ mod gpu_tests {
             Access::CopyWrite,
             Access::HostRead,
         )]);
-        let command_buffer = graphics.translate(&commands).unwrap();
+        let command_buffer = graphics.translate_lists(&[&commands]).unwrap();
         let wait_for: Vec<_> = upload.into_iter().collect();
         assert_eq!(wait_for.len(), 1, "the first draw waits for the upload");
         let done = graphics

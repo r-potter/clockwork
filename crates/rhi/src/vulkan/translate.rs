@@ -239,7 +239,8 @@ impl fmt::Debug for VulkanCommandBuffer {
 }
 
 impl VulkanDevice {
-    /// Translates `list` into a command buffer for the queue `id`.
+    /// Translates `lists`, in order, into one command buffer for the queue
+    /// `id`, named for them all, with the descriptor heaps bound once.
     ///
     /// # Errors
     ///
@@ -248,19 +249,39 @@ impl VulkanDevice {
     ///
     /// # Panics
     ///
-    /// Panics if `list` has a render pass, a debug region or a timing scope
-    /// open, names a stale handle, binds a program the queue can't run,
-    /// renders, or sets render state or an index buffer, on a queue that
-    /// doesn't draw, or renders to attachments their textures can't be, or
-    /// that can't be rendered to together, or if it draws with no vertex
-    /// and fragment program bound, or dispatches with no compute program
-    /// bound.
+    /// Panics if `lists` is empty, or if a list has a render pass, a debug
+    /// region or a timing scope open, names a stale handle, binds a program
+    /// the queue can't run, renders, or sets render state or an index
+    /// buffer, on a queue that doesn't draw, or renders to attachments their
+    /// textures can't be, or that can't be rendered to together, or if it
+    /// draws with no vertex and fragment program bound, or dispatches with
+    /// no compute program bound.
     pub(super) fn translate(
         self: &Arc<Self>,
         id: QueueId,
-        list: &CommandList,
+        lists: &[&CommandList],
     ) -> RhiResult<CommandBuffer> {
-        list.check_complete();
+        assert!(
+            !lists.is_empty(),
+            "no command lists are translated together"
+        );
+        for list in lists {
+            list.check_complete();
+        }
+        // A single list's label is copied once, as it was before lists
+        // could be translated together, and several are joined in one
+        // string.
+        let label: Box<str> = match lists {
+            [list] => list.label().into(),
+            _ => {
+                let mut joined = String::from(lists[0].label());
+                for list in &lists[1..] {
+                    joined.push_str(" + ");
+                    joined.push_str(list.label());
+                }
+                joined.into()
+            }
+        };
         let device = self.device.handle();
         let commands = self.queues.claim_pool(device, id)?;
         let buffer = commands.buffer();
@@ -275,26 +296,37 @@ impl VulkanDevice {
             commands: Some(commands),
             translation: Some(self.begin_translation()),
             timings: RecordedTimings::default(),
-            label: list.label().into(),
+            label,
         };
         let begin_info = vk::CommandBufferBeginInfo::default()
             .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
         // SAFETY: The command buffer was allocated on `device` from a pool
         // that's claimed, so no other thread uses it, and claiming it put it
         // in the initial state.
-        unsafe { device.begin_command_buffer(buffer, &begin_info) }
-            .map_err(|result| error(result, "begin the command buffer for", list.label()))?;
+        unsafe { device.begin_command_buffer(buffer, &begin_info) }.map_err(|result| {
+            error(
+                result,
+                "begin the command buffer for",
+                &command_buffer.label,
+            )
+        })?;
         // SAFETY: The command buffer is recording, for this queue's family.
-        unsafe { self.record(buffer, id, list, &mut command_buffer.timings) }?;
+        unsafe { self.record(buffer, id, lists, &mut command_buffer.timings) }?;
         // SAFETY: The command buffer is recording.
-        unsafe { device.end_command_buffer(buffer) }
-            .map_err(|result| error(result, "record the command buffer for", list.label()))?;
-        self.device.set_object_name(buffer, list.label());
+        unsafe { device.end_command_buffer(buffer) }.map_err(|result| {
+            error(
+                result,
+                "record the command buffer for",
+                &command_buffer.label,
+            )
+        })?;
+        self.device.set_object_name(buffer, &command_buffer.label);
         Ok(CommandBuffer(command_buffer))
     }
 
-    /// Records `list`'s commands into `buffer`, for the queue `id`, and its
-    /// timing scopes into `timings`.
+    /// Records the commands of `lists`, in order, into `buffer`, for the
+    /// queue `id`, and their timing scopes into `timings`. Each list is
+    /// checked on its own: one's bound programs don't carry into the next.
     ///
     /// A timing scope's timestamps are written at `ALL_COMMANDS`, so its end
     /// is written once every command before it has completed. On a queue
@@ -311,7 +343,7 @@ impl VulkanDevice {
     ///
     /// # Panics
     ///
-    /// Panics if `list` names a stale handle, has a queue transfer neither
+    /// Panics if a list names a stale handle, has a queue transfer neither
     /// from nor to that queue, binds a program or pushes data the queue
     /// can't use, renders, or sets render state or an index buffer, on a
     /// queue that doesn't draw, renders to attachments their textures
@@ -322,7 +354,7 @@ impl VulkanDevice {
         &self,
         buffer: vk::CommandBuffer,
         id: QueueId,
-        list: &CommandList,
+        lists: &[&CommandList],
         timings: &mut RecordedTimings,
     ) -> RhiResult<()> {
         let device = self.device.handle();
@@ -348,14 +380,26 @@ impl VulkanDevice {
         let programs = self.lock_programs_for_reading();
         // The programs last bound at each bind point, by label. Binding a
         // program binds only its own stages, so a compute program and a
-        // vertex and fragment program stay bound together.
+        // vertex and fragment program stay bound together. Each list starts
+        // with none bound, since it's checked on its own.
         let mut bound = BoundPrograms::default();
+        // Which of `lists` the last command was from.
+        let mut current = 0;
         // Reused for each barrier command, so recording them doesn't allocate
         // once they've grown.
         let mut memory_barriers = Vec::new();
         let mut buffer_barriers = Vec::new();
         let mut image_barriers = Vec::new();
-        for command in list.commands() {
+        let commands = lists.iter().enumerate().flat_map(|(index, &list)| {
+            list.commands()
+                .iter()
+                .map(move |command| (index, list, command))
+        });
+        for (index, list, command) in commands {
+            if index != current {
+                bound = BoundPrograms::default();
+                current = index;
+            }
             match command {
                 Command::Barrier { barriers } => {
                     memory_barriers.clear();
