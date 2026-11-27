@@ -23,6 +23,10 @@
 //! the accesses they must be left in. Parts no pass uses are left as they
 //! were, in the accesses they started in, so the graph needn't know an
 //! import's shape to leave every part of it right.
+//!
+//! Last, the barriers recorded together are combined: those of
+//! neighbouring parts of a texture with the same transition into one over
+//! the parts they cover, and those of buffers into one global barrier.
 
 use std::ops::Range;
 
@@ -44,8 +48,14 @@ pub(crate) enum BarrierTarget {
     /// cover nothing, such as mips `1..` of a one-mip import used whole and
     /// as mip 0. Executing skips it.
     Texture(usize, Subresource),
-    /// The buffer at this index, as its `BufferId` gives.
+    /// The buffer at this index, as its `BufferId` gives. Barriers of
+    /// buffers are combined into a global barrier for their group, so a
+    /// plan has none until a buffer's queue transfer needs one.
     Buffer(usize),
+    /// All memory: the barriers of a group's buffers, combined. Buffers are
+    /// reached by address, so one global barrier orders what a barrier per
+    /// buffer would, with less to translate.
+    Global,
 }
 
 /// A barrier in a plan.
@@ -242,11 +252,112 @@ pub(crate) fn barriers(
         }
     }
     let end_of_frame = start..barriers.len();
+    let mut combined = Vec::with_capacity(barriers.len());
+    let groups = groups
+        .into_iter()
+        .map(|group| combine(&barriers[group], &mut combined))
+        .collect();
+    let end_of_frame = combine(&barriers[end_of_frame], &mut combined);
     Barriers {
-        barriers,
+        barriers: combined,
         groups,
         end_of_frame,
     }
+}
+
+/// Appends to `combined` the barriers `recorded` together, those of a group
+/// or of the end of the frame, combined, and returns the range of
+/// `combined` they take.
+///
+/// Barriers of neighbouring parts of a texture with the same transition are
+/// combined into one barrier over the mips and layers they cover, until no
+/// two more can be. The barriers of buffers are combined into one global
+/// barrier, from every access before them to every access after.
+fn combine(recorded: &[PlannedBarrier], combined: &mut Vec<PlannedBarrier>) -> Range<usize> {
+    let start = combined.len();
+    let mut before = None;
+    let mut after = None;
+    for barrier in recorded {
+        match barrier.target {
+            BarrierTarget::Texture(..) => combined.push(barrier.clone()),
+            BarrierTarget::Buffer(_) | BarrierTarget::Global => {
+                before = join(before, barrier.before);
+                after = join(after, barrier.after);
+            }
+        }
+    }
+    // Each merge removes a barrier, so this ends. Groups have few barriers,
+    // so trying every pair again after each merge is cheap enough.
+    'merging: loop {
+        for first in start..combined.len() {
+            for second in first + 1..combined.len() {
+                if let Some(merged) = merge(&combined[first], &combined[second]) {
+                    combined[first] = merged;
+                    combined.remove(second);
+                    continue 'merging;
+                }
+            }
+        }
+        break;
+    }
+    if let Some(after) = after {
+        // A barrier from the last frame's accesses needn't be marked, since
+        // in the first frame after a compile it only orders a buffer, which
+        // has no layout, after accesses that didn't happen.
+        combined.push(PlannedBarrier {
+            target: BarrierTarget::Global,
+            before: before.unwrap_or(Access::None.into()),
+            after,
+            from_last_frame: false,
+        });
+    }
+    start..combined.len()
+}
+
+/// `joined` with the accesses of `set` added, leaving out
+/// [`Access::None`], which is only valid alone, and orders nothing.
+fn join(joined: Option<AccessSet>, set: AccessSet) -> Option<AccessSet> {
+    if set == Access::None.into() {
+        return joined;
+    }
+    Some(joined.map_or(set, |joined| joined | set))
+}
+
+/// One barrier over the parts of a texture `first` and `second` cover, if
+/// they're neighbours, with the same mips and neighbouring layers or the
+/// same layers and neighbouring mips, and the same transition.
+fn merge(first: &PlannedBarrier, second: &PlannedBarrier) -> Option<PlannedBarrier> {
+    let (BarrierTarget::Texture(texture, a), BarrierTarget::Texture(other, b)) =
+        (&first.target, &second.target)
+    else {
+        return None;
+    };
+    let same = texture == other
+        && first.before == second.before
+        && first.after == second.after
+        && first.from_last_frame == second.from_last_frame;
+    if !same {
+        return None;
+    }
+    let beside = |a: &Range<u32>, b: &Range<u32>| a.end == b.start || b.end == a.start;
+    let spanning = |a: &Range<u32>, b: &Range<u32>| a.start.min(b.start)..a.end.max(b.end);
+    let part = if a.mips == b.mips && beside(&a.layers, &b.layers) {
+        Subresource {
+            mips: a.mips.clone(),
+            layers: spanning(&a.layers, &b.layers),
+        }
+    } else if a.layers == b.layers && beside(&a.mips, &b.mips) {
+        Subresource {
+            mips: spanning(&a.mips, &b.mips),
+            layers: a.layers.clone(),
+        }
+    } else {
+        return None;
+    };
+    Some(PlannedBarrier {
+        target: BarrierTarget::Texture(*texture, part),
+        ..first.clone()
+    })
 }
 
 /// The accesses a texture of `kind` is in before its first use in a
@@ -391,6 +502,7 @@ mod tests {
                     range(&part.layers)
                 ),
                 BarrierTarget::Buffer(index) => desc.buffers[*index].name.clone(),
+                BarrierTarget::Global => "all memory".to_owned(),
             };
             let carried = if barrier.from_last_frame {
                 " (from the last frame)"
@@ -620,9 +732,9 @@ mod tests {
         assert_eq!(
             derived(&graph),
             then_output(&[
-                &format!("  lights: {reads} -> CopyWrite (from the last frame)"),
+                &format!("  all memory: {reads} -> CopyWrite"),
                 "pass \"fill\"",
-                &format!("  lights: CopyWrite -> {reads}"),
+                &format!("  all memory: CopyWrite -> {reads}"),
                 "pass \"cull\"",
                 "pass \"save\"",
             ])
@@ -676,9 +788,9 @@ mod tests {
         let lines = [
             "  history mips 0..1 layers 0..1: CopyWrite -> CopyRead (from the last frame)",
             "  target mips 0..1 layers 0..: CopyRead -> CopyWrite",
-            "  counts: ComputeShaderRead -> CopyWrite (from the last frame)",
+            "  all memory: ComputeShaderRead -> CopyWrite",
             "pass \"resolve\"",
-            "  counts: CopyWrite -> ComputeShaderRead",
+            "  all memory: CopyWrite -> ComputeShaderRead",
             "pass \"count\"",
             "  history mips 0..1 layers 0..1: CopyRead -> CopyWrite",
             "pass \"keep\"",
@@ -714,6 +826,164 @@ mod tests {
                 "  lut mips 0.. layers 0..: CopyWrite -> ComputeShaderSampledRead",
                 "pass \"grade\"",
             ])
+        );
+    }
+
+    /// Barriers of neighbouring mips, or neighbouring layers, with the same
+    /// transition, recorded together, are combined into one, and those
+    /// with different transitions aren't.
+    #[test]
+    fn neighbouring_barriers_combine() {
+        let mut graph = GraphDesc::new("combine");
+        let chain = TransientTexture {
+            mips: MipCount::Count(3),
+            ..texture()
+        };
+        let bloom = graph.transient_texture("bloom", chain);
+        let cascades = TransientTexture {
+            layers: 2,
+            ..texture()
+        };
+        let shadows = graph.transient_texture("shadows", cascades);
+        graph
+            .transfer_pass("fill", "fill")
+            .write(bloom.mip(0), Access::CopyWrite);
+        graph
+            .compute_pass("downsample", ComputeRecorder::dispatch("downsample"))
+            .for_each_mip(bloom, MipDirection::Down, ..)
+            .bind(bloom.previous_mip(), Access::ComputeShaderSampledRead)
+            .bind(bloom.current_mip(), Access::ComputeShaderWrite);
+        let above = Subresource {
+            mips: 0..2,
+            layers: 0..Subresource::REMAINING,
+        };
+        graph
+            .compute_pass("composite", ComputeRecorder::recorder("composite"))
+            .read(bloom.subresource(above), Access::ComputeShaderSampledRead)
+            .side_effects();
+        graph
+            .transfer_pass("save", "save")
+            .read(bloom.mip(2), Access::CopyRead)
+            .side_effects();
+        graph
+            .transfer_pass("clear", "clear")
+            .write(bloom, Access::CopyWrite)
+            .side_effects();
+        for layer in 0..2 {
+            graph
+                .transfer_pass(&format!("cascade {layer}"), "cascade")
+                .write(
+                    shadows.subresource(Subresource::layer(layer)),
+                    Access::CopyWrite,
+                );
+        }
+        graph
+            .compute_pass("shade", ComputeRecorder::recorder("shade"))
+            .read(shadows, Access::ComputeShaderSampledRead)
+            .side_effects();
+
+        let lines = derived(&graph);
+        let clear = lines
+            .iter()
+            .position(|line| line == "pass \"clear\"")
+            .expect("it runs");
+        let shade = lines
+            .iter()
+            .position(|line| line == "pass \"shade\"")
+            .expect("it runs");
+        let read = "ComputeShaderSampledRead";
+        assert_eq!(
+            lines[clear - 2..clear],
+            [
+                format!("  bloom mips 0..2 layers 0..1: {read} -> CopyWrite"),
+                "  bloom mips 2..3 layers 0..1: CopyRead -> CopyWrite".to_owned(),
+            ]
+        );
+        assert_eq!(
+            lines[shade - 1],
+            format!("  shadows mips 0..1 layers 0..2: CopyWrite -> {read}")
+        );
+    }
+
+    /// The barriers of buffers recorded together are combined into one
+    /// global barrier, from every access before them to every access after,
+    /// leaving out an import's start in `Access::None`, which orders
+    /// nothing. Those at the end of the frame are combined too.
+    #[test]
+    fn buffer_barriers_combine_into_a_global_barrier() {
+        let mut graph = GraphDesc::new("global");
+        let lights = graph.transient_buffer("lights", 64);
+        let tiles = graph.transient_buffer("tiles", 64);
+        let readback = graph.import_buffer(
+            "readback",
+            ImportDesc {
+                before: Access::None.into(),
+                after: Access::HostRead.into(),
+            },
+        );
+        graph
+            .transfer_pass("upload", "upload")
+            .write(lights, Access::CopyWrite)
+            .write(readback, Access::CopyWrite);
+        graph
+            .compute_pass("bin", ComputeRecorder::recorder("bin"))
+            .write(tiles, Access::ComputeShaderWrite);
+        graph
+            .compute_pass("light", ComputeRecorder::recorder("light"))
+            .read(lights, Access::ComputeShaderRead)
+            .read(tiles, Access::ComputeShaderRead)
+            .side_effects();
+
+        let lines = [
+            "  all memory: ComputeShaderRead -> CopyWrite",
+            "pass \"upload\"",
+            "  all memory: ComputeShaderRead -> ComputeShaderWrite",
+            "pass \"bin\"",
+            "  all memory: ComputeShaderWrite | CopyWrite -> ComputeShaderRead",
+            "pass \"light\"",
+            "  output mips 0..1 layers 0..1: Acquired -> CopyWrite",
+            "pass \"writes the output\"",
+            "end of frame",
+            "  output mips 0..1 layers 0..1: CopyWrite -> Present",
+            "  all memory: CopyWrite -> HostRead",
+        ];
+        assert_eq!(derived(&graph), lines);
+    }
+
+    /// A barrier from the last frame isn't combined with a neighbour's from
+    /// earlier in the frame, though their transitions match, since in the
+    /// first frame after a compile it starts from `Access::None` instead,
+    /// which would discard what the frame wrote to the neighbour.
+    #[test]
+    fn barriers_from_the_last_frame_stay_apart() {
+        let mut graph = GraphDesc::new("apart");
+        let chain = TransientTexture {
+            mips: MipCount::Count(2),
+            ..texture()
+        };
+        let hdr = graph.transient_texture("hdr", chain);
+        graph
+            .transfer_pass("fill", "fill")
+            .write(hdr.mip(0), Access::CopyWrite);
+        graph
+            .transfer_pass("finish", "finish")
+            .write(hdr, Access::CopyWrite);
+        graph
+            .compute_pass("measure", ComputeRecorder::recorder("measure"))
+            .read(hdr.mip(0), Access::ComputeShaderSampledRead)
+            .side_effects();
+
+        let lines = derived(&graph);
+        let finish = lines
+            .iter()
+            .position(|line| line == "pass \"finish\"")
+            .expect("it runs");
+        assert_eq!(
+            lines[finish - 2..finish],
+            [
+                "  hdr mips 0..1 layers 0..1: CopyWrite -> CopyWrite",
+                "  hdr mips 1..2 layers 0..1: CopyWrite -> CopyWrite (from the last frame)",
+            ]
         );
     }
 }
