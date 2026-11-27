@@ -13,6 +13,7 @@
 //! So far the crate has the description. The compiler and the executor
 //! follow, slice by slice.
 
+mod barriers;
 mod cull;
 mod dependencies;
 mod desc;
