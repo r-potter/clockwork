@@ -22,6 +22,7 @@ mod expand;
 mod grid;
 mod inputs;
 mod pass;
+mod render_passes;
 mod schedule;
 mod validate;
 
