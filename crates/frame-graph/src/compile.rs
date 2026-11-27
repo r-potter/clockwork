@@ -20,7 +20,7 @@ use crate::expand::ExpandedPass;
 use crate::render_passes::{PlannedRenderPass, render_passes};
 use crate::schedule::schedule;
 use crate::validate::{TextureShape, validate};
-use crate::{CompileErrors, CompileInputs, GraphDesc};
+use crate::{CompileErrors, CompileInputs, GraphDesc, OutputDesc};
 
 /// A compiled frame graph: what runs each frame, in order, with every
 /// barrier and render pass worked out. It's plain data, and the same every
@@ -40,6 +40,9 @@ pub struct Plan {
     pub(crate) textures: Vec<Option<TextureShape>>,
     /// Each buffer's name, indexed by `BufferId`.
     pub(crate) buffer_names: Vec<String>,
+    /// The output, with the accesses it's in before the frame and must be
+    /// left in after it.
+    pub(crate) output: OutputDesc,
     /// The description's passes, with each pass repeated for each mip
     /// expanded into its repetitions, culled or not.
     pub(crate) expanded: Vec<ExpandedPass>,
@@ -143,6 +146,7 @@ pub fn compile(desc: &GraphDesc, inputs: &CompileInputs) -> Result<Plan, Compile
             .iter()
             .map(|buffer| buffer.name.clone())
             .collect(),
+        output: inputs.output,
         expanded,
         batches,
         groups,
