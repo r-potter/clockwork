@@ -13,9 +13,9 @@
 //! writes carries them on.
 
 use std::collections::BTreeMap;
-use std::ops::Range;
 
 use crate::expand::ExpandedPass;
+use crate::grid::Grid;
 use crate::pass::Use;
 use crate::{GraphDesc, ResourceUse};
 
@@ -65,7 +65,7 @@ pub(crate) struct Dependencies {
     expect(dead_code, reason = "compiling, in a later pull request, calls it")
 )]
 pub(crate) fn dependencies(desc: &GraphDesc, passes: &[ExpandedPass]) -> Dependencies {
-    let mut textures: Vec<_> = desc.textures.iter().map(|_| Grid::default()).collect();
+    let mut textures: Vec<Grid<Cell>> = desc.textures.iter().map(|_| Grid::default()).collect();
     for used in passes.iter().flat_map(|expanded| &expanded.pass.uses) {
         if let ResourceUse::Texture(part) = &used.resource {
             textures[part.texture.index()].split(&part.subresource.mips, &part.subresource.layers);
@@ -213,55 +213,6 @@ impl Cell {
     }
 }
 
-/// A texture's subresources, split only as finely as its uses need: its
-/// mips at every bound a use's mips have, and its layers likewise, so a
-/// texture whose size the graph doesn't know is split as one it does.
-#[derive(Debug, Clone, Default)]
-struct Grid {
-    /// The bounds the mips are split at, in order.
-    mips: Vec<u32>,
-    /// The bounds the layers are split at, in order.
-    layers: Vec<u32>,
-    /// Each cell's uses, by mip interval then layer interval.
-    cells: Vec<Cell>,
-}
-
-impl Grid {
-    /// Splits the texture at the bounds of `mips` and `layers`.
-    fn split(&mut self, mips: &Range<u32>, layers: &Range<u32>) {
-        self.mips.extend([mips.start, mips.end]);
-        self.layers.extend([layers.start, layers.end]);
-    }
-
-    /// The texture, split at every bound, with nothing used yet.
-    fn finish(mut self) -> Self {
-        for bounds in [&mut self.mips, &mut self.layers] {
-            bounds.sort_unstable();
-            bounds.dedup();
-        }
-        let count = |bounds: &[u32]| bounds.len().saturating_sub(1);
-        self.cells = vec![Cell::default(); count(&self.mips) * count(&self.layers)];
-        self
-    }
-
-    /// The indices of the cells `mips` and `layers` cover, whose bounds are
-    /// among the texture's.
-    fn cells(&self, mips: &Range<u32>, layers: &Range<u32>) -> impl Iterator<Item = usize> {
-        let intervals = |bounds: &[u32], range: &Range<u32>| {
-            let at = |bound| {
-                bounds
-                    .binary_search(&bound)
-                    .expect("the texture is split at every use's bounds")
-            };
-            at(range.start)..at(range.end)
-        };
-        let columns = self.layers.len() - 1;
-        let layers = intervals(&self.layers, layers);
-        intervals(&self.mips, mips)
-            .flat_map(move |mip| layers.clone().map(move |layer| mip * columns + layer))
-    }
-}
-
 impl Dependencies {
     /// Leaves the graph of the passes `kept` keeps, by their indices,
     /// transitively reduced, so it stays small: a pass that isn't kept
@@ -338,6 +289,8 @@ impl Bits {
 #[cfg(test)]
 mod tests {
     //! T0 tests of the dependency graph.
+
+    use std::ops::Range;
 
     use clockwork_rhi::{Access, Extent3d, Format, Subresource};
 
