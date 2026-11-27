@@ -33,6 +33,7 @@ mod random_graphs;
 mod render_passes;
 mod resources;
 mod schedule;
+mod units;
 mod validate;
 
 pub use check::{Hazard, check};
