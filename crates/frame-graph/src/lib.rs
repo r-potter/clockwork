@@ -36,6 +36,7 @@ mod resources;
 mod schedule;
 mod units;
 mod validate;
+mod workers;
 
 pub use check::{Hazard, check};
 pub use compile::{Plan, compile};
@@ -50,3 +51,4 @@ pub use pass::{
     FullscreenPassBuilder, MipDirection, PassId, RasterPassBuilder, RelativeMip, RepeatedUse,
     ResourceUse, TargetMip, TextureUse, TransferPassBuilder,
 };
+pub use workers::{Serial, WorkerPool};
