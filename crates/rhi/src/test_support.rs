@@ -3,7 +3,9 @@
 //! Compiled for the RHI's tests, and for other crates' with the
 //! `test-support` feature, which they enable only in their
 //! `[dev-dependencies]` (ADR 0006). Those get [`backend_options`], so their
-//! T1 tests create backends configured as the RHI's are. The rest, which
+//! T1 tests create backends configured as the RHI's are, and
+//! [`unissued_texture`] and [`unissued_buffer`], so their T0 tests can build
+//! and compare commands that name resources with no device. The rest, which
 //! decides whether a test needs a capability, is only for the RHI's tests.
 //!
 //! This is the only place tests read the environment (design 0001,
@@ -26,7 +28,8 @@ use std::io::{self, Write};
 use anyhow::{Result, bail};
 use clockwork_diagnostics::capture::TestSession;
 
-use crate::{BackendOptions, Validation, ValidationFeatures};
+use crate::handle::Handle;
+use crate::{BackendOptions, Buffer, Texture, Validation, ValidationFeatures};
 
 /// Restricts T1 tests to devices whose names contain its value.
 pub const CLOCKWORK_DEVICE: &str = "CLOCKWORK_DEVICE";
@@ -56,6 +59,21 @@ pub fn backend_options(session: &TestSession) -> BackendOptions {
         device_filter: device_filter(env(CLOCKWORK_DEVICE).as_deref()),
         validation: Validation::Required(features),
     }
+}
+
+/// A texture handle no backend issued, distinct for each `index`, for T0
+/// tests of code that builds commands or descriptions naming textures, such
+/// as a barrier or a render pass, and compares them, without a device.
+/// It never names a live texture, so translating a command that names it
+/// always panics, as for an invalid handle.
+pub fn unissued_texture(index: u32) -> Texture {
+    Texture::from_handle(Handle::unissued(index))
+}
+
+/// A buffer handle no backend issued, distinct for each `index`, as
+/// [`unissued_texture`] is for textures.
+pub fn unissued_buffer(index: u32) -> Buffer {
+    Buffer::from_handle(Handle::unissued(index))
 }
 
 /// The capabilities required by [`CLOCKWORK_REQUIRED_CAPABILITIES`], each of

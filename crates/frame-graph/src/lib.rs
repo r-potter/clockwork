@@ -17,6 +17,7 @@
 
 mod barriers;
 mod check;
+mod commands;
 mod compile;
 mod cull;
 mod dependencies;
