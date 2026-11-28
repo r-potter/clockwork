@@ -33,13 +33,6 @@ use crate::render_passes::PlannedRenderPass;
 /// The RHI handles a frame binds for a plan's resources, by their indices
 /// in the description.
 #[derive(Debug, Clone, Default)]
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "`FrameGraph`, later in `graph-execute`, builds it"
-    )
-)]
 pub(crate) struct Bound {
     /// Each texture's, indexed by `TextureId`, or `None` for one the plan
     /// doesn't use.
@@ -51,13 +44,6 @@ pub(crate) struct Bound {
 
 /// A texture bound for a frame.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "`FrameGraph`, later in `graph-execute`, builds it"
-    )
-)]
 pub(crate) struct BoundTexture {
     /// Its handle.
     pub(crate) texture: Texture,
@@ -71,13 +57,6 @@ pub(crate) struct BoundTexture {
 
 /// A buffer bound for a frame.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "`FrameGraph`, later in `graph-execute`, builds it"
-    )
-)]
 pub(crate) struct BoundBuffer {
     /// Its handle.
     pub(crate) buffer: Buffer,
