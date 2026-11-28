@@ -31,6 +31,7 @@ mod pass;
 mod push_data;
 #[cfg(test)]
 mod random_graphs;
+mod recorders;
 mod recording;
 mod render_passes;
 mod resources;
@@ -52,5 +53,6 @@ pub use pass::{
     FullscreenPassBuilder, MipDirection, PassId, RasterPassBuilder, RelativeMip, RepeatedUse,
     ResourceUse, TargetMip, TextureUse, TransferPassBuilder,
 };
+pub use recorders::{PassContext, Recorders};
 pub use recording::{ComputeCommands, RasterCommands, TransferCommands};
 pub use workers::{Serial, WorkerPool};
